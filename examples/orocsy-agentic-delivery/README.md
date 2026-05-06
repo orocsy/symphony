@@ -19,18 +19,21 @@ to correct business mistakes while still shipping quickly.
 
 ## Package Shape
 
-Use all four layers together:
+Use five layers together:
 
 | Layer | Purpose | Portable? |
 | --- | --- | --- |
 | Skill | Small trigger and workflow router for Codex | Yes |
 | References | Detailed MIU, business correction, browser, review, and Symphony rules loaded only when needed | Yes |
 | Templates | Copyable `AGENTS.md`, Linear issue, MIU execution, and Symphony workflow scaffolds | Yes |
+| CLI | Agent-invoked bootstrap wrapper for new repos | Yes |
+| Template packs | Selectable stack, deployment, and feature profiles | Yes |
 | Project docs | Session learnings and project-specific examples | Reuse as examples, not as defaults |
 
 The skill should live in a Codex skills folder. The references/templates should
-travel with it. Project docs can be copied into a new repo only when they are
-useful as examples.
+travel with it. The CLI and template packs make project bootstrap repeatable.
+Project docs can be copied into a new repo only when they are useful as
+examples.
 
 ## Files
 
@@ -41,6 +44,8 @@ useful as examples.
   `AGENTS.md`, Linear issues, Symphony dispatch, and MIU execution docs.
 - `skills/agentic-delivery-loop/assets/templates/WORKFLOW.concurrent-symphony.template.md`:
   scaffold for a 3-agent, separate-PR Symphony workflow.
+- `cli/agentic_project.py`: dependency-free bootstrap CLI for future agents.
+- `project-templates/`: selectable stack/deploy/feature profiles.
 - `luxebook-session-learnings.md`: session-by-session lessons distilled from
   LuxeBook work.
 
@@ -66,8 +71,21 @@ LuxeBook-specific adjustment:
 
 ## Next Project Bootstrap
 
+Preferred path:
+
+```bash
+python3 cli/agentic_project.py list
+python3 cli/agentic_project.py init --repo /path/to/repo --project-name my-app
+```
+
+The CLI seeds `AGENTS.md`, `PROJECT_STACK.md`, MIU docs, Linear workstream
+docs, and a Symphony workflow. It records selectable stack/deploy profiles but
+does not assume the new project uses LuxeBook's stack.
+
+Manual fallback:
+
 1. Copy `skills/agentic-delivery-loop/` into the next project's `.codex/skills/`
-   or global Codex skills folder.
+   or use the global Codex skills folder.
 2. Start the new project with `assets/templates/AGENTS.next-project.md`.
 3. Fill the business invariant section before the first implementation ticket.
 4. Use `assets/templates/linear-workstream.md` for every feature lane.

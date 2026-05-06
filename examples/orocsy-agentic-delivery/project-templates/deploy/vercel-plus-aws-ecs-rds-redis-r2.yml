@@ -1,0 +1,14 @@
+name: vercel-plus-aws-ecs-rds-redis-r2
+description: "Vercel web apps with AWS-hosted API, RDS, Redis-compatible cache, and S3/R2-compatible media."
+kind: deploy
+defaults:
+  frontend: vercel
+  api: aws-ecs-or-equivalent-container-runtime
+  database: aws-rds-postgres
+  cache: aws-elasticache-or-compatible-redis
+  object_storage: s3-or-r2-compatible
+  ci: github-actions
+agent_notes:
+  - Use only when containerized API deployment is actually needed.
+  - Validate public origins, object storage read paths, migrations, and secret wiring.
+  - Avoid hard-coded account IDs, bucket names, or project-specific URLs in templates.

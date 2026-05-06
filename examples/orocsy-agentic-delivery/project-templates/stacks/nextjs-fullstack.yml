@@ -1,0 +1,20 @@
+name: nextjs-fullstack
+description: "Single Next.js full-stack app with server routes/actions and a managed database."
+kind: stack
+defaults:
+  app:
+    framework: nextjs
+    language: typescript
+    routing: app-router
+  database:
+    primary: postgres
+    client: project-selected
+  cache:
+    primary: optional
+  tests:
+    unit: jest-or-vitest
+    browser_e2e: playwright
+agent_notes:
+  - Prefer for smaller products where one deployable web app is enough.
+  - Decide explicitly whether server actions, route handlers, or a separate API should own mutations.
+  - Keep the design gate and browser evidence requirements for UI work.

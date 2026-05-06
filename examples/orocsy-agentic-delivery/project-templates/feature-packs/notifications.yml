@@ -1,0 +1,12 @@
+name: notifications
+description: "Email, SMS, push, chat, and provider-delivered customer/operator notifications."
+kind: feature-pack
+boundary_focus:
+  - external_provider
+  - user_visible_truth
+  - time_concurrency
+miu_requirements:
+  - Rate limits at edge/API/provider layers.
+  - Idempotent send keys for retryable paths.
+  - Provider failure and fallback behavior.
+  - Tests for no duplicate customer-visible messages.

@@ -60,6 +60,8 @@ or reviewing MIUs.
 - Read `references/review-hardening-loop.md` for PR review comments.
 - Read `references/reusable-package-format.md` when packaging the workflow for
   another project or a Symphony fork.
+- Read `references/project-bootstrap-cli.md` when starting a new project or
+  installing the workflow/templates into an existing repo.
 - Read `references/symphony-fork-workflow.md` when moving the reusable Symphony
   setup into a fork such as `orocsy/symphony`.
 

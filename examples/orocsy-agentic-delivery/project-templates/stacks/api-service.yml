@@ -1,0 +1,19 @@
+name: api-service
+description: "Backend-first service with API, database, worker jobs, and optional admin UI."
+kind: stack
+defaults:
+  backend:
+    framework: project-selected
+    language: project-selected
+    api_style: rest-or-graphql
+  database:
+    primary: project-selected
+  jobs:
+    worker: optional
+    queue: optional
+  tests:
+    unit: project-selected
+    integration: required-for-stateful-boundaries
+agent_notes:
+  - Use when the product is not primarily a web UI.
+  - Define API contracts, idempotency, auth, provider, and durable data boundaries before coding.

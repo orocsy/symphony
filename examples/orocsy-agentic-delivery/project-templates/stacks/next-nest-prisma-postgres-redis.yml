@@ -1,0 +1,25 @@
+name: next-nest-prisma-postgres-redis
+description: "Turborepo SaaS-style web app with Next.js, NestJS, Prisma, Postgres, and Redis."
+kind: stack
+defaults:
+  monorepo: turborepo
+  frontend:
+    framework: nextjs
+    language: typescript
+    ui: tokenized-design-system
+  backend:
+    framework: nestjs
+    language: typescript
+    api_style: rest
+  database:
+    primary: postgres
+    orm: prisma
+  cache:
+    primary: redis
+  tests:
+    unit: jest
+    browser_e2e: playwright
+agent_notes:
+  - Use only when the project needs a separate API service plus web apps.
+  - Discover ownership, actor, money/value, time/concurrency, storage, and provider boundaries before implementation.
+  - Replace any LuxeBook-specific domain assumptions with the new project's actual business invariants.

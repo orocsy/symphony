@@ -1,0 +1,12 @@
+name: local-first
+description: "Local-first development profile for early prototypes before provider choices are fixed."
+kind: deploy
+defaults:
+  app_runtime: local-dev-server
+  database: docker-postgres-or-sqlite
+  cache: docker-redis-or-none
+  object_storage: local-file-or-minio
+  ci: optional
+agent_notes:
+  - Use for fast discovery projects before production topology is chosen.
+  - Record which local-only choices must be replaced before production.

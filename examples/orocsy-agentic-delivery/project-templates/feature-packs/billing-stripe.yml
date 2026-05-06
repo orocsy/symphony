@@ -1,0 +1,12 @@
+name: billing-stripe
+description: "Stripe billing, subscriptions, invoices, webhooks, refunds, and entitlement checks."
+kind: feature-pack
+boundary_focus:
+  - money_value
+  - external_provider
+  - durable_data
+miu_requirements:
+  - Webhook idempotency and replay handling.
+  - Authoritative provider event mapping.
+  - Transactional entitlement updates.
+  - Test mode and production secret separation.

@@ -1,0 +1,13 @@
+name: media-storage
+description: "Uploads, object storage, generated files, cleanup, and browser-loadable media URLs."
+kind: feature-pack
+boundary_focus:
+  - storage_media
+  - durable_data
+  - external_provider
+  - browser_state
+miu_requirements:
+  - Distinguish browser-local File/blob state from durable object URLs.
+  - Compensate object storage writes when database writes fail.
+  - Validate public read URLs and provider credentials.
+  - Browser evidence for upload, preview, persisted render, and delete.

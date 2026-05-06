@@ -1,0 +1,15 @@
+name: vercel-plus-managed-backend
+description: "Managed frontend plus separate managed API/database/cache/storage providers."
+kind: deploy
+defaults:
+  frontend: vercel
+  api: project-selected
+  database: managed-postgres
+  cache: managed-redis
+  object_storage: s3-compatible-or-managed-blob
+  secrets: provider-managed
+  ci: github-actions
+agent_notes:
+  - Keep provider choices replaceable until real product constraints are known.
+  - Generate env validation from chosen providers, not from assumptions.
+  - Add smoke tests for public URL, API health, migrations, and browser media loading.

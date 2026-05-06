@@ -1,0 +1,12 @@
+name: auth
+description: "Authentication, sessions, roles, permissions, and identity boundaries."
+kind: feature-pack
+boundary_focus:
+  - actor
+  - ephemeral_data
+  - user_visible_truth
+miu_requirements:
+  - Session/token lifetime and fallback order.
+  - Enumeration-safe errors.
+  - Role and ownership checks in the backend.
+  - Browser verification for login/logout/protected routes.
