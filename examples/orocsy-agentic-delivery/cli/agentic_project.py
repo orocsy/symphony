@@ -801,6 +801,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    include: ["tests/unit/**/*.test.ts", "tests/unit/**/*.spec.ts", "tests/integration/**/*.test.ts", "tests/integration/**/*.spec.ts"],
     setupFiles: ["./vitest.setup.ts"],
   },
 });
