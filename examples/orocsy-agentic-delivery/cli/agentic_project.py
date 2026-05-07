@@ -111,7 +111,6 @@ ASSET_DEPENDENCIES: dict[str, dict[str, str]] = {
 
 ASSET_DEV_DEPENDENCIES: dict[str, dict[str, str]] = {
     "nextjs-app-router": {
-        "@eslint/eslintrc": "^3.3.5",
         "@testing-library/jest-dom": "^6.9.1",
         "@testing-library/react": "^16.3.2",
         "@types/node": "^22.19.3",
@@ -763,15 +762,10 @@ const nextConfig = {};
 
 export default nextConfig;
 """,
-        Path("eslint.config.mjs"): """import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
+        Path("eslint.config.mjs"): """import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTypescript from "eslint-config-next/typescript";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const compat = new FlatCompat({ baseDirectory: __dirname });
-
-export default [...compat.extends("next/core-web-vitals", "next/typescript")];
+export default [...nextVitals, ...nextTypescript];
 """,
         Path("vitest.config.ts"): """import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
