@@ -7,7 +7,13 @@ new repo without manually copying each file.
 
 ```bash
 python3 cli/agentic_project.py list
+python3 cli/agentic_project.py list-assets
 python3 cli/agentic_project.py init --repo /path/to/repo --project-name my-app
+python3 cli/agentic_project.py evaluate --domain auth --stack nextjs-fullstack
+python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-app \
+  --profile nextjs-fullstack \
+  --asset-pack media-r2-s3-luxebook
+python3 cli/agentic_project.py providers doctor --repo /path/to/repo
 ```
 
 Useful flags:
@@ -24,6 +30,18 @@ Useful flags:
 --force
 ```
 
+Scaffold flags:
+
+```bash
+--profile nextjs-fullstack
+--asset-pack auth-evaluated
+--asset-pack stripe-billing-evaluated
+--asset-pack ci-browser-e2e-luxebook
+--no-default-assets
+--dry-run
+--force
+```
+
 ## Generated Files
 
 - `AGENTS.md`
@@ -35,6 +53,29 @@ Useful flags:
 - `.codex/symphony/start-symphony.sh`
 - optional `.codex/skills/agentic-delivery-loop/`
 
+`scaffold` additionally generates runnable project code and decision memory:
+
+- `package.json`
+- TypeScript, Next.js, ESLint, and Vitest config
+- `src/app/*`
+- `src/lib/env.ts`
+- selected integration helpers such as media, auth, billing, boundaries, and CI
+- `.env.example`
+- `.codex/agentic/ASSET_DECISIONS.yml`
+- `SCAFFOLD_DECISIONS.md`
+- `docs/providers/PROVIDER_SETUP.md`
+
 The CLI records stack/deploy choices but does not lock the project to them.
 Agents must still inspect the repo and fill the business boundary inventory
 before implementation.
+
+## Asset Rule
+
+Do not begin from a blank official starter when a proven asset exists. Prefer:
+
+1. Evaluated free/open-source or official provider SDKs when they are clearly
+   stronger for the domain.
+2. LuxeBook-extracted patterns when they encode hard-won implementation details
+   such as S3/R2 media URLs, provider env validation, browser evidence, tenant
+   safety, or booking concurrency.
+3. Framework-base assets only as the foundation needed to run the app.

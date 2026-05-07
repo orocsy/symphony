@@ -1,0 +1,13 @@
+name: ui-foundation-luxebook
+description: "Reusable LuxeBook UI discipline: tokenized CSS, simple primitives, and browser-verifiable layout without salon branding."
+source: luxebook-extracted
+provides:
+  - tokenized CSS variables
+  - primitive Button and Card components
+  - responsive scaffold page
+depends_on:
+  - nextjs-app-router
+default_decision: "Reuse LuxeBook's token discipline and component shape, but not LuxeBook's brand, palette, or salon-specific components."
+reject_when:
+  - project already has an approved design system
+  - product requires a different native/mobile UI stack

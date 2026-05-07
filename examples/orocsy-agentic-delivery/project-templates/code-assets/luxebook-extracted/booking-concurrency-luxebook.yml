@@ -1,0 +1,10 @@
+name: booking-concurrency-luxebook
+description: "Slot-lock and serializable-write planning helpers extracted from LuxeBook booking consistency work."
+source: luxebook-extracted
+provides:
+  - lock key construction
+  - serializable transaction intent shape
+  - concurrency MIU prompt seed
+default_decision: "Use when scheduling, booking, inventory, or scarce-resource writes can race."
+reject_when:
+  - project has no scarce resource or time-slot concurrency

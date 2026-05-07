@@ -1,0 +1,13 @@
+name: notifications-evaluated
+description: "Notification provider decision pack for email/SMS with rate-limit, idempotency, and provider quota boundaries."
+source: third-party-evaluated
+provides:
+  - notification provider decision prompt
+  - rate-limit boundary notes
+  - idempotent send-key requirement
+default_decision: "Evaluate Resend/Twilio/provider-native options per project; do not create external send paths until quota and abuse controls are designed."
+official_sources:
+  - https://resend.com/docs
+  - https://www.twilio.com/docs
+reject_when:
+  - project has no external customer/operator notifications

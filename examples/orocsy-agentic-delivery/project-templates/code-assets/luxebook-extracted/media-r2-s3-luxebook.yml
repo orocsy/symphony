@@ -1,0 +1,22 @@
+name: media-r2-s3-luxebook
+description: "S3/R2-compatible media storage boundary with durable URL helpers, validation, and provider env checks."
+source: luxebook-extracted
+provides:
+  - S3/R2-compatible object storage
+  - API-hosted media URLs
+  - upload validation
+  - env validation
+depends_on:
+  - env-validation-luxebook
+decision_factors:
+  - maturity: proven in LuxeBook
+  - customization: high
+  - lock_in: low
+  - free_oss: yes
+  - security_surface: bounded by internal media helpers
+default_decision: "Default for uploads because the S3-compatible boundary preserves Cloudflare R2, AWS S3, and local MinIO portability."
+official_sources:
+  - https://developers.cloudflare.com/r2/api/s3/api/
+reject_when:
+  - project uses a hosted CMS/media platform
+  - project has no user-uploaded media

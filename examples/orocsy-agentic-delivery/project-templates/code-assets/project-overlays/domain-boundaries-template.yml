@@ -1,0 +1,10 @@
+name: domain-boundaries-template
+description: "Project overlay seed for ownership, actors, money, storage, provider, concurrency, and customer-visible truth."
+source: project-overlays
+provides:
+  - business boundary checklist
+  - MIU invariant seed
+  - scaffold decision reminder
+default_decision: "Use when project-specific product boundaries are known and should be recorded before implementation."
+reject_when:
+  - requirements are intentionally out of scope for this bootstrap pass

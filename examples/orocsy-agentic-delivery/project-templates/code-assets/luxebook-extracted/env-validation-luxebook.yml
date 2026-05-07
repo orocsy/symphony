@@ -1,0 +1,12 @@
+name: env-validation-luxebook
+description: "Zod-based environment schema pattern extracted from LuxeBook provider setup hardening."
+source: luxebook-extracted
+provides:
+  - typed env parser
+  - optional provider secret placeholders
+  - no-secret tracked .env.example contract
+default_decision: "Use by default because every generated project needs a typed env boundary before provider setup."
+official_sources:
+  - https://zod.dev/
+reject_when:
+  - project already has a stronger typed env system

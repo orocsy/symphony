@@ -1,0 +1,17 @@
+name: nextjs-app-router
+description: "Runnable Next.js TypeScript App Router base with tests, lint, env parsing, and a real first screen."
+source: framework-base
+provides:
+  - Next.js App Router app shell
+  - TypeScript strict config
+  - Vitest unit test setup
+  - ESLint flat config
+  - Responsive first page
+depends_on:
+  - env-validation-luxebook
+default_decision: "Use as the minimal framework foundation when a project selects a Next.js full-stack profile; do not treat it as a blank official starter."
+official_sources:
+  - https://nextjs.org/docs/app
+reject_when:
+  - project is backend-only
+  - project needs a non-Next frontend runtime

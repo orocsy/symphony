@@ -1,0 +1,14 @@
+name: ci-browser-e2e-luxebook
+description: "CI and Playwright smoke-test evidence gate extracted from LuxeBook browser verification practice."
+source: luxebook-extracted
+provides:
+  - GitHub Actions CI skeleton
+  - Playwright config
+  - browser smoke test
+depends_on:
+  - nextjs-app-router
+default_decision: "Use when customer-visible UI exists so browser truth is part of the delivery loop."
+official_sources:
+  - https://playwright.dev/docs/intro
+reject_when:
+  - project has no browser UI

@@ -27,7 +27,8 @@ Use five layers together:
 | References | Detailed MIU, business correction, browser, review, and Symphony rules loaded only when needed | Yes |
 | Templates | Copyable `AGENTS.md`, Linear issue, MIU execution, and Symphony workflow scaffolds | Yes |
 | CLI | Agent-invoked bootstrap wrapper for new repos | Yes |
-| Template packs | Selectable stack, deployment, and feature profiles | Yes |
+| Template packs | Selectable stack, deployment, feature, and code asset profiles | Yes |
+| Code assets | Runnable starter code composed from evaluated framework, LuxeBook, third-party, and project overlay packs | Yes |
 | Project docs | Session learnings and project-specific examples | Reuse as examples, not as defaults |
 
 The skill should live in a Codex skills folder. The references/templates should
@@ -45,7 +46,7 @@ examples.
 - `skills/agentic-delivery-loop/assets/templates/WORKFLOW.concurrent-symphony.template.md`:
   scaffold for a 3-agent, separate-PR Symphony workflow.
 - `cli/agentic_project.py`: dependency-free bootstrap CLI for future agents.
-- `project-templates/`: selectable stack/deploy/feature profiles.
+- `project-templates/`: selectable stack/deploy/feature/code asset profiles.
 - `luxebook-session-learnings.md`: session-by-session lessons distilled from
   LuxeBook work.
 
@@ -76,11 +77,20 @@ Preferred path:
 ```bash
 python3 cli/agentic_project.py list
 python3 cli/agentic_project.py init --repo /path/to/repo --project-name my-app
+python3 cli/agentic_project.py list-assets
+python3 cli/agentic_project.py evaluate --domain auth --stack nextjs-fullstack
+python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-app \
+  --profile nextjs-fullstack \
+  --asset-pack media-r2-s3-luxebook \
+  --asset-pack auth-evaluated
+python3 cli/agentic_project.py providers doctor --repo /path/to/repo
 ```
 
 The CLI seeds `AGENTS.md`, `PROJECT_STACK.md`, MIU docs, Linear workstream
-docs, and a Symphony workflow. It records selectable stack/deploy profiles but
-does not assume the new project uses LuxeBook's stack.
+docs, and a Symphony workflow. The scaffold path then creates runnable code and
+records why each asset was selected or rejected. Official framework starters are
+only a fallback foundation; project code should come from evaluated assets when
+they fit.
 
 Manual fallback:
 

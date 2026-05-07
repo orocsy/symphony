@@ -1,0 +1,10 @@
+name: tenant-boundary-luxebook
+description: "Tenant/workspace ownership helpers and invariant prompts extracted from LuxeBook multi-tenant safety rules."
+source: luxebook-extracted
+provides:
+  - tenant-scoped type helper
+  - cross-tenant guard helper
+  - boundary documentation seed
+default_decision: "Use only when the project has tenants, workspaces, teams, or account-owned data."
+reject_when:
+  - project has no multi-owner data boundary

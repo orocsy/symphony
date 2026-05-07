@@ -1,0 +1,17 @@
+name: auth-evaluated
+description: "Auth decision pack that defaults to Auth.js for OSS/UI control while documenting Clerk and custom-token tradeoffs."
+source: third-party-evaluated
+provides:
+  - Auth.js-compatible route scaffold
+  - auth decision record
+  - session boundary notes
+depends_on:
+  - nextjs-app-router
+  - env-validation-luxebook
+default_decision: "Default to Auth.js for free/open-source and UI customization; choose Clerk only when hosted identity speed is worth lock-in."
+official_sources:
+  - https://authjs.dev/getting-started
+  - https://clerk.com/docs/quickstarts/nextjs
+reject_when:
+  - project must use an existing enterprise IdP SDK
+  - project needs only domain-specific customer magic links and not app login
