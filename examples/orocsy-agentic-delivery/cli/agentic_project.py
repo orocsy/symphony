@@ -89,13 +89,13 @@ DEFAULT_PROFILE_ASSETS: dict[str, tuple[str, ...]] = {
 
 ASSET_DEPENDENCIES: dict[str, dict[str, str]] = {
     "nextjs-app-router": {
-        "next": "latest",
-        "react": "latest",
-        "react-dom": "latest",
-        "zod": "latest",
+        "next": "^16.2.5",
+        "react": "^19.2.6",
+        "react-dom": "^19.2.6",
+        "zod": "^4.4.3",
     },
     "env-validation-luxebook": {
-        "zod": "latest",
+        "zod": "^4.4.3",
     },
     "media-r2-s3-luxebook": {
         "@aws-sdk/client-s3": "latest",
@@ -111,22 +111,21 @@ ASSET_DEPENDENCIES: dict[str, dict[str, str]] = {
 
 ASSET_DEV_DEPENDENCIES: dict[str, dict[str, str]] = {
     "nextjs-app-router": {
-        "@eslint/eslintrc": "latest",
-        "@testing-library/jest-dom": "latest",
-        "@testing-library/react": "latest",
-        "@types/node": "latest",
-        "@types/react": "latest",
-        "@types/react-dom": "latest",
-        "@vitejs/plugin-react": "latest",
-        "eslint": "latest",
-        "eslint-config-next": "latest",
-        "jsdom": "latest",
-        "typescript": "latest",
-        "vite-tsconfig-paths": "latest",
-        "vitest": "latest",
+        "@eslint/eslintrc": "^3.3.5",
+        "@testing-library/jest-dom": "^6.9.1",
+        "@testing-library/react": "^16.3.2",
+        "@types/node": "^22.19.3",
+        "@types/react": "^19.2.14",
+        "@types/react-dom": "^19.2.3",
+        "@vitejs/plugin-react": "^6.0.1",
+        "eslint": "^9.39.1",
+        "eslint-config-next": "^16.2.5",
+        "jsdom": "^29.1.1",
+        "typescript": "^5.9.3",
+        "vitest": "^4.1.5",
     },
     "ci-browser-e2e-luxebook": {
-        "@playwright/test": "latest",
+        "@playwright/test": "^1.57.0",
     },
 }
 
@@ -515,7 +514,7 @@ export const envSchema = z.object({{
 
 export type AppEnv = z.infer<typeof envSchema>;
 
-export function parseEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {{
+export function parseEnv(source: Record<string, string | undefined> = process.env): AppEnv {{
   return envSchema.parse(source);
 }}
 
@@ -775,11 +774,13 @@ const compat = new FlatCompat({ baseDirectory: __dirname });
 export default [...compat.extends("next/core-web-vitals", "next/typescript")];
 """,
         Path("vitest.config.ts"): """import react from "@vitejs/plugin-react";
-import tsconfigPaths from "vite-tsconfig-paths";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [react(), tsconfigPaths()],
+  plugins: [react()],
+  resolve: {
+    tsconfigPaths: true,
+  },
   test: {
     environment: "jsdom",
     globals: true,
