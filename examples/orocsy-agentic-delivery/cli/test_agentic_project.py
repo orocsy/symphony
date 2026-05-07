@@ -78,6 +78,9 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertTrue((repo / "src/lib/billing/webhook.ts").exists())
             self.assertTrue((repo / "playwright.config.ts").exists())
 
+            package = (repo / "package.json").read_text(encoding="utf-8")
+            self.assertNotIn('"latest"', package)
+
             decisions = (repo / "SCAFFOLD_DECISIONS.md").read_text(encoding="utf-8")
             self.assertIn("Rejected alternatives", decisions)
             self.assertIn("Auth.js", decisions)
@@ -89,6 +92,23 @@ class AgenticProjectCliTests(unittest.TestCase):
 
             gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("*.tsbuildinfo", gitignore)
+
+    def test_verify_scaffold_catches_structural_regressions(self) -> None:
+        output = self.run_cli(
+            [
+                "verify-scaffold",
+                "--asset-pack",
+                "media-r2-s3-luxebook",
+                "--asset-pack",
+                "auth-evaluated",
+                "--asset-pack",
+                "stripe-billing-evaluated",
+                "--asset-pack",
+                "ci-browser-e2e-luxebook",
+            ],
+        )
+
+        self.assertIn("Structural scaffold verification passed.", output)
 
     def test_unknown_asset_fails_fast(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

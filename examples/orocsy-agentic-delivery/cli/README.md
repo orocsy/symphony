@@ -13,6 +13,8 @@ python3 cli/agentic_project.py evaluate --domain auth --stack nextjs-fullstack
 python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-app \
   --profile nextjs-fullstack \
   --asset-pack media-r2-s3-luxebook
+python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack
+python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-checks
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
 ```
 
@@ -28,6 +30,16 @@ Useful flags:
 --skill-mode project
 --dry-run
 --force
+```
+
+Verification flags:
+
+```bash
+--asset-pack media-r2-s3-luxebook
+--asset-pack auth-evaluated
+--run-checks
+--package-manager pnpm
+--keep-temp
 ```
 
 Scaffold flags:
@@ -68,6 +80,27 @@ Scaffold flags:
 The CLI records stack/deploy choices but does not lock the project to them.
 Agents must still inspect the repo and fill the business boundary inventory
 before implementation.
+
+## Stability Gate
+
+Run `verify-scaffold` before trusting a bootstrap profile. Without
+`--run-checks`, it generates a temp repo and verifies structure only: required
+files exist, dependency ranges are not `latest`, decision files are present, no
+secret-looking literals are emitted, Next tsconfig defaults are pre-written, and
+generated lint config avoids known flat-config incompatibilities.
+
+With `--run-checks`, it also runs:
+
+```bash
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm lint
+pnpm build
+```
+
+This is the stabilization loop learned from the NutriBuddy validation pass:
+debug once, then move the failure class into the bootstrap gate.
 
 ## Asset Rule
 

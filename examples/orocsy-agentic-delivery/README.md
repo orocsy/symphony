@@ -83,6 +83,7 @@ python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-a
   --profile nextjs-fullstack \
   --asset-pack media-r2-s3-luxebook \
   --asset-pack auth-evaluated
+python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-checks
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
 ```
 
@@ -91,6 +92,11 @@ docs, and a Symphony workflow. The scaffold path then creates runnable code and
 records why each asset was selected or rejected. Official framework starters are
 only a fallback foundation; project code should come from evaluated assets when
 they fit.
+
+Before using a profile for a new project, run `verify-scaffold`. The structural
+gate is dependency-free; `--run-checks` performs the full temp-project install,
+typecheck, test, lint, and build loop so dependency drift is caught in the kit
+instead of inside the next product repo.
 
 Manual fallback:
 

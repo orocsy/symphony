@@ -16,7 +16,9 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -98,13 +100,13 @@ ASSET_DEPENDENCIES: dict[str, dict[str, str]] = {
         "zod": "^4.4.3",
     },
     "media-r2-s3-luxebook": {
-        "@aws-sdk/client-s3": "latest",
+        "@aws-sdk/client-s3": "^3.600.0",
     },
     "auth-evaluated": {
-        "next-auth": "latest",
+        "next-auth": "^5.0.0-beta.30",
     },
     "stripe-billing-evaluated": {
-        "stripe": "latest",
+        "stripe": "^17.5.0",
     },
 }
 
@@ -1637,6 +1639,129 @@ def command_scaffold(args: argparse.Namespace) -> int:
     return 0
 
 
+def assert_file_exists(repo: Path, relative_path: str) -> None:
+    if not (repo / relative_path).exists():
+        raise SystemExit(f"verify-scaffold failed: missing {relative_path}")
+
+
+def assert_no_latest_dependencies(repo: Path) -> None:
+    package = json.loads(read_text(repo / "package.json"))
+    for section in ("dependencies", "devDependencies"):
+        for name, version in package.get(section, {}).items():
+            if version == "latest":
+                raise SystemExit(f"verify-scaffold failed: {section}.{name} uses latest")
+
+
+def assert_no_secret_literals(repo: Path) -> None:
+    secret_patterns = [
+        "sk" + r"_live_[A-Za-z0-9]+",
+        "sk" + r"_test_[A-Za-z0-9]+",
+        "AK" + r"IA[0-9A-Z]{16}",
+        "-----BEGIN " + "PRIVATE KEY-----",
+    ]
+    for relative_path in (".env.example", "SCAFFOLD_DECISIONS.md", ".codex/agentic/ASSET_DECISIONS.yml"):
+        content = read_text(repo / relative_path)
+        for pattern in secret_patterns:
+            if re.search(pattern, content):
+                raise SystemExit(f"verify-scaffold failed: secret-like literal in {relative_path}")
+
+
+def verify_scaffold_structure(repo: Path) -> None:
+    required_files = [
+        "package.json",
+        "next-env.d.ts",
+        "tsconfig.json",
+        "eslint.config.mjs",
+        "vitest.config.ts",
+        ".env.example",
+        ".gitignore",
+        "src/app/page.tsx",
+        "src/lib/env.ts",
+        "tests/unit/env.test.ts",
+        "SCAFFOLD_DECISIONS.md",
+        ".codex/agentic/ASSET_DECISIONS.yml",
+        "docs/providers/PROVIDER_SETUP.md",
+    ]
+    for relative_path in required_files:
+        assert_file_exists(repo, relative_path)
+
+    assert_no_latest_dependencies(repo)
+    assert_no_secret_literals(repo)
+
+    gitignore = read_text(repo / ".gitignore")
+    if "*.tsbuildinfo" not in gitignore:
+        raise SystemExit("verify-scaffold failed: .gitignore must ignore *.tsbuildinfo")
+
+    eslint_config = read_text(repo / "eslint.config.mjs")
+    if "FlatCompat" in eslint_config:
+        raise SystemExit("verify-scaffold failed: generated ESLint config must not use FlatCompat")
+
+    tsconfig = json.loads(read_text(repo / "tsconfig.json"))
+    compiler_options = tsconfig.get("compilerOptions", {})
+    if compiler_options.get("jsx") != "react-jsx":
+        raise SystemExit("verify-scaffold failed: tsconfig jsx should match Next's generated default")
+    if ".next/dev/types/**/*.ts" not in tsconfig.get("include", []):
+        raise SystemExit("verify-scaffold failed: tsconfig missing .next/dev/types include")
+
+    decisions = read_text(repo / "SCAFFOLD_DECISIONS.md")
+    if "Selected Assets" not in decisions or "Next Evaluation Pass" not in decisions:
+        raise SystemExit("verify-scaffold failed: SCAFFOLD_DECISIONS.md missing decision sections")
+
+
+def run_checked(command: list[str], cwd: Path) -> None:
+    print(f"$ {' '.join(command)}")
+    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.returncode != 0:
+        raise SystemExit(f"verify-scaffold failed: {' '.join(command)} exited {result.returncode}")
+
+
+def command_verify_scaffold(args: argparse.Namespace) -> int:
+    paths = package_paths()
+    if not profile_exists(paths.stack_root, args.profile):
+        raise SystemExit(f"Unknown stack/profile: {args.profile}")
+
+    temp_context = tempfile.TemporaryDirectory(prefix="agentic-scaffold-")
+    temp_path = Path(temp_context.name)
+    repo = temp_path / "repo"
+    repo.mkdir(parents=True)
+
+    try:
+        project_name = args.project_name or "Scaffold Verify"
+        project_slug = slugify(project_name)
+        assets = resolve_asset_selection(
+            paths,
+            args.profile,
+            args.asset_pack or [],
+            include_defaults=not args.no_default_assets,
+        )
+        files = scaffold_files(project_name, project_slug, args.profile, assets)
+        write_scaffold_files(repo, files, overwrite=True, dry_run=False)
+        verify_scaffold_structure(repo)
+        print("Structural scaffold verification passed.")
+
+        if args.run_checks:
+            package_manager = args.package_manager
+            if not shutil.which(package_manager):
+                raise SystemExit(f"verify-scaffold failed: package manager not found: {package_manager}")
+            run_checked([package_manager, "install"], repo)
+            for script in ("typecheck", "test", "lint", "build"):
+                run_checked([package_manager, script], repo)
+            print("Runtime scaffold verification passed.")
+
+        if args.keep_temp:
+            print(f"Kept verification repo: {repo}")
+        return 0
+    finally:
+        if args.keep_temp:
+            temp_context._finalizer.detach()
+        else:
+            temp_context.cleanup()
+
+
 def selected_asset_names_from_decisions(repo: Path) -> set[str]:
     decision_file = repo / ".codex" / "agentic" / "ASSET_DECISIONS.yml"
     if not decision_file.exists():
@@ -1760,6 +1885,19 @@ def build_parser() -> argparse.ArgumentParser:
     scaffold_parser.add_argument("--force", action="store_true", help="Overwrite existing generated files.")
     scaffold_parser.add_argument("--dry-run", action="store_true", help="Show operations without writing files.")
     scaffold_parser.set_defaults(func=command_scaffold)
+
+    verify_parser = subparsers.add_parser(
+        "verify-scaffold",
+        help="Generate a temp scaffold and verify it before trusting the bootstrap.",
+    )
+    verify_parser.add_argument("--profile", default="nextjs-fullstack", help="Stack profile for default assets.")
+    verify_parser.add_argument("--project-name", default="Scaffold Verify", help="Human-readable temp project name.")
+    verify_parser.add_argument("--asset-pack", action="append", default=[], help="Code asset pack name. Repeatable.")
+    verify_parser.add_argument("--no-default-assets", action="store_true", help="Do not include profile default assets.")
+    verify_parser.add_argument("--run-checks", action="store_true", help="Install dependencies and run typecheck/test/lint/build in the temp repo.")
+    verify_parser.add_argument("--package-manager", default="pnpm", help="Package manager command for --run-checks.")
+    verify_parser.add_argument("--keep-temp", action="store_true", help="Keep the temp repo for debugging.")
+    verify_parser.set_defaults(func=command_verify_scaffold)
 
     providers_parser = subparsers.add_parser("providers", help="Inspect or plan provider setup.")
     provider_subparsers = providers_parser.add_subparsers(dest="providers_command", required=True)

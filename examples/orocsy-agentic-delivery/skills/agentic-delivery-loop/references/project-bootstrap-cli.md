@@ -47,6 +47,14 @@ python3 examples/orocsy-agentic-delivery/cli/agentic_project.py scaffold \
   --asset-pack media-r2-s3-luxebook \
   --asset-pack auth-evaluated
 
+python3 examples/orocsy-agentic-delivery/cli/agentic_project.py verify-scaffold \
+  --profile nextjs-fullstack \
+  --asset-pack media-r2-s3-luxebook
+
+python3 examples/orocsy-agentic-delivery/cli/agentic_project.py verify-scaffold \
+  --profile nextjs-fullstack \
+  --run-checks
+
 python3 examples/orocsy-agentic-delivery/cli/agentic_project.py providers doctor \
   --repo /path/to/new-repo
 ```
@@ -99,3 +107,12 @@ should compose from:
 Before using an asset that touches auth, payments, storage, external delivery,
 tenant data, or customer-visible truth, check the generated decision file and
 add an MIU trace with code shape, data lifetime, tradeoffs, and tests.
+
+## Stability Gate
+
+Run `verify-scaffold` before applying a profile to a real project. The default
+gate generates a temp repo and checks required files, decision docs, dependency
+ranges, generated env safety, lint config shape, and Next tsconfig defaults.
+Use `--run-checks` when dependencies can be installed; it runs install,
+typecheck, test, lint, and build in the temp repo. If this fails, fix the kit
+first instead of debugging the same scaffold issue in every new project.
