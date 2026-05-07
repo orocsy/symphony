@@ -1,6 +1,6 @@
-# LuxeBook Session Learnings
+# Delivery Session Learnings
 
-This is the reusable learning layer from LuxeBook sessions. It is intentionally
+This is the reusable learning layer from prior delivery sessions. It is intentionally
 written as project-transferable operating knowledge, not as a history log.
 
 ## Session Timeline

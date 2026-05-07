@@ -1,0 +1,13 @@
+name: ui-foundation
+description: "Reusable UI discipline: tokenized CSS, simple primitives, and browser-verifiable layout without project-specific branding."
+source: reusable patterns
+provides:
+  - tokenized CSS variables
+  - primitive Button and Card components
+  - responsive scaffold page
+depends_on:
+  - nextjs-app-router
+default_decision: "Reuse the token discipline and component shape, but not any project-specific brand, palette, or domain components."
+reject_when:
+  - project already has an approved design system
+  - product requires a different native/mobile UI stack

@@ -20,7 +20,7 @@ class AgenticProjectCliTests(unittest.TestCase):
     def test_list_assets_includes_reusable_media_pack(self) -> None:
         output = self.run_cli(["list-assets"])
 
-        self.assertIn("media-r2-s3-luxebook", output)
+        self.assertIn("media-r2-s3", output)
         self.assertIn("third-party-evaluated", output)
 
     def test_evaluate_auth_records_tradeoffs(self) -> None:
@@ -41,7 +41,7 @@ class AgenticProjectCliTests(unittest.TestCase):
                     "--project-name",
                     "Dry Run App",
                     "--asset-pack",
-                    "media-r2-s3-luxebook",
+                    "media-r2-s3",
                     "--dry-run",
                 ],
             )
@@ -60,13 +60,13 @@ class AgenticProjectCliTests(unittest.TestCase):
                     "--project-name",
                     "Asset App",
                     "--asset-pack",
-                    "media-r2-s3-luxebook",
+                    "media-r2-s3",
                     "--asset-pack",
                     "auth-evaluated",
                     "--asset-pack",
                     "stripe-billing-evaluated",
                     "--asset-pack",
-                    "ci-browser-e2e-luxebook",
+                    "ci-browser-e2e",
                 ],
             )
 
@@ -98,13 +98,13 @@ class AgenticProjectCliTests(unittest.TestCase):
             [
                 "verify-scaffold",
                 "--asset-pack",
-                "media-r2-s3-luxebook",
+                "media-r2-s3",
                 "--asset-pack",
                 "auth-evaluated",
                 "--asset-pack",
                 "stripe-billing-evaluated",
                 "--asset-pack",
-                "ci-browser-e2e-luxebook",
+                "ci-browser-e2e",
             ],
         )
 

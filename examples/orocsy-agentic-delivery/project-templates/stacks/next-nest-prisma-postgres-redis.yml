@@ -22,4 +22,4 @@ defaults:
 agent_notes:
   - Use only when the project needs a separate API service plus web apps.
   - Discover ownership, actor, money/value, time/concurrency, storage, and provider boundaries before implementation.
-  - Replace any LuxeBook-specific domain assumptions with the new project's actual business invariants.
+  - Replace any inherited domain assumptions with the new project's actual business invariants.

@@ -22,7 +22,7 @@ boundaries as `N/A` with a reason and add project-specific boundaries.
 | External provider | email, SMS, payment, storage, AI, analytics | What can fail, replay, or be exhausted? |
 | User-visible truth | UI status, receipt, notification, report | What must users see or never infer? |
 
-Compatibility checks from LuxeBook-style products, if applicable:
+Compatibility checks from multi-boundary products, if applicable:
 
 - Tenant boundary:
 - User/customer/admin boundary:

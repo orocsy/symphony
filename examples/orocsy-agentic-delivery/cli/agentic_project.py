@@ -4,8 +4,8 @@
 This CLI is intentionally dependency-free so any future agent can run it from a
 fresh checkout. It installs workflow assets, records stack choices, and can
 compose a runnable starter from evaluated code asset packs. The asset path is
-deliberately not a blank framework starter: it records which reusable LuxeBook
-patterns, third-party integrations, and project overlays were selected.
+deliberately not a blank framework starter: it records which reusable patterns,
+third-party integrations, and project overlays were selected.
 """
 
 from __future__ import annotations
@@ -74,17 +74,17 @@ def package_paths() -> PackagePaths:
 DEFAULT_PROFILE_ASSETS: dict[str, tuple[str, ...]] = {
     "nextjs-fullstack": (
         "nextjs-app-router",
-        "env-validation-luxebook",
-        "ui-foundation-luxebook",
+        "env-validation",
+        "ui-foundation",
     ),
     "next-nest-prisma-postgres-redis": (
         "nextjs-app-router",
-        "env-validation-luxebook",
-        "ui-foundation-luxebook",
-        "tenant-boundary-luxebook",
+        "env-validation",
+        "ui-foundation",
+        "ownership-boundary",
     ),
     "api-service": (
-        "env-validation-luxebook",
+        "env-validation",
     ),
 }
 
@@ -96,10 +96,10 @@ ASSET_DEPENDENCIES: dict[str, dict[str, str]] = {
         "react-dom": "^19.2.6",
         "zod": "^4.4.3",
     },
-    "env-validation-luxebook": {
+    "env-validation": {
         "zod": "^4.4.3",
     },
-    "media-r2-s3-luxebook": {
+    "media-r2-s3": {
         "@aws-sdk/client-s3": "^3.600.0",
     },
     "auth-evaluated": {
@@ -125,7 +125,7 @@ ASSET_DEV_DEPENDENCIES: dict[str, dict[str, str]] = {
         "typescript": "^5.9.3",
         "vitest": "^4.1.5",
     },
-    "ci-browser-e2e-luxebook": {
+    "ci-browser-e2e": {
         "@playwright/test": "^1.57.0",
     },
 }
@@ -470,7 +470,7 @@ def render_package_json(project_slug: str, asset_names: set[str]) -> str:
         "dependencies": dependencies,
         "devDependencies": dev_dependencies,
     }
-    if "ci-browser-e2e-luxebook" in asset_names:
+    if "ci-browser-e2e" in asset_names:
         package["scripts"]["e2e"] = "playwright test"
     return json.dumps(package, indent=2) + "\n"
 
@@ -480,7 +480,7 @@ def render_env(project_name: str, asset_names: set[str]) -> str:
         "  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),",
         f"  NEXT_PUBLIC_APP_NAME: z.string().min(1).default({project_name!r}),",
     ]
-    if "media-r2-s3-luxebook" in asset_names:
+    if "media-r2-s3" in asset_names:
         fields.extend(
             [
                 "  MEDIA_BUCKET: z.string().optional(),",
@@ -537,7 +537,7 @@ def render_env_example(project_name: str, asset_names: set[str]) -> str:
                 "",
             ]
         )
-    if "media-r2-s3-luxebook" in asset_names:
+    if "media-r2-s3" in asset_names:
         lines.extend(
             [
                 "MEDIA_BUCKET=",
@@ -570,16 +570,16 @@ def asset_decision_rejections(asset_name: str) -> list[str]:
     if asset_name == "stripe-billing-evaluated":
         return [
             "Third-party billing wrappers are not the default because Stripe's official SDK plus explicit domain ports keeps webhook and entitlement behavior auditable.",
-            "Copying LuxeBook's salon plan rules is rejected unless the new project has the same SaaS billing model.",
+            "Copying any previous plan rules is rejected unless the new project has the same SaaS billing model.",
         ]
-    if asset_name == "media-r2-s3-luxebook":
+    if asset_name == "media-r2-s3":
         return [
             "Provider-specific blob storage is not the default because the S3-compatible boundary keeps R2/S3/MinIO replaceable.",
             "Browser blob URLs are rejected as durable state; only API/object-storage URLs may be persisted.",
         ]
-    if asset_name == "ui-foundation-luxebook":
+    if asset_name == "ui-foundation":
         return [
-            "LuxeBook salon branding is rejected as a default; only token discipline and primitive structure are reusable.",
+            "Project-specific branding is rejected as a default; only token discipline and primitive structure are reusable.",
         ]
     return []
 
@@ -677,7 +677,7 @@ def render_provider_setup(asset_names: set[str]) -> str:
         "```",
         "",
     ]
-    if "media-r2-s3-luxebook" in asset_names:
+    if "media-r2-s3" in asset_names:
         sections.extend(
             [
                 "## Media Storage",
@@ -710,7 +710,7 @@ def render_provider_setup(asset_names: set[str]) -> str:
                 "",
             ]
         )
-    if "ci-browser-e2e-luxebook" in asset_names:
+    if "ci-browser-e2e" in asset_names:
         sections.extend(
             [
                 "## CI / Browser Evidence",
@@ -1328,17 +1328,17 @@ def scaffold_files(
 ) -> dict[Path, str]:
     asset_names = {asset.name for asset in assets}
     files = base_scaffold_files(project_name, project_slug, asset_names)
-    if "media-r2-s3-luxebook" in asset_names:
+    if "media-r2-s3" in asset_names:
         files.update(media_scaffold_files())
     if "auth-evaluated" in asset_names:
         files.update(auth_scaffold_files())
     if "stripe-billing-evaluated" in asset_names:
         files.update(stripe_scaffold_files())
-    if "tenant-boundary-luxebook" in asset_names:
+    if "ownership-boundary" in asset_names:
         files.update(tenant_scaffold_files())
-    if "booking-concurrency-luxebook" in asset_names:
+    if "scarce-resource-concurrency" in asset_names:
         files.update(booking_concurrency_scaffold_files())
-    if "ci-browser-e2e-luxebook" in asset_names:
+    if "ci-browser-e2e" in asset_names:
         files.update(ci_scaffold_files())
 
     files[Path(".codex/agentic/ASSET_DECISIONS.yml")] = render_asset_decisions_yaml(
@@ -1500,7 +1500,7 @@ EVALUATION_MATRIX: dict[str, dict[str, Any]] = {
         "candidates": [
             "Auth.js: free/open-source, strong UI control, app-owned routes and session decisions.",
             "Clerk: hosted identity, fast social login and org features, but higher lock-in and less deep UI ownership.",
-            "Custom LuxeBook-derived token/OTP: use only for domain-specific customer flows, not generic admin login.",
+            "Custom domain token/OTP: use only for domain-specific customer flows, not generic admin login.",
         ],
         "assets": ["auth-evaluated"],
         "sources": [
@@ -1509,13 +1509,13 @@ EVALUATION_MATRIX: dict[str, dict[str, Any]] = {
         ],
     },
     "media": {
-        "recommendation": "Use media-r2-s3-luxebook when uploads are needed. It keeps Cloudflare R2, S3, and local S3-compatible storage replaceable.",
+        "recommendation": "Use media-r2-s3 when uploads are needed. It keeps Cloudflare R2, S3, and local S3-compatible storage replaceable.",
         "candidates": [
-            "LuxeBook S3/R2-compatible boundary: reusable object adapter, durable URL builder, and validation.",
+            "Reusable S3/R2-compatible boundary: reusable object adapter, durable URL builder, and validation.",
             "Provider-native blob storage: simpler on one platform but weaker portability.",
             "Hosted CMS/media platform: valid when editorial workflows matter more than direct upload ownership.",
         ],
-        "assets": ["media-r2-s3-luxebook"],
+        "assets": ["media-r2-s3"],
         "sources": [
             "https://developers.cloudflare.com/r2/api/s3/api/",
         ],
@@ -1525,7 +1525,7 @@ EVALUATION_MATRIX: dict[str, dict[str, Any]] = {
         "candidates": [
             "Stripe official SDK with Checkout/Customer Portal/Webhooks.",
             "Third-party billing wrappers: faster in narrow cases but can hide entitlement and webhook edge cases.",
-            "Copied LuxeBook plans: reject unless the new project has the same SaaS billing model.",
+            "Copied previous plan rules: reject unless the new project has the same SaaS billing model.",
         ],
         "assets": ["stripe-billing-evaluated"],
         "sources": [
@@ -1534,25 +1534,25 @@ EVALUATION_MATRIX: dict[str, dict[str, Any]] = {
         ],
     },
     "ui": {
-        "recommendation": "Use ui-foundation-luxebook for token discipline and primitives, then replace visual brand through the project DESIGN.md.",
+        "recommendation": "Use ui-foundation for token discipline and primitives, then replace visual brand through the project DESIGN.md.",
         "candidates": [
-            "LuxeBook token discipline and primitive shape.",
+            "Reusable token discipline and primitive shape.",
             "shadcn/ui: strong OSS component base when the project wants Tailwind/Radix conventions.",
             "Fully custom UI: use when brand/product interaction is unusual enough to justify it.",
         ],
-        "assets": ["ui-foundation-luxebook"],
+        "assets": ["ui-foundation"],
         "sources": [
             "https://ui.shadcn.com/",
         ],
     },
     "ci": {
-        "recommendation": "Use ci-browser-e2e-luxebook when UI or customer-visible behavior exists.",
+        "recommendation": "Use ci-browser-e2e when UI or customer-visible behavior exists.",
         "candidates": [
             "Vitest for fast unit checks.",
             "Playwright for browser truth and responsive/customer journey evidence.",
             "Provider preview smoke checks after deployment is selected.",
         ],
-        "assets": ["ci-browser-e2e-luxebook"],
+        "assets": ["ci-browser-e2e"],
         "sources": [
             "https://playwright.dev/docs/intro",
         ],
@@ -1792,7 +1792,7 @@ def command_providers_doctor(args: argparse.Namespace) -> int:
     print()
     print("Secret check: this command only checks variable presence; it never prints values.")
     expected_env = {
-        "media-r2-s3-luxebook": [
+        "media-r2-s3": [
             "MEDIA_BUCKET",
             "MEDIA_ENDPOINT",
             "MEDIA_PUBLIC_BASE_URL",

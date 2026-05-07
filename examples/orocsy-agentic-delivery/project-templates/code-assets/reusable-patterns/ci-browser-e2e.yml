@@ -1,6 +1,6 @@
-name: ci-browser-e2e-luxebook
-description: "CI and Playwright smoke-test evidence gate extracted from LuxeBook browser verification practice."
-source: luxebook-extracted
+name: ci-browser-e2e
+description: "CI and Playwright smoke-test evidence gate extracted from reusable browser verification practice."
+source: reusable patterns
 provides:
   - GitHub Actions CI skeleton
   - Playwright config

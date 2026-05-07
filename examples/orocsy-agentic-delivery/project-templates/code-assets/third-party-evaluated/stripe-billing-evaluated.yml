@@ -1,13 +1,13 @@
 name: stripe-billing-evaluated
-description: "Stripe billing scaffold using the official SDK plus LuxeBook-style webhook and entitlement boundary notes."
+description: "Stripe billing scaffold using the official SDK plus explicit webhook and entitlement boundary notes."
 source: third-party-evaluated
 provides:
   - Stripe client factory
   - webhook signature helper
   - billing projection type seed
 depends_on:
-  - env-validation-luxebook
-default_decision: "Use Stripe's official SDK and hosted surfaces; reuse LuxeBook's idempotency and projection discipline without copying salon-specific plans."
+  - env-validation
+default_decision: "Use Stripe's official SDK and hosted surfaces; reuse explicit idempotency and projection discipline without copying project-specific plans."
 official_sources:
   - https://docs.stripe.com/checkout
   - https://docs.stripe.com/webhooks

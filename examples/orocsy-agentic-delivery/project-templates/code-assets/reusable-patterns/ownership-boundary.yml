@@ -1,6 +1,6 @@
-name: tenant-boundary-luxebook
-description: "Tenant/workspace ownership helpers and invariant prompts extracted from LuxeBook multi-tenant safety rules."
-source: luxebook-extracted
+name: ownership-boundary
+description: "Tenant/workspace ownership helpers and invariant prompts extracted from multi-owner data safety rules."
+source: reusable patterns
 provides:
   - tenant-scoped type helper
   - cross-tenant guard helper

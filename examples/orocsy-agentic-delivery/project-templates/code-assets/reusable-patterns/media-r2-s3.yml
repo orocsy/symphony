@@ -1,15 +1,15 @@
-name: media-r2-s3-luxebook
+name: media-r2-s3
 description: "S3/R2-compatible media storage boundary with durable URL helpers, validation, and provider env checks."
-source: luxebook-extracted
+source: reusable patterns
 provides:
   - S3/R2-compatible object storage
   - API-hosted media URLs
   - upload validation
   - env validation
 depends_on:
-  - env-validation-luxebook
+  - env-validation
 decision_factors:
-  - maturity: proven in LuxeBook
+  - maturity: validated in prior delivery work
   - customization: high
   - lock_in: low
   - free_oss: yes

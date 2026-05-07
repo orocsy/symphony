@@ -48,7 +48,7 @@ examples/orocsy-agentic-delivery/
 
 - Linear API keys.
 - Project `.env` files.
-- LuxeBook workspace caches.
+- project workspace caches.
 - Raw Symphony runtime workspaces.
 - Local agent logs or PID files.
 

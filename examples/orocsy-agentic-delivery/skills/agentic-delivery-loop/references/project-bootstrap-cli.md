@@ -44,12 +44,12 @@ python3 examples/orocsy-agentic-delivery/cli/agentic_project.py scaffold \
   --repo /path/to/new-repo \
   --project-name my-app \
   --profile nextjs-fullstack \
-  --asset-pack media-r2-s3-luxebook \
+  --asset-pack media-r2-s3 \
   --asset-pack auth-evaluated
 
 python3 examples/orocsy-agentic-delivery/cli/agentic_project.py verify-scaffold \
   --profile nextjs-fullstack \
-  --asset-pack media-r2-s3-luxebook
+  --asset-pack media-r2-s3
 
 python3 examples/orocsy-agentic-delivery/cli/agentic_project.py verify-scaffold \
   --profile nextjs-fullstack \
@@ -82,7 +82,7 @@ python3 examples/orocsy-agentic-delivery/cli/agentic_project.py providers doctor
 
 ## Selection Rule
 
-Do not assume LuxeBook's stack. Pick a stack/deploy profile based on the new
+Do not assume any previous stack. Pick a stack/deploy profile based on the new
 project's real product shape:
 
 - `nextjs-fullstack`: one deployable web app is enough.
@@ -98,7 +98,7 @@ Do not generate a blank official starter when a reusable asset fits. The CLI
 should compose from:
 
 - `framework-base`: minimal runnable foundation.
-- `luxebook-extracted`: proven patterns such as media storage, env validation,
+- `reusable patterns`: proven patterns such as media storage, env validation,
   tenant boundaries, booking concurrency, and browser evidence.
 - `third-party-evaluated`: official SDK or mature OSS/provider choices with
   rejection reasons.

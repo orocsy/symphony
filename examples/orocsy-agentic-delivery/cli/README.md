@@ -1,6 +1,6 @@
-# Agentic Project CLI
+# Orocy Delivery OS CLI
 
-`agentic_project.py` wraps the reusable kit so a future agent can bootstrap a
+`agentic_project.py` wraps Orocy Delivery OS so a future agent can bootstrap a
 new repo without manually copying each file.
 
 ## Commands
@@ -12,7 +12,7 @@ python3 cli/agentic_project.py init --repo /path/to/repo --project-name my-app
 python3 cli/agentic_project.py evaluate --domain auth --stack nextjs-fullstack
 python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-app \
   --profile nextjs-fullstack \
-  --asset-pack media-r2-s3-luxebook
+  --asset-pack media-r2-s3
 python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack
 python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-checks
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
@@ -35,7 +35,7 @@ Useful flags:
 Verification flags:
 
 ```bash
---asset-pack media-r2-s3-luxebook
+--asset-pack media-r2-s3
 --asset-pack auth-evaluated
 --run-checks
 --package-manager pnpm
@@ -48,7 +48,7 @@ Scaffold flags:
 --profile nextjs-fullstack
 --asset-pack auth-evaluated
 --asset-pack stripe-billing-evaluated
---asset-pack ci-browser-e2e-luxebook
+--asset-pack ci-browser-e2e
 --no-default-assets
 --dry-run
 --force
@@ -108,7 +108,7 @@ Do not begin from a blank official starter when a proven asset exists. Prefer:
 
 1. Evaluated free/open-source or official provider SDKs when they are clearly
    stronger for the domain.
-2. LuxeBook-extracted patterns when they encode hard-won implementation details
+2. Reusable patterns when they encode hard-won implementation details
    such as S3/R2 media URLs, provider env validation, browser evidence, tenant
    safety, or booking concurrency.
 3. Framework-base assets only as the foundation needed to run the app.

@@ -7,7 +7,7 @@ provides:
   - session boundary notes
 depends_on:
   - nextjs-app-router
-  - env-validation-luxebook
+  - env-validation
 default_decision: "Default to Auth.js for free/open-source and UI customization; choose Clerk only when hosted identity speed is worth lock-in."
 official_sources:
   - https://authjs.dev/getting-started

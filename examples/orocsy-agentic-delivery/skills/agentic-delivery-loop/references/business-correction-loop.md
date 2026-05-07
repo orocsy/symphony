@@ -41,11 +41,11 @@ that are not listed.
 | Browser state | Is any `blob:`, `File`, localStorage, or client-only state being persisted or trusted? |
 | UI action state | Does the backend derive critical action availability, or is the frontend guessing? |
 
-These LuxeBook questions are examples. For a new project, translate them to the
+These questions are examples. For a new project, translate them to the
 equivalent ownership, actor, money/value, time/concurrency, storage, provider,
 and user-visible truth boundaries.
 
-## Patterns From LuxeBook
+## Reusable Patterns
 
 ### Multiple Matching Customers
 

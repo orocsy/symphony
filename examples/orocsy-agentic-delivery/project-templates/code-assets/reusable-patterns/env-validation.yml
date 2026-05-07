@@ -1,6 +1,6 @@
-name: env-validation-luxebook
-description: "Zod-based environment schema pattern extracted from LuxeBook provider setup hardening."
-source: luxebook-extracted
+name: env-validation
+description: "Zod-based environment schema pattern extracted from reusable provider setup hardening."
+source: reusable patterns
 provides:
   - typed env parser
   - optional provider secret placeholders

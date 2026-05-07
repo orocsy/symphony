@@ -38,7 +38,7 @@ agentic-delivery-loop/
 | Templates | Copyable scaffolds for new projects and Linear issues. |
 | CLI | Agent-invoked setup wrapper for project bootstrap. |
 | Template packs | Stack/deploy/feature profiles recorded in each project. |
-| Project examples | Concrete examples from previous projects, kept separate from rules. |
+| Project examples | Concrete examples kept separate from ruless, kept separate from rules. |
 | Symphony fork overlay | Optional place for reusable workflow examples and starter scripts. |
 
 ## Installation Options

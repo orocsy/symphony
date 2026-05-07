@@ -8,7 +8,7 @@ provides:
   - ESLint flat config
   - Responsive first page
 depends_on:
-  - env-validation-luxebook
+  - env-validation
 default_decision: "Use as the minimal framework foundation when a project selects a Next.js full-stack profile; do not treat it as a blank official starter."
 official_sources:
   - https://nextjs.org/docs/app

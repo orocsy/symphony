@@ -1,6 +1,6 @@
-# Agentic Delivery Kit
+# Orocy Delivery OS
 
-This kit extracts reusable delivery patterns from the LuxeBook sessions:
+Orocy Delivery OS packages reusable agent delivery patterns:
 Symphony dispatch, Linear coordination, Technical MIU traces, design gates,
 review hardening, and full browser verification.
 
@@ -28,7 +28,7 @@ Use five layers together:
 | Templates | Copyable `AGENTS.md`, Linear issue, MIU execution, and Symphony workflow scaffolds | Yes |
 | CLI | Agent-invoked bootstrap wrapper for new repos | Yes |
 | Template packs | Selectable stack, deployment, feature, and code asset profiles | Yes |
-| Code assets | Runnable starter code composed from evaluated framework, LuxeBook, third-party, and project overlay packs | Yes |
+| Code assets | Runnable starter code composed from evaluated framework, reusable pattern, third-party, and project overlay packs | Yes |
 | Project docs | Session learnings and project-specific examples | Reuse as examples, not as defaults |
 
 The skill should live in a Codex skills folder. The references/templates should
@@ -45,10 +45,12 @@ examples.
   `AGENTS.md`, Linear issues, Symphony dispatch, and MIU execution docs.
 - `skills/agentic-delivery-loop/assets/templates/WORKFLOW.concurrent-symphony.template.md`:
   scaffold for a 3-agent, separate-PR Symphony workflow.
+- `templates/` and `WORKFLOW.concurrent-symphony.template.md`: top-level copies
+  of the same reusable templates for quick project seeding.
 - `cli/agentic_project.py`: dependency-free bootstrap CLI for future agents.
 - `project-templates/`: selectable stack/deploy/feature/code asset profiles.
-- `luxebook-session-learnings.md`: session-by-session lessons distilled from
-  LuxeBook work.
+- `delivery-session-learnings.md`: session-by-session lessons distilled from
+  reusable delivery work.
 
 ## Inspiration
 
@@ -64,7 +66,7 @@ Useful ideas adapted here:
 - Ask one agent to plan and another to verify only when concurrency is explicit.
 - Fold repeated mistakes back into durable instructions or templates.
 
-LuxeBook-specific adjustment:
+Project-specific adjustment learned from prior delivery work:
 
 - Parallelism is valuable, but only after ownership boundaries are explicit.
 - A bigger `AGENTS.md` is not automatically better. Put high-frequency rules in
@@ -81,7 +83,7 @@ python3 cli/agentic_project.py list-assets
 python3 cli/agentic_project.py evaluate --domain auth --stack nextjs-fullstack
 python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-app \
   --profile nextjs-fullstack \
-  --asset-pack media-r2-s3-luxebook \
+  --asset-pack media-r2-s3 \
   --asset-pack auth-evaluated
 python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-checks
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
@@ -124,5 +126,5 @@ The reusable workflow can live in one of two places:
    workflow templates and docs. This makes Symphony itself a reusable agent
    runner package.
 
-Do not commit project secrets or LuxeBook-specific env files into the Symphony
+Do not commit project secrets or project-specific env files into the Symphony
 fork.

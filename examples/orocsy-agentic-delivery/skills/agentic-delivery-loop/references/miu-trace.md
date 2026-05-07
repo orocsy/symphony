@@ -32,7 +32,7 @@ Values, examples, lifetime, and scope.
 
 | Value | Example | Lifetime | Scope |
 | --- | --- | --- | --- |
-| Customer session cookie | `luxebook_customer_manage_session` | 30 days | browser/httpOnly |
+| Customer session cookie | `customer_manage_session` | 30 days | browser/httpOnly |
 | OTP Redis state | `{ codeHash, attempts, expiresAt }` | 10 minutes | tenant/contact |
 
 ### Technology Constraint
@@ -129,5 +129,5 @@ Always use a Technical MIU for:
 - PR review fixes in any of the areas above.
 - Compacted-session resumes where the next action touches these areas.
 
-For projects without LuxeBook's exact business model, first discover the
+For projects without this exact business model, first discover the
 project's equivalent boundaries and apply the same MIU bar to those.

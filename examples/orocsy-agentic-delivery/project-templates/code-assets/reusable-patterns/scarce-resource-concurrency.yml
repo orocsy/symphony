@@ -1,6 +1,6 @@
-name: booking-concurrency-luxebook
-description: "Slot-lock and serializable-write planning helpers extracted from LuxeBook booking consistency work."
-source: luxebook-extracted
+name: scarce-resource-concurrency
+description: "Slot-lock and serializable-write planning helpers extracted from scarce-resource consistency work."
+source: reusable patterns
 provides:
   - lock key construction
   - serializable transaction intent shape
