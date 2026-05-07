@@ -765,7 +765,21 @@ export default nextConfig;
         Path("eslint.config.mjs"): """import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTypescript from "eslint-config-next/typescript";
 
-export default [...nextVitals, ...nextTypescript];
+const config = [
+  ...nextVitals,
+  ...nextTypescript,
+  {
+    ignores: [
+      "design/**",
+      "Design/**",
+      "*Design/**",
+      "NutribuddyDesign/**",
+      "**/*.html",
+    ],
+  },
+];
+
+export default config;
 """,
         Path("vitest.config.ts"): """import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
