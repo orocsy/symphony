@@ -92,6 +92,7 @@ class AgenticProjectCliTests(unittest.TestCase):
 
             gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("*.tsbuildinfo", gitignore)
+            self.assertIn(".DS_Store", gitignore)
 
     def test_verify_scaffold_catches_structural_regressions(self) -> None:
         output = self.run_cli(

@@ -734,6 +734,7 @@ coverage
 playwright-report
 test-results
 *.tsbuildinfo
+.DS_Store
 .env
 .env.local
 .env.*.local
@@ -1692,6 +1693,8 @@ def verify_scaffold_structure(repo: Path) -> None:
     gitignore = read_text(repo / ".gitignore")
     if "*.tsbuildinfo" not in gitignore:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore *.tsbuildinfo")
+    if ".DS_Store" not in gitignore:
+        raise SystemExit("verify-scaffold failed: .gitignore must ignore .DS_Store")
 
     eslint_config = read_text(repo / "eslint.config.mjs")
     if "FlatCompat" in eslint_config:
