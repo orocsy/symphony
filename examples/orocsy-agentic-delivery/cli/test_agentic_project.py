@@ -71,6 +71,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             )
 
             self.assertTrue((repo / "package.json").exists())
+            self.assertTrue((repo / "next-env.d.ts").exists())
             self.assertTrue((repo / "src/app/page.tsx").exists())
             self.assertTrue((repo / "src/lib/media/object-storage.ts").exists())
             self.assertTrue((repo / "src/app/api/auth/[...nextauth]/route.ts").exists())
@@ -85,6 +86,9 @@ class AgenticProjectCliTests(unittest.TestCase):
             asset_decisions = (repo / ".codex/agentic/ASSET_DECISIONS.yml").read_text(encoding="utf-8")
             self.assertIn("auth-evaluated", asset_decisions)
             self.assertIn("stripe-billing-evaluated", asset_decisions)
+
+            gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn("*.tsbuildinfo", gitignore)
 
     def test_unknown_asset_fails_fast(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
