@@ -1,6 +1,6 @@
-# Orocy Delivery OS CLI
+# Orocsy Delivery OS CLI
 
-`agentic_project.py` wraps Orocy Delivery OS so a future agent can bootstrap a
+`agentic_project.py` wraps Orocsy Delivery OS so a future agent can bootstrap a
 new repo without manually copying each file.
 
 ## Commands

@@ -1,6 +1,6 @@
-# Orocy Delivery OS
+# Orocsy Delivery OS
 
-Orocy Delivery OS packages reusable agent delivery patterns:
+Orocsy Delivery OS packages reusable agent delivery patterns:
 Symphony dispatch, Linear coordination, Technical MIU traces, design gates,
 review hardening, and full browser verification.
 
@@ -51,6 +51,9 @@ examples.
 - `project-templates/`: selectable stack/deploy/feature/code asset profiles.
 - `delivery-session-learnings.md`: session-by-session lessons distilled from
   reusable delivery work.
+- `orocsy-delivery-runtime-architecture.md`: current and target architecture
+  for adding runtime state, gates, observability, evals, and later control-plane
+  behavior.
 
 ## Inspiration
 

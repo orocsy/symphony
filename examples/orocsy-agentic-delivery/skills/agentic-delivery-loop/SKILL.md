@@ -3,9 +3,9 @@ name: agentic-delivery-loop
 description: Use for planning or executing complex product work with MIU traces, business correction, Linear/Symphony coordination, PR review hardening, or full browser E2E verification. Trigger when the user asks for reusable agent workflow, high-quality fast shipping, multi-agent dispatch, workstream splitting, design-to-browser delivery, or review-fix loops.
 ---
 
-# Orocy Delivery OS Skill
+# Orocsy Delivery OS Skill
 
-Use this skill to run Orocy Delivery OS: ship product work quickly without
+Use this skill to run Orocsy Delivery OS: ship product work quickly without
 losing business correctness.
 
 ## Core Loop
