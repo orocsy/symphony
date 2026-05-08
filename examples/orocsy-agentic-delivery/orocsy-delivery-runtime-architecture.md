@@ -1,11 +1,20 @@
 # Orocsy Delivery Runtime Architecture
 
-This note separates the current reusable project factory from the next
-delivery-runtime layer. The key decision is that `agentic_project.py` remains a
-factory and scaffold verifier. Orocsy Delivery Runtime becomes the ongoing
-workflow layer beside it.
+This note defines the corrected architecture for Orocsy Delivery OS.
+
+The important distinction:
+
+- `agentic_project.py` is the project factory and scaffold verifier.
+- Orocsy Runtime is the ongoing delivery governance layer.
+- Symphony is a first-class concurrent execution layer inside the Orocsy
+  delivery system, not a separate side tool.
+- Codex workers do the implementation work, but they must run inside Orocsy
+  policy, gates, state, observability, and correction loops.
 
 ## Current Shape
+
+Today the system works, but too much depends on a human noticing issues and
+feeding corrections back into the agent.
 
 ```mermaid
 flowchart TD
@@ -30,7 +39,7 @@ flowchart TD
 
   User -.manual feedback.-> Codex
 
-  Symphony["Symphony runner"] -.mostly separate.-> Project
+  Symphony["Symphony runner"] -.under-integrated.-> Project
 ```
 
 Current pain:
@@ -46,115 +55,116 @@ flowchart LR
   F["Correction memory"] -.often Markdown only.-> C
   G["Structured run state"] -.missing or weak.-> C
   H["Automatic feedback gate"] -.missing or weak.-> D
+  I["Symphony worker quality"] -.not fully governed.-> C
 ```
 
-This works, but too much depends on a human being present and careful.
+This is semi-automation. The workflow has good rules, but too many rules are
+passive instructions rather than executable gates, structured events, or
+runtime feedback.
 
-## Target Shape
+## Corrected Target Shape
+
+Symphony should be governed by Orocsy, not outside it. Symphony owns concurrent
+execution mechanics; Orocsy owns policy, quality, gates, state, and correction.
 
 ```mermaid
 flowchart TD
-  subgraph Factory["Project Factory Layer"]
-    CLI["agentic_project.py"]
-    Assets["Asset packs"]
-    Templates["Project templates"]
-    ScaffoldEval["Scaffold eval"]
-  end
+  Factory["agentic_project.py<br/>factory / scaffold"]
 
-  subgraph Runtime["Orocsy Delivery Runtime"]
-    Ledger["Run ledger"]
-    Events["events.jsonl"]
-    State["state/current.json"]
-    Gates["Executable gates"]
-    LLMEval["LLM eval rubrics"]
+  subgraph Orocsy["Orocsy Delivery OS"]
+    Runtime["Runtime ledger"]
+    Policy["Workflow policy"]
+    Gates["Deterministic gates"]
+    Eval["LLM eval rubrics"]
+    Observability["Structured events"]
     Steward["Polling steward"]
   end
 
-  subgraph Adapters["Adapters"]
-    CodexAdapter["Codex hook / wrapper adapter"]
-    SymphonyAdapter["Symphony adapter"]
-    GitHubAdapter["GitHub / PR adapter"]
-    LinearAdapter["Linear adapter"]
-    ProviderAdapter["Provider doctor"]
+  subgraph Symphony["Symphony Execution Layer"]
+    Scheduler["Scheduler"]
+    Workspace["Workspace manager"]
+    Lifecycle["Agent lifecycle"]
+    Dispatch["Issue dispatch"]
   end
 
-  subgraph Project["Project repo"]
-    Spec["spec.md"]
-    Plan["plan.md"]
-    Tasks["tasks.md / Linear"]
-    MIU["miu/*.md"]
-    Code["Code"]
-    Evidence["Browser / test evidence"]
+  subgraph Worker["Codex Worker"]
+    Skills["Skills / AGENTS"]
+    MIU["MIU execution"]
+    Tests["Tests / browser evidence"]
+    PR["Commit / PR / handoff"]
   end
 
-  CLI --> Assets
-  CLI --> Templates
-  CLI --> Project
-  CLI --> ScaffoldEval
+  Project["Project repo"]
+  External["GitHub / Linear / providers"]
 
-  CodexAdapter --> Events
-  SymphonyAdapter --> Events
-  GitHubAdapter --> Events
-  LinearAdapter --> Events
-  ProviderAdapter --> Events
+  Factory --> Project
 
-  Events --> Ledger
-  Ledger --> State
-  State --> Steward
+  Policy --> Dispatch
+  Gates --> Dispatch
+  Runtime --> Scheduler
 
+  Scheduler --> Workspace
+  Workspace --> Lifecycle
+  Lifecycle --> Worker
+
+  Skills --> MIU
+  MIU --> Tests
+  Tests --> PR
+
+  Worker --> Observability
+  Symphony --> Observability
+  External --> Observability
+  Observability --> Runtime
+  Runtime --> Steward
   Steward --> Gates
-  Steward --> LLMEval
+  Steward --> Eval
+  Eval --> Gates
+  Gates -->|"pass / block / correction"| Symphony
 
-  Gates --> Project
-  LLMEval --> Project
-
-  Project --> Events
+  Worker --> Project
+  Project --> Observability
+  PR --> External
 ```
 
-## Target Work Loop
+## High-Level Design
 
-```mermaid
-sequenceDiagram
-  participant User
-  participant Codex
-  participant Runtime as Orocsy Runtime
-  participant Project
-  participant Symphony
-  participant GitHub
+Orocsy has five major runtime layers.
 
-  User->>Codex: New task or correction
-  Codex->>Runtime: Lock intent and create run event
-  Runtime->>Project: Update spec / plan / MIU state
+| Layer | Responsibility |
+| --- | --- |
+| Runtime ledger | Durable state for goal, run, MIU, step, tool events, failures, recovery, cost, and evidence. |
+| Gate engine | Deterministic checks plus LLM-judged checks. Blocks unsafe dispatch, commit, push, PR, or handoff. |
+| Symphony integration | Injects Orocsy policy into Symphony dispatch, workers, workspaces, and handoffs. |
+| Eval engine | Evaluates MIU quality, business correction, review handling, browser evidence, and workflow quality. |
+| Steward | Polling, cron, or daemon layer that watches runs and reports stuck, failed, stale, or unsafe state. |
 
-  Codex->>Project: Implement one MIU
-  Project->>Runtime: Tool / test / build / browser events
+Symphony owns:
 
-  Runtime->>Runtime: Run deterministic gates
-  Runtime->>Runtime: Run LLM rubric evals
+- workspace creation
+- concurrent worker lifecycle
+- issue dispatch
+- branch and PR workstreams
+- agent execution mechanics
+- timeout and process-level state
 
-  alt Gate fails
-    Runtime->>Codex: Feed structured failure and recovery hint
-    Codex->>Project: Fix before continuing
-  else Gate passes
-    Codex->>GitHub: Commit / push / PR
-    GitHub->>Runtime: CI and review events
-  end
+Orocsy owns:
 
-  opt Parallel work requested
-    Runtime->>Symphony: Dispatch bounded workstreams
-    Symphony->>Runtime: Workspace / PR / blocker events
-  end
-
-  Runtime->>User: Handoff with state, evidence, blockers
-```
+- whether a workstream is allowed to start
+- what every worker must read
+- what every worker must prove
+- what events and evidence are required
+- whether commit, push, PR, or handoff is allowed
+- when to block, correct, retry, or escalate
+- how user corrections become durable rules, gates, rubrics, or evals
 
 ## Responsibility Split
 
 ```mermaid
 flowchart TD
   Factory["agentic_project.py"]
-  Runtime["Orocsy Runtime"]
-  Symphony["Symphony"]
+  OrocsyRuntime["Orocsy Runtime"]
+  SymphonyLayer["Symphony"]
+  CodexWorker["Codex worker"]
   Control["Control plane later"]
 
   Factory --> F1["Create repo scaffold"]
@@ -162,57 +172,97 @@ flowchart TD
   Factory --> F3["Generate stack/provider docs"]
   Factory --> F4["Verify scaffold output"]
 
-  Runtime --> R1["Track run state"]
-  Runtime --> R2["Record events"]
-  Runtime --> R3["Run gates"]
-  Runtime --> R4["Evaluate MIU/business quality"]
-  Runtime --> R5["Feed failures back to agent"]
+  OrocsyRuntime --> O1["Track run state"]
+  OrocsyRuntime --> O2["Record events"]
+  OrocsyRuntime --> O3["Run gates"]
+  OrocsyRuntime --> O4["Evaluate MIU and business quality"]
+  OrocsyRuntime --> O5["Feed failures back to Symphony/workers"]
 
-  Symphony --> S1["Spawn agents"]
-  Symphony --> S2["Manage workspaces"]
-  Symphony --> S3["Coordinate parallel Linear work"]
+  SymphonyLayer --> S1["Schedule agents"]
+  SymphonyLayer --> S2["Manage workspaces"]
+  SymphonyLayer --> S3["Coordinate parallel Linear work"]
+  SymphonyLayer --> S4["Surface lifecycle status"]
+
+  CodexWorker --> W1["Read skills and AGENTS"]
+  CodexWorker --> W2["Implement one MIU"]
+  CodexWorker --> W3["Run validation"]
+  CodexWorker --> W4["Emit evidence and handoff"]
 
   Control --> C1["Pause / resume / retry"]
   Control --> C2["Budgets / cost"]
   Control --> C3["Provider / production operations"]
 ```
 
-## Markdown, Code, And LLM Judgment
+The clean line: Symphony runs agents. Orocsy governs the agents. Codex workers
+implement. Skills teach worker-local behavior. Gates and the ledger make the
+system observable and self-correcting.
 
-Do not convert every workflow rule into code. The target is a hybrid system.
+## Symphony Integration Model
 
-Use executable checks for deterministic conditions:
+Symphony should not just receive a ticket and code. Each Symphony worker should
+start inside an Orocsy worker contract.
 
-- leaked old project names or asset IDs
-- secrets in tracked files
-- build artifacts staged for commit
-- missing required docs or evidence
-- tests, lint, typecheck, build, or browser checks not run
-- PR review threads unresolved
-- branch and remote state mismatch
-- provider environment variables missing
-- stale run timeout
+```mermaid
+sequenceDiagram
+  participant Linear
+  participant Orocsy
+  participant Symphony
+  participant Worker
+  participant Repo
+  participant GitHub
 
-Use LLM evals for judgment-heavy checks:
+  Linear->>Orocsy: Issue selected
+  Orocsy->>Orocsy: gate dispatch
+  Orocsy->>Symphony: allow dispatch with policy bundle
+  Symphony->>Repo: create isolated workspace
+  Symphony->>Orocsy: workspace.created event
+  Orocsy->>Repo: ensure delivery state exists
+  Symphony->>Worker: start with Orocsy prelude
 
-- MIU quality and technical detail
-- business correction and boundary fit
-- stale versus valid review comments
-- design alignment with the current product
-- provider or stack tradeoffs
-- whether a recovery plan actually addresses the failure
+  Worker->>Repo: read AGENTS / skills / state / issue
+  Worker->>Repo: create or update MIU trace
+  Worker->>Orocsy: run.started event
+  Worker->>Orocsy: pre-change gate
 
-Use hybrid gates when code can gather facts and an LLM should decide the
-verdict. The LLM output should be structured so a gate can pass, fail, or mark
-the run as blocked.
+  Worker->>Repo: implement one MIU
+  Worker->>Orocsy: tool / test / build / browser events
+  Worker->>Orocsy: post-MIU and pre-push gates
 
-## Run Ledger Artifacts
+  alt gate failed
+    Orocsy->>Repo: write correction inbox item
+    Orocsy->>Symphony: block or retry guidance
+    Worker->>Repo: fix before continuing
+  else gate passed
+    Worker->>GitHub: commit / push / PR
+    GitHub->>Orocsy: CI / review events
+    Orocsy->>Linear: update handoff
+  end
+```
 
-A project using Orocsy Delivery Runtime should have durable run state, not only
-free-form status notes.
+Mandatory worker prelude:
+
+```text
+1. Read AGENTS.md.
+2. Load the Orocsy / agentic-delivery-loop skill.
+3. Read .codex/delivery/state/current.json if present.
+4. Read assigned issue, write scope, dependencies, and out-of-scope notes.
+5. Create or update the MIU trace.
+6. Emit run-start event.
+7. Run pre-change gates.
+8. Implement one MIU at a time.
+9. Emit tool, test, build, browser, and decision events.
+10. Run post-MIU, pre-commit, and pre-push gates.
+11. Handoff only after gates pass.
+```
+
+## Low-Level Runtime Design
+
+Project-local runtime state:
 
 ```text
 .codex/delivery/
+  policy.yml
+  gates.yml
   spec.md
   plan.md
   tasks.md
@@ -224,13 +274,38 @@ free-form status notes.
     events.jsonl
   evals/
     miu-quality.json
+    business-correction.json
     browser-evidence.json
     review-hardening.json
+  inbox/
+    correction-*.md
   handoff.md
 ```
 
 The Markdown files remain human-readable. The structured files become the
 source for automation, polling, recovery, and summaries.
+
+Suggested CLI surface:
+
+```bash
+orocsy init
+orocsy run start --issue COD-123
+orocsy event append --type tool.started
+orocsy gate dispatch
+orocsy gate pre-change
+orocsy gate post-miu
+orocsy gate pre-commit
+orocsy gate pre-push
+orocsy eval miu
+orocsy eval business
+orocsy eval browser
+orocsy symphony prepare-workspace
+orocsy symphony monitor
+orocsy report
+```
+
+`agentic_project.py` can install these files and templates, but it should not
+become the long-running runtime brain.
 
 ## Event Shape
 
@@ -262,19 +337,102 @@ failure, recovery, and cost.
 }
 ```
 
-## Runtime Options
+Symphony-level events should also be recorded:
 
-Start conservative.
+```json
+{
+  "ts": "2026-05-09T00:00:00Z",
+  "run_id": "run_...",
+  "issue": "COD-123",
+  "workspace": "~/.codex/symphony-workspaces/project/COD-123",
+  "event": "symphony.worker.blocked",
+  "reason": "pre-push gate failed",
+  "gate": "declared-write-scope",
+  "next_action": "worker must update MIU and remove out-of-scope file edits"
+}
+```
 
-| Option | Capability | Risk | Recommendation |
-| --- | --- | --- | --- |
-| Read-only steward | Polls git, files, PRs, Linear, tests; writes events and state. | Low. | Build first. |
-| Gate steward | Adds pass/fail gates and recovery hints. | Medium. | Build after the ledger works. |
-| Symphony adapter | Observes Symphony workspaces and blockers. | Medium. | Add after gates are stable. |
-| Control plane | Owns pause/resume/retry, budget, provider operations. | High. | Delay. |
+## Gate Types
 
-Symphony should remain the concurrency and worktree runner. Orocsy should
-provide policy, ledgers, gates, evals, and adapters around it.
+Deterministic gates:
+
+- no secret leaks
+- no generated artifacts staged
+- no leaked old project names or asset IDs
+- branch, base branch, and PR target are correct
+- Linear issue has write scope, dependencies, MIUs, validation, and out-of-scope
+- touched files stay inside declared scope
+- tests, lint, typecheck, build, and browser evidence are present when required
+- provider env presence checked without printing secrets
+- remote state and local branch state are understood before push
+
+LLM gates:
+
+- MIU has enough technical depth
+- business boundary is correctly identified
+- rejected alternatives are meaningful
+- review comments are classified correctly
+- UI evidence matches the user-visible flow
+- recovery actually fixes the failure
+- Symphony workstream split is safe and non-overlapping
+
+Hybrid gates:
+
+- code gathers facts
+- LLM returns a structured verdict
+- gate engine passes, fails, or blocks based on the verdict
+
+## Markdown, Code, And LLM Judgment
+
+Do not convert every workflow rule into code. The target is a hybrid system.
+
+Use code for deterministic, repeatable checks. Use LLM judgment for ambiguous
+engineering judgment, business correction, review interpretation, and design
+evaluation. Use small command wrappers where a few lines of shell or Python save
+the agent from re-reading context every time.
+
+Avoid building a large traditional workflow app too early. The first runtime
+should be small, inspectable, file-backed, and easy for agents to operate.
+
+## Auto-Correction Model
+
+Do not jump directly to goal-driven autonomy.
+
+```mermaid
+flowchart LR
+  L1["Level 1<br/>Observe Symphony"]
+  L2["Level 2<br/>Gate Symphony"]
+  L3["Level 3<br/>Correct Symphony"]
+  L4["Level 4<br/>Native control plane"]
+
+  L1 --> L2 --> L3 --> L4
+```
+
+| Level | Meaning | Build now? |
+| --- | --- | --- |
+| Observe | Orocsy polls Symphony workspaces, branches, PRs, logs, tests, and Linear state. | Yes |
+| Gate | Symphony workers must pass Orocsy checks before commit, push, PR, and handoff. | Yes |
+| Correct | Orocsy writes correction inbox items and can block or restart work with guidance. | Soon |
+| Control plane | Orocsy owns pause/resume/retry/budget/provider operations. | Later |
+
+## Runtime State Machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> Scoped
+  Scoped --> DispatchReady
+  DispatchReady --> Running
+  Running --> GateFailed
+  GateFailed --> Running
+  Running --> Blocked
+  Running --> ReadyForReview
+  ReadyForReview --> Done
+  Blocked --> Running
+```
+
+For Symphony, each issue/workspace should have the same state machine. A
+parallel worker should not be allowed to bypass the gates just because it was
+spawned by an automation runner.
 
 ## Eval Split
 
@@ -283,29 +441,32 @@ There are two different eval systems.
 | Eval type | Owner | Purpose |
 | --- | --- | --- |
 | Scaffold eval | `agentic_project.py` | Prove generated starter code is runnable and has clean decisions. |
-| Workflow eval | Orocsy Runtime | Prove ongoing delivery behavior is high quality: MIU, gates, evidence, review handling, and handoff. |
+| Workflow eval | Orocsy Runtime | Prove ongoing delivery behavior is high quality: MIU, gates, evidence, review handling, Symphony safety, and handoff. |
 
 Do not merge these concepts. The factory produces and verifies the initial
-project. The runtime evaluates ongoing delivery work.
+project. The runtime evaluates ongoing delivery work. Symphony uses the runtime
+evals for every concurrent workstream.
 
-## Next Implementation Order
+## Implementation Order
 
 1. Add the run ledger schema: `state/current.json` and `events/events.jsonl`.
-2. Add deterministic hygiene gates: project-name leak, secrets, artifacts, git
-   state, required evidence.
-3. Add LLM rubrics for MIU quality, business correction, and review
-   classification.
-4. Add a read-only polling steward that summarizes what is happening without
-   controlling agents.
-5. Capture user corrections as one of: durable rule, deterministic check, LLM
-   rubric, or regression eval.
-6. Add a Symphony adapter that observes workspaces and issues but does not own
-   scheduling.
-7. Add control-plane behavior only after the ledger and evals catch real
+2. Add deterministic `orocsy gate` commands for leaks, secrets, artifacts, git
+   state, declared scope, and required evidence.
+3. Add worker prelude and Symphony workflow integration so every worker loads
+   Orocsy rules and emits events.
+4. Add read-only `orocsy symphony monitor` for workspaces, branches, PRs, logs,
+   and stale runs.
+5. Add LLM eval rubrics for MIU quality, business correction, review
+   classification, browser evidence, and workstream split safety.
+6. Add correction inbox files under `.codex/delivery/inbox/`.
+7. Add controlled block/retry guidance for Symphony workers.
+8. Delay full control plane behavior until the ledger and evals catch real
    failure modes reliably.
 
 ## Architecture Decision
 
-`agentic_project.py` stays the factory. Orocsy Delivery Runtime becomes the
-ongoing workflow layer. Symphony remains the parallel agent runner. The control
-plane comes later.
+`agentic_project.py` stays the factory. Orocsy Runtime becomes the ongoing
+workflow governance layer. Symphony is the concurrent execution substrate inside
+that governance layer. Codex workers implement one MIU at a time. Skills and
+templates define worker-local behavior. Gates and the ledger make the system
+observable, enforceable, and eventually self-correcting.
