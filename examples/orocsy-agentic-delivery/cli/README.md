@@ -5,6 +5,8 @@ new repo without manually copying each file.
 
 ## Commands
 
+Project factory:
+
 ```bash
 python3 cli/agentic_project.py list
 python3 cli/agentic_project.py list-assets
@@ -16,6 +18,17 @@ python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-a
 python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack
 python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-checks
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
+```
+
+Runtime ledger and deterministic gates:
+
+```bash
+python3 cli/orocsy.py --repo /path/to/repo init --intent "ship feature"
+python3 cli/orocsy.py --repo /path/to/repo run start --issue COD-123
+python3 cli/orocsy.py --repo /path/to/repo event append --type tool.finished --status passed --tool "pnpm test"
+python3 cli/orocsy.py --repo /path/to/repo gate all --json
+python3 cli/orocsy.py --repo /path/to/repo gate declared-scope --scope "src/**"
+python3 cli/orocsy.py --repo /path/to/repo gate required-evidence --evidence-event tool.finished
 ```
 
 Useful flags:

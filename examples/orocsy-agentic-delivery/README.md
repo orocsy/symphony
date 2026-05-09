@@ -48,6 +48,8 @@ examples.
 - `templates/` and `WORKFLOW.concurrent-symphony.template.md`: top-level copies
   of the same reusable templates for quick project seeding.
 - `cli/agentic_project.py`: dependency-free bootstrap CLI for future agents.
+- `cli/orocsy.py`: dependency-free runtime CLI for ledgers and deterministic
+  gates.
 - `project-templates/`: selectable stack/deploy/feature/code asset profiles.
 - `delivery-session-learnings.md`: session-by-session lessons distilled from
   reusable delivery work.
@@ -90,6 +92,8 @@ python3 cli/agentic_project.py scaffold --repo /path/to/repo --project-name my-a
   --asset-pack auth-evaluated
 python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-checks
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
+python3 cli/orocsy.py --repo /path/to/repo init --intent "first MIU"
+python3 cli/orocsy.py --repo /path/to/repo gate all --json
 ```
 
 The CLI seeds `AGENTS.md`, `PROJECT_STACK.md`, MIU docs, Linear workstream

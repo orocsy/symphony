@@ -447,6 +447,32 @@ Do not merge these concepts. The factory produces and verifies the initial
 project. The runtime evaluates ongoing delivery work. Symphony uses the runtime
 evals for every concurrent workstream.
 
+## Success Criteria
+
+The runtime is successful only if it changes the actual delivery outcome, not
+just the documentation.
+
+Minimum proof for the first runtime slice:
+
+- A fresh repo can run `orocsy init` and receive a durable
+  `.codex/delivery/state/current.json` plus `.codex/delivery/events/events.jsonl`.
+- `orocsy run start` and `orocsy event append` update the ledger in a machine
+  readable way without requiring chat memory.
+- `orocsy gate` exits non-zero for deterministic delivery risks: leaked old
+  project names, secret-looking tracked content, staged/generated artifacts,
+  unsafe git state, out-of-scope file edits, and missing required evidence.
+- `orocsy gate` can also emit JSON so Symphony, Codex, cron, or shell wrappers
+  can consume the result without scraping prose.
+- Running the gates in a clean repo does not require network access and does not
+  print secrets.
+- Symphony workers can call the same gates inside isolated workspaces; no
+  parallel workstream bypasses the rules just because it was spawned by an
+  automation runner.
+- User corrections can be translated into one of four durable forms: a
+  deterministic gate, an LLM rubric, a policy entry, or a regression eval.
+
+This is the acceptance bar for implementation order 1 and 2.
+
 ## Implementation Order
 
 1. Add the run ledger schema: `state/current.json` and `events/events.jsonl`.
