@@ -145,16 +145,16 @@ Manual fallback:
 Your local Symphony checkout is fork-first:
 
 - `origin` -> `git@github.com:orocsy/symphony.git`
-- `upstream` -> `https://github.com/openai/symphony`
+- no `upstream` remote by default. Add an upstream OpenAI remote only for an
+  explicit manual sync task, then remove it again before project dispatch.
 
 The reusable workflow can live in one of two places:
 
 1. **Project-local first:** keep workflow templates in the app repo and copy
    them into each project. This is safest while the rules are still evolving.
-2. **Fork overlay next:** add an `examples/orocsy-agentic-delivery/` or
-   `templates/agentic-delivery/` folder to `orocsy/symphony` with the reusable
-   workflow templates and docs. This makes Symphony itself a reusable agent
-   runner package.
+2. **Fork overlay next:** keep `examples/orocsy-agentic-delivery/` in
+   `orocsy/symphony` with the reusable workflow templates and docs. This makes
+   the fork itself the reusable agent runner package.
 
 Do not commit project secrets or project-specific env files into the Symphony
 fork.

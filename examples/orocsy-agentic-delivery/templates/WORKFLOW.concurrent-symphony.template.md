@@ -44,7 +44,11 @@ agent:
   max_turns: 20
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
-  approval_policy: never
+  approval_policy:
+    reject:
+      sandbox_approval: true
+      rules: true
+      mcp_elicitations: true
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite

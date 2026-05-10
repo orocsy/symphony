@@ -155,6 +155,72 @@ def write_text(path: Path, content: str, *, overwrite: bool, dry_run: bool) -> s
     return f"wrote {path}"
 
 
+def next_backup_path(path: Path, suffix: str) -> Path:
+    candidate = path.with_name(f"{path.name}.{suffix}")
+    if not candidate.exists():
+        return candidate
+    index = 1
+    while True:
+        indexed = path.with_name(f"{path.name}.{suffix}.{index}")
+        if not indexed.exists():
+            return indexed
+        index += 1
+
+
+def workflow_uses_orocsy_runtime(content: str) -> bool:
+    required_markers = [
+        "symphony prepare-workspace",
+        "OROCSY_CLI",
+        "gate required-evidence",
+        "symphony guidance",
+    ]
+    return all(marker in content for marker in required_markers) and "approval_policy: never" not in content
+
+
+def write_workflow_text(path: Path, content: str, *, overwrite: bool, dry_run: bool) -> str:
+    if path.exists() and not overwrite:
+        existing = read_text(path)
+        if workflow_uses_orocsy_runtime(existing):
+            return f"skip existing {path}"
+        backup = next_backup_path(path, "legacy")
+        if dry_run:
+            return f"would upgrade legacy workflow {path} and back up to {backup}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, backup)
+        path.write_text(content, encoding="utf-8")
+        return f"upgraded legacy workflow {path} (backup {backup})"
+    return write_text(path, content, overwrite=overwrite, dry_run=dry_run)
+
+
+def start_script_uses_orocsy_runtime(content: str) -> bool:
+    required_markers = [
+        "$HOME/src/orocsy-symphony",
+        "orocsy/symphony",
+        "OROCSY_CLI",
+        "symphony prepare-workspace",
+        "approval_policy: never",
+    ]
+    return all(marker in content for marker in required_markers)
+
+
+def write_start_script_text(path: Path, content: str, *, overwrite: bool, dry_run: bool) -> str:
+    if path.exists() and not overwrite:
+        existing = read_text(path)
+        if start_script_uses_orocsy_runtime(existing):
+            return f"skip existing {path}"
+        backup = next_backup_path(path, "legacy")
+        if dry_run:
+            return f"would upgrade legacy start script {path} and back up to {backup}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, backup)
+        path.write_text(content, encoding="utf-8")
+        make_executable(path, dry_run=False)
+        return f"upgraded legacy start script {path} (backup {backup})"
+    result = write_text(path, content, overwrite=overwrite, dry_run=dry_run)
+    make_executable(path, dry_run=dry_run)
+    return result
+
+
 def copy_tree(src: Path, dst: Path, *, overwrite: bool, dry_run: bool) -> str:
     if dst.exists() and not overwrite:
         return f"skip existing {dst}"
@@ -425,11 +491,58 @@ def render_start_script() -> str:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SYMPHONY_REPO="${SYMPHONY_REPO:-$HOME/src/openai-symphony}"
+SYMPHONY_REPO="${SYMPHONY_REPO:-$HOME/src/orocsy-symphony}"
 WORKFLOW_FILE="$ROOT/.codex/symphony/WORKFLOW.concurrent-symphony.md"
+
+for env_file in "$ROOT/.env.local" "$ROOT/.env"; do
+  if [[ -f "$env_file" ]]; then
+    set -a
+    source "$env_file"
+    set +a
+  fi
+done
 
 if [[ ! -d "$SYMPHONY_REPO/elixir" ]]; then
   echo "Missing Symphony Elixir checkout at $SYMPHONY_REPO/elixir" >&2
+  exit 1
+fi
+
+origin_url="$(git -C "$SYMPHONY_REPO" remote get-url origin 2>/dev/null || true)"
+if [[ "$origin_url" != *"orocsy/symphony"* ]]; then
+  echo "Refusing to run: SYMPHONY_REPO must point at the orocsy/symphony fork, got origin '$origin_url'." >&2
+  exit 1
+fi
+
+if git -C "$SYMPHONY_REPO" remote get-url upstream >/dev/null 2>&1; then
+  echo "Refusing to run: remove the upstream OpenAI Symphony remote from SYMPHONY_REPO to avoid primitive runner drift." >&2
+  exit 1
+fi
+
+OROCSY_CLI="${OROCSY_CLI:-$SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/orocsy.py}"
+if [[ ! -f "$OROCSY_CLI" ]]; then
+  echo "Missing Orocsy runtime CLI at $OROCSY_CLI" >&2
+  exit 1
+fi
+
+if ! grep -q "symphony prepare-workspace" "$WORKFLOW_FILE"; then
+  echo "Refusing to run legacy Symphony workflow: missing Orocsy prepare-workspace hook." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "OROCSY_CLI" "$WORKFLOW_FILE"; then
+  echo "Refusing to run legacy Symphony workflow: missing OROCSY_CLI worker contract." >&2
+  exit 1
+fi
+
+if grep -q "approval_policy: never" "$WORKFLOW_FILE"; then
+  echo "Refusing to run unsafe Symphony workflow: approval_policy must reject MCP elicitations, not use never." >&2
+  exit 1
+fi
+
+linear_token_var="LINEAR""_API""_KEY"
+if [[ -z "${!linear_token_var:-}" ]]; then
+  printf 'Missing %s. Add it to .env.local or export it before starting Symphony.\\n' "$linear_token_var" >&2
   exit 1
 fi
 
@@ -444,9 +557,11 @@ fi
 
 export PROJECT_REPO
 export PROJECT_BASE_BRANCH="${PROJECT_BASE_BRANCH:-main}"
+export OROCSY_CLI
+export SYMPHONY_REPO
 
 cd "$SYMPHONY_REPO/elixir"
-exec mise exec -- ./bin/symphony "$WORKFLOW_FILE"
+exec mise exec -- ./bin/symphony "$WORKFLOW_FILE" --i-understand-that-this-will-be-running-without-the-usual-guardrails
 """
 
 
@@ -738,6 +853,7 @@ test-results
 .env
 .env.local
 .env.*.local
+.codex/symphony/*.legacy*
 """,
         Path("next-env.d.ts"): """/// <reference types="next" />
 /// <reference types="next/image-types/global" />
@@ -1464,7 +1580,7 @@ def command_init(args: argparse.Namespace) -> int:
         )
     )
     operations.append(
-        write_text(
+        write_workflow_text(
             repo / ".codex" / "symphony" / "WORKFLOW.concurrent-symphony.md",
             render_workflow(read_text(workflow_template), project_slug, args.linear_project_slug or ""),
             overwrite=args.force,
@@ -1474,14 +1590,13 @@ def command_init(args: argparse.Namespace) -> int:
 
     start_script = repo / ".codex" / "symphony" / "start-symphony.sh"
     operations.append(
-        write_text(
+        write_start_script_text(
             start_script,
             render_start_script(),
             overwrite=args.force,
             dry_run=args.dry_run,
         )
     )
-    make_executable(start_script, dry_run=args.dry_run)
 
     for operation in operations:
         print(operation)

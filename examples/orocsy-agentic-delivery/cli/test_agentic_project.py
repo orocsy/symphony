@@ -30,6 +30,77 @@ class AgenticProjectCliTests(unittest.TestCase):
         self.assertIn("Clerk", output)
         self.assertIn("auth-evaluated", output)
 
+    def test_init_writes_orocsy_runtime_workflow_and_start_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.run_cli(
+                [
+                    "init",
+                    "--repo",
+                    str(repo),
+                    "--project-name",
+                    "Runtime App",
+                    "--linear-project-slug",
+                    "runtime-app-project",
+                ],
+            )
+
+            workflow = (repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md").read_text(encoding="utf-8")
+            self.assertIn("symphony prepare-workspace", workflow)
+            self.assertIn("OROCSY_CLI", workflow)
+            self.assertIn("mcp_elicitations: true", workflow)
+            self.assertNotIn("approval_policy: never", workflow)
+
+            start_script = (repo / ".codex/symphony/start-symphony.sh").read_text(encoding="utf-8")
+            self.assertIn("$HOME/src/orocsy-symphony", start_script)
+            self.assertIn("orocsy/symphony", start_script)
+            self.assertIn("Refusing to run legacy Symphony workflow", start_script)
+
+    def test_init_upgrades_legacy_symphony_workflow_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            workflow = repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                """---
+tracker:
+  kind: linear
+codex:
+  command: codex app-server
+  approval_policy: never
+---
+Primitive workflow.
+""",
+                encoding="utf-8",
+            )
+            start_script = repo / ".codex/symphony/start-symphony.sh"
+            start_script.write_text(
+                'SYMPHONY_REPO="${SYMPHONY_REPO:-$HOME/src/openai-symphony}"\n',
+                encoding="utf-8",
+            )
+
+            output = self.run_cli(
+                [
+                    "init",
+                    "--repo",
+                    str(repo),
+                    "--project-name",
+                    "Runtime App",
+                    "--linear-project-slug",
+                    "runtime-app-project",
+                ],
+            )
+
+            upgraded_workflow = workflow.read_text(encoding="utf-8")
+            upgraded_start = start_script.read_text(encoding="utf-8")
+            self.assertIn("upgraded legacy workflow", output)
+            self.assertIn("upgraded legacy start script", output)
+            self.assertIn("symphony prepare-workspace", upgraded_workflow)
+            self.assertNotIn("approval_policy: never", upgraded_workflow)
+            self.assertIn("$HOME/src/orocsy-symphony", upgraded_start)
+            self.assertTrue((repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md.legacy").exists())
+            self.assertTrue((repo / ".codex/symphony/start-symphony.sh.legacy").exists())
+
     def test_scaffold_dry_run_does_not_write_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -93,6 +164,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("*.tsbuildinfo", gitignore)
             self.assertIn(".DS_Store", gitignore)
+            self.assertIn(".codex/symphony/*.legacy*", gitignore)
 
     def test_verify_scaffold_catches_structural_regressions(self) -> None:
         output = self.run_cli(
