@@ -38,6 +38,23 @@ hooks:
         --evidence-event gate.post-miu
     else
       echo "Orocsy runtime CLI not found; set OROCSY_CLI or SYMPHONY_REPO before dispatch."
+      exit 1
+    fi
+  before_run: |
+    orocsy_cli="${OROCSY_CLI:-}"
+    if [ -z "$orocsy_cli" ] && [ -n "$SYMPHONY_REPO" ]; then
+      orocsy_cli="$SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/orocsy.py"
+    fi
+    if [ -n "$orocsy_cli" ] && [ -f "$orocsy_cli" ]; then
+      python3 "$orocsy_cli" --repo . symphony prepare-workspace \
+        --issue "{{ issue.identifier }}" \
+        --intent "Symphony issue {{ issue.identifier }}" \
+        --orocsy-cli "$orocsy_cli" \
+        --evidence-event tool.finished \
+        --evidence-event gate.post-miu
+    else
+      echo "Orocsy runtime CLI not found; refusing to run an ungoverned worker."
+      exit 1
     fi
 agent:
   max_concurrent_agents: 3
@@ -108,6 +125,20 @@ Strict dispatch gate:
 4. If dependencies are unfinished, update the workpad with `blocked` and stop.
 5. If this issue's declared write scope overlaps another active issue, update
    the workpad with `blocked-overlap` and stop.
+
+Review hardening trigger:
+
+1. If the issue state is `Rework`, or the issue has an attached open PR with
+   unresolved Codex/human review threads, run the review hardening loop before
+   any new feature work.
+2. Fetch thread-aware PR review comments, not only flat PR comments.
+3. Classify each finding as `accept`, `duplicate`, `stale`, `reject`, or
+   `needs-design`.
+4. Fix only accepted current-code findings inside the issue's write scope.
+5. Add or update focused regression tests for every accepted finding.
+6. Push to the existing PR branch, reply or update the Linear workpad with the
+   classification and validation evidence, request review again, then move the
+   issue back to `Human Review`.
 
 Execution:
 

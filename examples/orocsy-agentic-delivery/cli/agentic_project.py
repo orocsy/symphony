@@ -170,6 +170,7 @@ def next_backup_path(path: Path, suffix: str) -> Path:
 def workflow_uses_orocsy_runtime(content: str) -> bool:
     required_markers = [
         "symphony prepare-workspace",
+        "before_run",
         "OROCSY_CLI",
         "gate required-evidence",
         "symphony guidance",

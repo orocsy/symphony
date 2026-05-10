@@ -47,6 +47,8 @@ class AgenticProjectCliTests(unittest.TestCase):
 
             workflow = (repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md").read_text(encoding="utf-8")
             self.assertIn("symphony prepare-workspace", workflow)
+            self.assertIn("before_run", workflow)
+            self.assertIn("Review hardening trigger", workflow)
             self.assertIn("OROCSY_CLI", workflow)
             self.assertIn("mcp_elicitations: true", workflow)
             self.assertNotIn("approval_policy: never", workflow)
@@ -96,6 +98,8 @@ Primitive workflow.
             self.assertIn("upgraded legacy workflow", output)
             self.assertIn("upgraded legacy start script", output)
             self.assertIn("symphony prepare-workspace", upgraded_workflow)
+            self.assertIn("before_run", upgraded_workflow)
+            self.assertIn("Review hardening trigger", upgraded_workflow)
             self.assertNotIn("approval_policy: never", upgraded_workflow)
             self.assertIn("$HOME/src/orocsy-symphony", upgraded_start)
             self.assertTrue((repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md.legacy").exists())
