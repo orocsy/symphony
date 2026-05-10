@@ -85,7 +85,10 @@ Orocsy worker prelude:
    `python3 "$OROCSY_CLI" --repo . gate required-evidence --strict --record`
 11. Before push, run:
    `python3 "$OROCSY_CLI" --repo . gate all --json`
-12. If any gate fails, write the blocker to `.codex/delivery/inbox/` or the
+12. Before handoff, print the applicable eval rubric and record the verdict:
+   `python3 "$OROCSY_CLI" --repo . eval rubric miu-quality`
+   `python3 "$OROCSY_CLI" --repo . eval record miu-quality --status passed --summary "<why>"`
+13. If any gate or eval fails, write the blocker to `.codex/delivery/inbox/` or the
     Linear workpad and stop until corrected.
 
 Strict dispatch gate:

@@ -72,6 +72,17 @@ class OrocsyRuntimeE2ETests(unittest.TestCase):
                 "--tool",
                 "unit test",
             )
+            self.run_cli(
+                "--repo",
+                str(clean_workspace),
+                "eval",
+                "record",
+                "miu-quality",
+                "--status",
+                "passed",
+                "--summary",
+                "MIU contains runtime scenario, data shape, tradeoffs, and validation.",
+            )
             self.commit_all(clean_workspace, "runtime-ledger")
 
             stale_workspace = self.create_workspace(symphony_root, "COD-102")
@@ -105,7 +116,7 @@ class OrocsyRuntimeE2ETests(unittest.TestCase):
 
             by_issue = {workspace["issue"] or workspace["name"]: workspace for workspace in payload["workspaces"]}
             self.assertEqual(by_issue["COD-101"]["status"], "running")
-            self.assertEqual(by_issue["COD-101"]["events"]["last"]["event"], "tool.finished")
+            self.assertEqual(by_issue["COD-101"]["events"]["last"]["event"], "eval.miu-quality")
             self.assertTrue(by_issue["COD-102"]["stale"])
             self.assertIn("delivery_state_missing", by_issue["COD-103"]["warnings"])
 

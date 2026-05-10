@@ -94,6 +94,8 @@ python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
 python3 cli/orocsy.py --repo /path/to/repo init --intent "first MIU"
 python3 cli/orocsy.py --repo /path/to/repo gate all --json
+python3 cli/orocsy.py eval rubric miu-quality
+python3 cli/orocsy.py --repo /path/to/repo eval record miu-quality --status passed --summary "MIU is complete"
 python3 cli/orocsy.py symphony monitor --root ~/.codex/symphony-workspaces/my-app-concurrent
 ```
 
@@ -113,6 +115,11 @@ steward command. It does not mutate Symphony or project workspaces; it reports
 workspace health, branch state, Orocsy ledger state, last events, and stale
 runs so a future cron or dashboard can decide whether to alert, block, or
 dispatch a correction.
+
+For workflow judgment, use `orocsy.py eval rubric <name>` to load the LLM/human
+rubric and `orocsy.py eval record <name>` to turn the verdict into ledger
+evidence. The first rubrics cover MIU quality, business correction, review
+classification, browser evidence, and workstream split safety.
 
 Manual fallback:
 

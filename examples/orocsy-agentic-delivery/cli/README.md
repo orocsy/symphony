@@ -29,6 +29,9 @@ python3 cli/orocsy.py --repo /path/to/repo event append --type tool.finished --s
 python3 cli/orocsy.py --repo /path/to/repo gate all --json
 python3 cli/orocsy.py --repo /path/to/repo gate declared-scope --scope "src/**"
 python3 cli/orocsy.py --repo /path/to/repo gate required-evidence --evidence-event tool.finished
+python3 cli/orocsy.py eval list
+python3 cli/orocsy.py eval rubric miu-quality
+python3 cli/orocsy.py --repo /path/to/repo eval record miu-quality --status passed --summary "MIU is complete"
 python3 cli/orocsy.py --repo /path/to/repo symphony prepare-workspace --issue COD-123 --scope "src/**"
 python3 cli/orocsy.py symphony monitor --root ~/.codex/symphony-workspaces/my-app-concurrent --json
 ```
@@ -79,6 +82,7 @@ Scaffold flags:
 - `.codex/symphony/WORKFLOW.concurrent-symphony.md`
 - `.codex/symphony/start-symphony.sh`
 - optional `.codex/skills/agentic-delivery-loop/`
+- `.codex/delivery/evals/*.rubric.md` after runtime initialization
 
 `scaffold` additionally generates runnable project code and decision memory:
 

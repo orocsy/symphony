@@ -273,10 +273,11 @@ Project-local runtime state:
   events/
     events.jsonl
   evals/
-    miu-quality.json
-    business-correction.json
-    browser-evidence.json
-    review-hardening.json
+    miu-quality.rubric.md
+    business-correction.rubric.md
+    review-classification.rubric.md
+    browser-evidence.rubric.md
+    workstream-split-safety.rubric.md
   inbox/
     correction-*.md
   handoff.md
@@ -296,9 +297,9 @@ orocsy gate pre-change
 orocsy gate post-miu
 orocsy gate pre-commit
 orocsy gate pre-push
-orocsy eval miu
-orocsy eval business
-orocsy eval browser
+orocsy eval list
+orocsy eval rubric miu-quality
+orocsy eval record miu-quality --status passed --summary "..."
 orocsy symphony prepare-workspace
 orocsy symphony monitor
 orocsy report
@@ -471,10 +472,13 @@ Minimum proof for the first runtime slice:
 - A read-only Symphony monitor can scan a workspace root and report branch/head
   state, dirty worktrees, Orocsy ledger state, event counts, last event, stale
   runs, and missing ledgers without mutating any workspace.
+- LLM/human eval rubrics exist as structured CLI output and generated
+  `.codex/delivery/evals/*.rubric.md` files, and verdicts can be recorded as
+  `eval.<rubric>` ledger events.
 - User corrections can be translated into one of four durable forms: a
   deterministic gate, an LLM rubric, a policy entry, or a regression eval.
 
-This is the acceptance bar for implementation orders 1 through 4.
+This is the acceptance bar for implementation orders 1 through 5.
 
 ## Implementation Order
 

@@ -60,6 +60,109 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("slack-token", re.compile("xo" + r"x[baprs]-[0-9A-Za-z-]{20,}")),
 )
 
+EVAL_RUBRICS: dict[str, dict[str, Any]] = {
+    "miu-quality": {
+        "title": "Technical MIU Quality",
+        "purpose": "Judge whether one implementation unit is concrete enough to execute and review.",
+        "pass_rule": "Pass only when the MIU contains runtime context, code/data detail, tradeoffs, and validation evidence.",
+        "criteria": [
+            "Concrete runtime scenario and user/system action are named.",
+            "Current or target code shape is included when code changes are involved.",
+            "Data shape, lifetime, and boundary scope are explicit.",
+            "Framework, database, browser, or provider constraints are explained.",
+            "Chosen approach and rejected alternatives are technically justified.",
+            "Tests or validation commands are named with expected proof.",
+        ],
+        "output_schema": {
+            "rubric": "miu-quality",
+            "status": "passed|failed|warn",
+            "summary": "one paragraph",
+            "findings": ["specific missing or weak item"],
+            "required_corrections": ["actionable correction"],
+        },
+    },
+    "business-correction": {
+        "title": "Business Boundary Correction",
+        "purpose": "Judge whether the work preserves real business invariants and user-visible truth.",
+        "pass_rule": "Pass only when relevant ownership, actor, value, time, storage, provider, and visible-state boundaries are checked.",
+        "criteria": [
+            "Relevant project-specific boundaries are named; irrelevant inherited boundaries are not forced.",
+            "Actor and permission boundaries match the implemented code path.",
+            "Money, quota, entitlement, or scarce-resource semantics are preserved when present.",
+            "Race, replay, enumeration, brute-force, and provider-exhaustion paths are considered when relevant.",
+            "Durable state is separated from browser-local, process-local, or temporary state.",
+            "Customer-visible messages and UI state match backend truth.",
+        ],
+        "output_schema": {
+            "rubric": "business-correction",
+            "status": "passed|failed|warn",
+            "summary": "one paragraph",
+            "boundary_findings": ["boundary risk or confirmation"],
+            "required_corrections": ["actionable correction"],
+        },
+    },
+    "review-classification": {
+        "title": "Review Comment Classification",
+        "purpose": "Judge whether review feedback was classified and resolved without over-expanding scope.",
+        "pass_rule": "Pass only when valid comments are fixed, stale/duplicate comments are explained, and scope is preserved.",
+        "criteria": [
+            "Every actionable review comment is fetched with thread context.",
+            "Each comment is classified as valid, stale, duplicate, unclear, or out-of-scope.",
+            "Valid findings map to a code/test/documentation change or a clearly recorded reason.",
+            "Unclear findings are escalated instead of guessed.",
+            "The fix stays inside declared scope unless the scope is explicitly updated.",
+            "A re-review or validation command is recorded after fixes.",
+        ],
+        "output_schema": {
+            "rubric": "review-classification",
+            "status": "passed|failed|warn",
+            "summary": "one paragraph",
+            "comments": [{"id": "review/comment id", "classification": "valid|stale|duplicate|unclear|out-of-scope"}],
+            "required_corrections": ["actionable correction"],
+        },
+    },
+    "browser-evidence": {
+        "title": "Browser Evidence Quality",
+        "purpose": "Judge whether UI or customer-visible work was verified in the real browser path.",
+        "pass_rule": "Pass only when evidence proves the intended flow, responsive layout, and failure states that matter.",
+        "criteria": [
+            "The verified route, viewport, locale, and user role are named.",
+            "The browser path covers the user-visible behavior changed by the MIU.",
+            "Screenshots, traces, console status, or explicit observations are linked or recorded.",
+            "Responsive and long-content risks are checked when UI layout changed.",
+            "Error, empty, loading, or permission states are checked when relevant.",
+            "Evidence is recent enough to match the committed code.",
+        ],
+        "output_schema": {
+            "rubric": "browser-evidence",
+            "status": "passed|failed|warn",
+            "summary": "one paragraph",
+            "evidence": ["artifact path, URL, or observation"],
+            "required_corrections": ["actionable correction"],
+        },
+    },
+    "workstream-split-safety": {
+        "title": "Workstream Split Safety",
+        "purpose": "Judge whether parallel Symphony/Linear work can run without unsafe overlap.",
+        "pass_rule": "Pass only when ownership, dependencies, shared files, and handoff contracts are explicit.",
+        "criteria": [
+            "Each workstream has a clear write scope and owner.",
+            "Shared files and cross-workstream contracts are named before dispatch.",
+            "Dependencies and sequencing are explicit enough to prevent blocked agents from guessing.",
+            "Branch and PR policy matches the user's requested workflow.",
+            "Validation responsibilities are assigned without duplicate or missing coverage.",
+            "The split preserves business boundaries and does not create inconsistent user-visible flows.",
+        ],
+        "output_schema": {
+            "rubric": "workstream-split-safety",
+            "status": "passed|failed|warn",
+            "summary": "one paragraph",
+            "overlaps": ["file, module, or business boundary overlap"],
+            "required_corrections": ["actionable correction"],
+        },
+    },
+}
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -185,6 +288,51 @@ def render_list_config(header: str, values: dict[str, list[str]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_eval_rubric_markdown(name: str, rubric: dict[str, Any]) -> str:
+    lines = [
+        f"# {rubric['title']}",
+        "",
+        f"Rubric id: `{name}`",
+        "",
+        "## Purpose",
+        "",
+        str(rubric["purpose"]),
+        "",
+        "## Pass Rule",
+        "",
+        str(rubric["pass_rule"]),
+        "",
+        "## Criteria",
+        "",
+    ]
+    for criterion in rubric["criteria"]:
+        lines.append(f"- {criterion}")
+    lines.extend(
+        [
+            "",
+            "## Required Output Schema",
+            "",
+            "```json",
+            json.dumps(rubric["output_schema"], indent=2, sort_keys=True),
+            "```",
+            "",
+        ],
+    )
+    return "\n".join(lines)
+
+
+def write_eval_rubrics(repo: Path, *, force: bool = False) -> list[Path]:
+    eval_root = delivery_root(repo) / "evals"
+    eval_root.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for name, rubric in EVAL_RUBRICS.items():
+        path = eval_root / f"{name}.rubric.md"
+        if force or not path.exists():
+            write_text(path, render_eval_rubric_markdown(name, rubric))
+            written.append(path)
+    return written
+
+
 def update_runtime_config(
     repo: Path,
     *,
@@ -273,6 +421,8 @@ artifact_patterns:
         path = root / relative_path
         if force or not path.exists():
             write_text(path, content)
+
+    write_eval_rubrics(repo, force=force)
 
     events_path = root / "events" / "events.jsonl"
     events_path.touch(exist_ok=True)
@@ -883,6 +1033,75 @@ def command_gate(args: argparse.Namespace) -> int:
     return 0 if status in {"passed", "warn"} else 1
 
 
+def command_eval_list(args: argparse.Namespace) -> int:
+    payload = {
+        "rubrics": [
+            {
+                "name": name,
+                "title": rubric["title"],
+                "purpose": rubric["purpose"],
+            }
+            for name, rubric in EVAL_RUBRICS.items()
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("Orocsy eval rubrics:")
+        for item in payload["rubrics"]:
+            print(f"- {item['name']}: {item['title']}")
+    return 0
+
+
+def command_eval_rubric(args: argparse.Namespace) -> int:
+    rubric = EVAL_RUBRICS[args.rubric]
+    if args.json:
+        payload = dict(rubric)
+        payload["name"] = args.rubric
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(render_eval_rubric_markdown(args.rubric, rubric))
+    return 0
+
+
+def command_eval_write_rubrics(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    written = write_eval_rubrics(repo, force=args.force)
+    payload = {
+        "eval_root": str(delivery_root(repo) / "evals"),
+        "written": [str(path.relative_to(repo)) for path in written],
+        "rubrics": list(EVAL_RUBRICS),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"eval rubrics available at {payload['eval_root']}")
+        for name in payload["rubrics"]:
+            print(f"- {name}")
+    return 0
+
+
+def command_eval_record(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    event = append_event(
+        repo,
+        {
+            "event": f"eval.{args.rubric}",
+            "phase": "eval",
+            "status": args.status,
+            "rubric": args.rubric,
+            "summary": args.summary,
+            "findings": args.finding or [],
+            "required_corrections": args.required_correction or [],
+        },
+    )
+    if args.json:
+        print(json.dumps(event, indent=2, sort_keys=True))
+    else:
+        print(f"recorded eval {args.rubric}: {args.status}")
+    return 0 if args.status in {"passed", "warn"} else 1
+
+
 def symphony_prelude(issue: str) -> list[str]:
     issue_text = issue or "<issue>"
     return [
@@ -894,6 +1113,7 @@ def symphony_prelude(issue: str) -> list[str]:
         "Run pre-change gates before editing.",
         "Implement one MIU at a time and append tool/test/build/browser events.",
         "Run post-MIU, pre-commit, and pre-push gates before handoff.",
+        "Run or record applicable Orocsy eval rubrics before handoff.",
     ]
 
 
@@ -1037,6 +1257,31 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("--record", action="store_true", help="Append gate result to events.jsonl")
     gate_parser.add_argument("--json", action="store_true", help="Print JSON output")
     gate_parser.set_defaults(func=command_gate)
+
+    eval_parser = subparsers.add_parser("eval", help="LLM/human eval rubric commands")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
+    eval_list_parser = eval_subparsers.add_parser("list", help="List available eval rubrics")
+    eval_list_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    eval_list_parser.set_defaults(func=command_eval_list)
+
+    rubric_parser = eval_subparsers.add_parser("rubric", help="Print one eval rubric")
+    rubric_parser.add_argument("rubric", choices=list(EVAL_RUBRICS))
+    rubric_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    rubric_parser.set_defaults(func=command_eval_rubric)
+
+    write_rubrics_parser = eval_subparsers.add_parser("write-rubrics", help="Write eval rubric files")
+    write_rubrics_parser.add_argument("--force", action="store_true", help="Rewrite existing rubric files")
+    write_rubrics_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    write_rubrics_parser.set_defaults(func=command_eval_write_rubrics)
+
+    record_eval_parser = eval_subparsers.add_parser("record", help="Record an eval verdict")
+    record_eval_parser.add_argument("rubric", choices=list(EVAL_RUBRICS))
+    record_eval_parser.add_argument("--status", required=True, choices=["passed", "failed", "warn"])
+    record_eval_parser.add_argument("--summary", required=True, help="Short eval summary")
+    record_eval_parser.add_argument("--finding", action="append", default=[], help="Specific finding")
+    record_eval_parser.add_argument("--required-correction", action="append", default=[], help="Required correction")
+    record_eval_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    record_eval_parser.set_defaults(func=command_eval_record)
 
     symphony_parser = subparsers.add_parser("symphony", help="Symphony integration commands")
     symphony_subparsers = symphony_parser.add_subparsers(dest="symphony_command", required=True)

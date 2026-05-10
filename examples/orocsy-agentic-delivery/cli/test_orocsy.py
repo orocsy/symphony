@@ -38,6 +38,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             events_path = repo / ".codex/delivery/events/events.jsonl"
             self.assertTrue(state_path.exists())
             self.assertTrue(events_path.exists())
+            self.assertTrue((repo / ".codex/delivery/evals/miu-quality.rubric.md").exists())
 
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["schema_version"], 1)
@@ -147,6 +148,49 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             payload = json.loads(output)
             self.assertIn(payload["status"], {"passed", "warn"})
             self.assertTrue(any(gate["gate"] == "leaks" for gate in payload["gates"]))
+
+    def test_eval_rubric_emits_json_contract(self) -> None:
+        code, output = self.run_cli(["eval", "rubric", "miu-quality", "--json"])
+
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["name"], "miu-quality")
+        self.assertIn("criteria", payload)
+        self.assertIn("output_schema", payload)
+
+    def test_eval_record_appends_structured_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.run_cli(["--repo", str(repo), "init"])
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "eval",
+                    "record",
+                    "business-correction",
+                    "--status",
+                    "failed",
+                    "--summary",
+                    "Boundary check missing.",
+                    "--finding",
+                    "provider quota not checked",
+                    "--required-correction",
+                    "Add rate-limit evidence.",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 1)
+            payload = json.loads(output)
+            self.assertEqual(payload["event"], "eval.business-correction")
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["rubric"], "business-correction")
+            self.assertIn("provider quota not checked", payload["findings"])
+
+            events = (repo / ".codex/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(json.loads(events[-1])["event"], "eval.business-correction")
 
     def test_default_runtime_files_do_not_fail_their_own_leak_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
