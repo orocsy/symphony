@@ -517,6 +517,191 @@ def load_events(repo: Path) -> list[dict[str, Any]]:
     return events
 
 
+def parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def git_stdout(repo: Path, args: list[str]) -> str | None:
+    result = run_git(repo, args)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def git_summary(repo: Path) -> dict[str, Any]:
+    if not is_git_repo(repo):
+        return {
+            "is_git_repo": False,
+            "branch": None,
+            "head": None,
+            "upstream": None,
+            "ahead": None,
+            "behind": None,
+            "dirty_paths": None,
+        }
+
+    upstream = git_stdout(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    ahead: int | None = None
+    behind: int | None = None
+    if upstream:
+        counts = git_stdout(repo, ["rev-list", "--left-right", "--count", f"{upstream}...HEAD"])
+        if counts:
+            parts = counts.split()
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                behind = int(parts[0])
+                ahead = int(parts[1])
+
+    return {
+        "is_git_repo": True,
+        "branch": git_stdout(repo, ["branch", "--show-current"]) or None,
+        "head": git_stdout(repo, ["rev-parse", "--short", "HEAD"]) or None,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty_paths": len(git_status_paths(repo)),
+    }
+
+
+def is_workspace_like(path: Path) -> bool:
+    return is_git_repo(path) or current_state_path(path).exists()
+
+
+def workspace_candidates(root: Path, *, include_empty: bool) -> list[Path]:
+    if is_workspace_like(root):
+        return [root]
+
+    candidates: list[Path] = []
+    for child in sorted(root.iterdir(), key=lambda path: path.name):
+        if not child.is_dir() or child.name in DEFAULT_EXCLUDED_DIRS:
+            continue
+        if is_workspace_like(child):
+            candidates.append(child)
+            continue
+
+        nested = [
+            grandchild
+            for grandchild in sorted(child.iterdir(), key=lambda path: path.name)
+            if grandchild.is_dir()
+            and grandchild.name not in DEFAULT_EXCLUDED_DIRS
+            and is_workspace_like(grandchild)
+        ]
+        candidates.extend(nested)
+        if include_empty and not nested:
+            candidates.append(child)
+    return candidates
+
+
+def load_current_state(repo: Path) -> tuple[dict[str, Any] | None, str | None]:
+    path = current_state_path(repo)
+    if not path.exists():
+        return None, "delivery_state_missing"
+    try:
+        return json.loads(read_text(path)), None
+    except json.JSONDecodeError as error:
+        return None, f"delivery_state_invalid:{error.lineno}:{error.colno}"
+
+
+def workspace_monitor_snapshot(workspace: Path, *, checked_at: datetime, stale_minutes: int) -> dict[str, Any]:
+    state, state_error = load_current_state(workspace)
+    events = load_events(workspace)
+    last_event = events[-1] if events else None
+    git = git_summary(workspace)
+
+    warnings: list[str] = []
+    if state_error:
+        warnings.append(state_error)
+    if git["is_git_repo"] is False:
+        warnings.append("not_git_repo")
+    if git["dirty_paths"]:
+        warnings.append(f"dirty_worktree:{git['dirty_paths']}")
+    if any(event.get("event") == "invalid-json-line" for event in events):
+        warnings.append("events_invalid_json")
+
+    updated_at = None
+    if state:
+        updated_at = state.get("updated_at")
+    if not updated_at and last_event:
+        updated_at = last_event.get("ts")
+
+    parsed_updated_at = parse_timestamp(updated_at)
+    age_seconds = None
+    stale = False
+    if parsed_updated_at:
+        age_seconds = max(0, int((checked_at - parsed_updated_at).total_seconds()))
+        stale = age_seconds > stale_minutes * 60
+        if stale:
+            warnings.append(f"stale:{age_seconds}s")
+    elif state or last_event:
+        warnings.append("updated_at_unparseable")
+
+    return {
+        "name": workspace.name,
+        "path": str(workspace),
+        "issue": state.get("issue") if state else None,
+        "intent": state.get("intent") if state else None,
+        "run_id": state.get("run_id") if state else None,
+        "status": state.get("status") if state else None,
+        "phase": state.get("phase") if state else None,
+        "updated_at": updated_at,
+        "age_seconds": age_seconds,
+        "stale": stale,
+        "git": git,
+        "events": {
+            "count": len(events),
+            "last": last_event,
+        },
+        "pull_request": (state or {}).get("pull_request") or (state or {}).get("pr_url"),
+        "warnings": warnings,
+    }
+
+
+def monitor_status(workspaces: list[dict[str, Any]], *, strict: bool) -> str:
+    if any(workspace["warnings"] for workspace in workspaces):
+        return "failed" if strict else "warn"
+    return "passed"
+
+
+def emit_monitor_output(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    print(f"Orocsy Symphony monitor: {payload['status']}")
+    print(f"root: {payload['root']}")
+    print(f"workspaces: {payload['summary']['count']}")
+    for workspace in payload["workspaces"]:
+        git = workspace["git"]
+        branch = git.get("branch") or "detached/no-branch"
+        dirty = git.get("dirty_paths")
+        dirty_text = "unknown" if dirty is None else str(dirty)
+        stale_text = " stale" if workspace["stale"] else ""
+        print(
+            f"- {workspace['name']}: {workspace.get('status') or 'unknown'}"
+            f" issue={workspace.get('issue') or '-'} branch={branch}"
+            f" dirty={dirty_text} events={workspace['events']['count']}{stale_text}"
+        )
+        if workspace.get("updated_at"):
+            print(f"  updated_at: {workspace['updated_at']}")
+        last_event = workspace["events"].get("last")
+        if last_event:
+            event_name = last_event.get("event") or last_event.get("type") or "unknown"
+            event_status = last_event.get("status") or "info"
+            print(f"  last_event: {event_name} ({event_status})")
+        for warning in workspace["warnings"]:
+            print(f"  warning: {warning}")
+
+
 def gate_required_evidence(repo: Path, config: dict[str, list[str]], args: argparse.Namespace) -> GateResult:
     required_files = list(config.get("required_evidence_files", []))
     required_events = list(config.get("required_event_types", []))
@@ -760,6 +945,50 @@ def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_symphony_monitor(args: argparse.Namespace) -> int:
+    root = repo_path(args.root)
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0)
+    if not root.exists() or not root.is_dir():
+        payload = {
+            "status": "failed",
+            "checked_at": checked_at.isoformat().replace("+00:00", "Z"),
+            "root": str(root),
+            "error": "workspace_root_missing",
+            "workspaces": [],
+            "summary": {
+                "count": 0,
+                "stale": 0,
+                "dirty": 0,
+                "missing_delivery_state": 0,
+            },
+        }
+        emit_monitor_output(payload, json_output=args.json)
+        return 1
+
+    workspaces = [
+        workspace_monitor_snapshot(candidate, checked_at=checked_at, stale_minutes=args.stale_minutes)
+        for candidate in workspace_candidates(root, include_empty=args.include_empty)
+    ]
+    status = monitor_status(workspaces, strict=args.strict)
+    payload = {
+        "status": status,
+        "checked_at": checked_at.isoformat().replace("+00:00", "Z"),
+        "root": str(root),
+        "stale_minutes": args.stale_minutes,
+        "workspaces": workspaces,
+        "summary": {
+            "count": len(workspaces),
+            "stale": sum(1 for workspace in workspaces if workspace["stale"]),
+            "dirty": sum(1 for workspace in workspaces if workspace["git"].get("dirty_paths")),
+            "missing_delivery_state": sum(
+                1 for workspace in workspaces if "delivery_state_missing" in workspace["warnings"]
+            ),
+        },
+    }
+    emit_monitor_output(payload, json_output=args.json)
+    return 0 if status in {"passed", "warn"} else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Orocsy Delivery Runtime CLI")
     parser.add_argument("--repo", default=".", help="Project repo path")
@@ -823,6 +1052,21 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--forbid", action="append", default=[], help="Project-specific forbidden term")
     prepare_parser.add_argument("--json", action="store_true", help="Print JSON output")
     prepare_parser.set_defaults(func=command_symphony_prepare_workspace)
+
+    monitor_parser = symphony_subparsers.add_parser(
+        "monitor",
+        help="Read-only snapshot of Symphony workspaces and Orocsy runtime state",
+    )
+    monitor_parser.add_argument(
+        "--root",
+        default="~/.codex/symphony-workspaces",
+        help="Symphony workspace root or one workspace path",
+    )
+    monitor_parser.add_argument("--stale-minutes", type=int, default=30, help="Minutes before a run is stale")
+    monitor_parser.add_argument("--include-empty", action="store_true", help="Include child directories without git/runtime state")
+    monitor_parser.add_argument("--strict", action="store_true", help="Return failure when warnings are present")
+    monitor_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    monitor_parser.set_defaults(func=command_symphony_monitor)
 
     return parser
 

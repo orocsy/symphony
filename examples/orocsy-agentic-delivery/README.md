@@ -94,6 +94,7 @@ python3 cli/agentic_project.py verify-scaffold --profile nextjs-fullstack --run-
 python3 cli/agentic_project.py providers doctor --repo /path/to/repo
 python3 cli/orocsy.py --repo /path/to/repo init --intent "first MIU"
 python3 cli/orocsy.py --repo /path/to/repo gate all --json
+python3 cli/orocsy.py symphony monitor --root ~/.codex/symphony-workspaces/my-app-concurrent
 ```
 
 The CLI seeds `AGENTS.md`, `PROJECT_STACK.md`, MIU docs, Linear workstream
@@ -106,6 +107,12 @@ Before using a profile for a new project, run `verify-scaffold`. The structural
 gate is dependency-free; `--run-checks` performs the full temp-project install,
 typecheck, test, lint, and build loop so dependency drift is caught in the kit
 instead of inside the next product repo.
+
+For Symphony runs, use `orocsy.py symphony monitor` as the first read-only
+steward command. It does not mutate Symphony or project workspaces; it reports
+workspace health, branch state, Orocsy ledger state, last events, and stale
+runs so a future cron or dashboard can decide whether to alert, block, or
+dispatch a correction.
 
 Manual fallback:
 

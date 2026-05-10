@@ -30,6 +30,7 @@ python3 cli/orocsy.py --repo /path/to/repo gate all --json
 python3 cli/orocsy.py --repo /path/to/repo gate declared-scope --scope "src/**"
 python3 cli/orocsy.py --repo /path/to/repo gate required-evidence --evidence-event tool.finished
 python3 cli/orocsy.py --repo /path/to/repo symphony prepare-workspace --issue COD-123 --scope "src/**"
+python3 cli/orocsy.py symphony monitor --root ~/.codex/symphony-workspaces/my-app-concurrent --json
 ```
 
 Useful flags:
@@ -94,6 +95,11 @@ Scaffold flags:
 The CLI records stack/deploy choices but does not lock the project to them.
 Agents must still inspect the repo and fill the business boundary inventory
 before implementation.
+
+`orocsy.py symphony monitor` is read-only. It scans a Symphony workspace root
+or a single workspace and reports git branch/head/dirty state, Orocsy delivery
+state, event counts, last event, stale runs, and missing runtime ledgers. Use
+`--strict` when a cron/steward job should fail on warnings.
 
 ## Stability Gate
 

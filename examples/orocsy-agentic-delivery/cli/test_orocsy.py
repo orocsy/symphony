@@ -203,6 +203,54 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             leak_code, _leak_output = self.run_cli(["--repo", str(repo), "gate", "leaks"])
             self.assertEqual(leak_code, 1)
 
+    def test_symphony_monitor_reports_workspace_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = root / "my-app"
+            workspace = project_root / "COD-123"
+            workspace.mkdir(parents=True)
+            self.init_git_repo(workspace)
+            (workspace / "README.md").write_text("workspace\n", encoding="utf-8")
+            self.commit_all(workspace)
+            self.run_cli(["--repo", str(workspace), "symphony", "prepare-workspace", "--issue", "COD-123"])
+            self.commit_all(workspace, "runtime")
+
+            code, output = self.run_cli(["symphony", "monitor", "--root", str(root), "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["summary"]["count"], 1)
+            self.assertEqual(payload["summary"]["stale"], 0)
+            self.assertEqual(payload["workspaces"][0]["name"], "COD-123")
+            self.assertEqual(payload["workspaces"][0]["issue"], "COD-123")
+            self.assertTrue(payload["workspaces"][0]["git"]["is_git_repo"])
+            self.assertGreater(payload["workspaces"][0]["events"]["count"], 0)
+
+    def test_symphony_monitor_marks_stale_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "COD-456"
+            workspace.mkdir()
+            self.init_git_repo(workspace)
+            (workspace / "README.md").write_text("workspace\n", encoding="utf-8")
+            self.commit_all(workspace)
+            self.run_cli(["--repo", str(workspace), "symphony", "prepare-workspace", "--issue", "COD-456"])
+            state_path = workspace / ".codex/delivery/state/current.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["updated_at"] = "2000-01-01T00:00:00Z"
+            state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            self.commit_all(workspace, "stale-runtime")
+
+            code, output = self.run_cli(["symphony", "monitor", "--root", str(root), "--stale-minutes", "1", "--strict", "--json"])
+
+            self.assertEqual(code, 1)
+            payload = json.loads(output)
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["summary"]["stale"], 1)
+            self.assertTrue(payload["workspaces"][0]["stale"])
+            self.assertTrue(any(warning.startswith("stale:") for warning in payload["workspaces"][0]["warnings"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -468,10 +468,13 @@ Minimum proof for the first runtime slice:
 - Symphony workers can call the same gates inside isolated workspaces; no
   parallel workstream bypasses the rules just because it was spawned by an
   automation runner.
+- A read-only Symphony monitor can scan a workspace root and report branch/head
+  state, dirty worktrees, Orocsy ledger state, event counts, last event, stale
+  runs, and missing ledgers without mutating any workspace.
 - User corrections can be translated into one of four durable forms: a
   deterministic gate, an LLM rubric, a policy entry, or a regression eval.
 
-This is the acceptance bar for implementation order 1 and 2.
+This is the acceptance bar for implementation orders 1 through 4.
 
 ## Implementation Order
 
