@@ -62,7 +62,7 @@ agent:
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy:
-    reject:
+    granular:
       sandbox_approval: true
       rules: true
       mcp_elicitations: true

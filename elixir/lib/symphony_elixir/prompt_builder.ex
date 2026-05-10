@@ -9,21 +9,49 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
-    template =
-      Workflow.current()
-      |> prompt_template!()
-      |> parse_template!()
+    Workflow.current()
+    |> prompt_template!()
+    |> render_issue_template(issue, opts)
+  end
 
+  @spec render_issue_template(String.t(), SymphonyElixir.Linear.Issue.t() | map() | String.t() | nil, keyword()) ::
+          String.t()
+  def render_issue_template(template, issue_or_identifier, opts \\ []) when is_binary(template) do
+    template = parse_template!(template)
+
+    do_render_issue_template(template, issue_or_identifier, opts)
+  end
+
+  defp do_render_issue_template(template, issue_or_identifier, opts) do
     template
     |> Solid.render!(
       %{
         "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map()
+        "issue" => issue_or_identifier |> issue_template_context() |> to_solid_map()
       },
       @render_opts
     )
     |> IO.iodata_to_binary()
   end
+
+  defp issue_template_context(%_{} = issue), do: Map.from_struct(issue)
+
+  defp issue_template_context(%{issue_identifier: identifier} = issue_context) do
+    %{
+      id: Map.get(issue_context, :issue_id),
+      identifier: identifier
+    }
+  end
+
+  defp issue_template_context(%{"issue_identifier" => identifier} = issue_context) do
+    %{
+      id: Map.get(issue_context, "issue_id"),
+      identifier: identifier
+    }
+  end
+
+  defp issue_template_context(identifier) when is_binary(identifier), do: %{id: nil, identifier: identifier}
+  defp issue_template_context(_), do: %{id: nil, identifier: "issue"}
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
 

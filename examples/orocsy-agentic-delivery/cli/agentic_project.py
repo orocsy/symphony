@@ -174,8 +174,13 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "OROCSY_CLI",
         "gate required-evidence",
         "symphony guidance",
+        "granular:",
     ]
-    return all(marker in content for marker in required_markers) and "approval_policy: never" not in content
+    return (
+        all(marker in content for marker in required_markers)
+        and "approval_policy: never" not in content
+        and "\n    reject:" not in content
+    )
 
 
 def write_workflow_text(path: Path, content: str, *, overwrite: bool, dry_run: bool) -> str:
@@ -537,7 +542,12 @@ if ! grep -q "OROCSY_CLI" "$WORKFLOW_FILE"; then
 fi
 
 if grep -q "approval_policy: never" "$WORKFLOW_FILE"; then
-  echo "Refusing to run unsafe Symphony workflow: approval_policy must reject MCP elicitations, not use never." >&2
+  echo "Refusing to run unsafe Symphony workflow: approval_policy must request MCP elicitation approval, not use never." >&2
+  exit 1
+fi
+
+if grep -Eq "^[[:space:]]+reject:" "$WORKFLOW_FILE" || ! grep -q "granular:" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: approval_policy must use Codex app-server granular shape." >&2
   exit 1
 fi
 
