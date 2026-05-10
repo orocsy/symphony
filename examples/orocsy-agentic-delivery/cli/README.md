@@ -29,6 +29,7 @@ python3 cli/orocsy.py --repo /path/to/repo event append --type tool.finished --s
 python3 cli/orocsy.py --repo /path/to/repo gate all --json
 python3 cli/orocsy.py --repo /path/to/repo gate declared-scope --scope "src/**"
 python3 cli/orocsy.py --repo /path/to/repo gate required-evidence --evidence-event tool.finished
+python3 cli/orocsy.py --repo /path/to/repo symphony prepare-workspace --issue COD-123 --scope "src/**"
 ```
 
 Useful flags:
@@ -112,8 +113,8 @@ pnpm lint
 pnpm build
 ```
 
-This is the stabilization loop learned from the NutriBuddy validation pass:
-debug once, then move the failure class into the bootstrap gate.
+This is the stabilization loop: debug once, then move the failure class into
+the bootstrap gate.
 
 ## Asset Rule
 

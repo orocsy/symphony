@@ -25,6 +25,20 @@ hooks:
     if [ -x .codex/worktree_init.sh ]; then
       ./.codex/worktree_init.sh
     fi
+    orocsy_cli="${OROCSY_CLI:-}"
+    if [ -z "$orocsy_cli" ] && [ -n "$SYMPHONY_REPO" ]; then
+      orocsy_cli="$SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/orocsy.py"
+    fi
+    if [ -n "$orocsy_cli" ] && [ -f "$orocsy_cli" ]; then
+      python3 "$orocsy_cli" --repo . symphony prepare-workspace \
+        --issue "{{ issue.identifier }}" \
+        --intent "Symphony issue {{ issue.identifier }}" \
+        --orocsy-cli "$orocsy_cli" \
+        --evidence-event tool.finished \
+        --evidence-event gate.post-miu
+    else
+      echo "Orocsy runtime CLI not found; set OROCSY_CLI or SYMPHONY_REPO before dispatch."
+    fi
 agent:
   max_concurrent_agents: 3
   max_turns: 20
@@ -45,6 +59,34 @@ codex:
 ---
 
 You are working on Linear issue `{{ issue.identifier }}`.
+
+Orocsy worker prelude:
+
+1. Read `AGENTS.md`.
+2. Load the Orocsy / `agentic-delivery-loop` skill.
+3. Read `.codex/delivery/state/current.json` and `.codex/delivery/policy.yml`.
+   If `$OROCSY_CLI` is unset, use the `orocsy_cli` value from
+   `.codex/delivery/state/current.json`.
+4. Read the assigned Linear issue, including Write Scope, Shared Files,
+   Dependencies, MIUs, Validation, and Out Of Scope.
+5. Before editing code, update `.codex/delivery/policy.yml` with the issue's
+   declared write-scope globs if the prepare hook could not infer them.
+6. Create or update the Technical MIU trace.
+7. Emit a run-start event:
+   `python3 "$OROCSY_CLI" --repo . run start --issue "{{ issue.identifier }}"`
+8. Run pre-change gates:
+   `python3 "$OROCSY_CLI" --repo . gate leaks --record`
+   `python3 "$OROCSY_CLI" --repo . gate secrets --record`
+   `python3 "$OROCSY_CLI" --repo . gate artifacts --record`
+9. Implement one MIU at a time and append command evidence after each check:
+   `python3 "$OROCSY_CLI" --repo . event append --type tool.finished --status passed --tool "<command>"`
+10. Before commit, run:
+   `python3 "$OROCSY_CLI" --repo . gate declared-scope --strict --record`
+   `python3 "$OROCSY_CLI" --repo . gate required-evidence --strict --record`
+11. Before push, run:
+   `python3 "$OROCSY_CLI" --repo . gate all --json`
+12. If any gate fails, write the blocker to `.codex/delivery/inbox/` or the
+    Linear workpad and stop until corrected.
 
 Strict dispatch gate:
 

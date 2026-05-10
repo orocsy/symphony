@@ -9,13 +9,35 @@
 - Concurrency limit:
 - Shared files:
 - Stop conditions:
+- Orocsy runtime initialized:
+- Required gate commands:
 
 ## Agent Lanes
 
-| Lane | Issue | Write scope | Validation | Depends on |
-| --- | --- | --- | --- | --- |
-| A | <ISSUE> | <files/modules> | <commands> | <none> |
-| B | <ISSUE> | <files/modules> | <commands> | <none> |
+| Lane | Issue | Write scope | Required evidence | Validation | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| A | <ISSUE> | <files/modules> | <events/files> | <commands> | <none> |
+| B | <ISSUE> | <files/modules> | <events/files> | <commands> | <none> |
+
+## Orocsy Worker Contract
+
+Each Symphony worker must run inside the Orocsy runtime contract:
+
+```bash
+python3 "$OROCSY_CLI" --repo . symphony prepare-workspace --issue <ISSUE>
+python3 "$OROCSY_CLI" --repo . run start --issue <ISSUE>
+python3 "$OROCSY_CLI" --repo . gate leaks --record
+python3 "$OROCSY_CLI" --repo . gate secrets --record
+python3 "$OROCSY_CLI" --repo . gate artifacts --record
+python3 "$OROCSY_CLI" --repo . gate declared-scope --strict --record
+python3 "$OROCSY_CLI" --repo . gate required-evidence --strict --record
+```
+
+After every validation command, append evidence:
+
+```bash
+python3 "$OROCSY_CLI" --repo . event append --type tool.finished --status passed --tool "<command>"
+```
 
 ## Shared Boundary
 
@@ -44,7 +66,7 @@ Next:
 
 - All lane commits pushed.
 - Local and remote checks known.
+- Orocsy gate results recorded for every lane.
 - Review comments classified.
 - Browser evidence attached for UI flows.
 - Integration pass run after convergence.
-

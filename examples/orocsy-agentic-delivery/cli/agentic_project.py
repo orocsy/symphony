@@ -783,7 +783,6 @@ const config = [
       "design/**",
       "Design/**",
       "*Design/**",
-      "NutribuddyDesign/**",
       "**/*.html",
     ],
   },

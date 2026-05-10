@@ -159,6 +159,50 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("leaks: passed", output)
 
+    def test_symphony_prepare_workspace_writes_policy_and_prelude_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "symphony",
+                    "prepare-workspace",
+                    "--issue",
+                    "COD-123",
+                    "--scope",
+                    "src/**",
+                    "--orocsy-cli",
+                    "/tmp/orocsy.py",
+                    "--evidence-event",
+                    "tool.finished",
+                    "--forbid",
+                    "OldProject",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["state"]["issue"], "COD-123")
+            self.assertEqual(payload["state"]["orocsy_cli"], "/tmp/orocsy.py")
+            self.assertIn("Run pre-change gates before editing.", payload["prelude"])
+
+            policy = (repo / ".codex/delivery/policy.yml").read_text(encoding="utf-8")
+            gates = (repo / ".codex/delivery/gates.yml").read_text(encoding="utf-8")
+            self.assertIn("src/**", policy)
+            self.assertIn("tool.finished", policy)
+            self.assertIn("OldProject", gates)
+
+            events = (repo / ".codex/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(json.loads(events[-1])["event"], "symphony.workspace.prepared")
+
+            (repo / "README.md").write_text("OldProject leak\n", encoding="utf-8")
+            leak_code, _leak_output = self.run_cli(["--repo", str(repo), "gate", "leaks"])
+            self.assertEqual(leak_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

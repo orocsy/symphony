@@ -167,6 +167,54 @@ def load_gate_config(repo: Path) -> dict[str, list[str]]:
     return config
 
 
+def merge_unique(existing: list[str], additions: list[str]) -> list[str]:
+    merged: list[str] = []
+    for value in [*existing, *additions]:
+        clean = value.strip()
+        if clean and clean not in merged:
+            merged.append(clean)
+    return merged
+
+
+def render_list_config(header: str, values: dict[str, list[str]]) -> str:
+    lines = [header.rstrip(), ""]
+    for key, items in values.items():
+        lines.append(f"{key}:")
+        for item in items:
+            lines.append(f"  - {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def update_runtime_config(
+    repo: Path,
+    *,
+    declared_scope: list[str],
+    required_files: list[str],
+    required_events: list[str],
+    required_commands: list[str],
+    forbidden_terms: list[str],
+) -> None:
+    root = delivery_root(repo)
+    policy_path = root / "policy.yml"
+    gates_path = root / "gates.yml"
+    existing_policy = parse_simple_list_config(policy_path)
+    existing_gates = parse_simple_list_config(gates_path)
+
+    policy = {
+        "declared_scope": merge_unique(existing_policy.get("declared_scope", []), declared_scope),
+        "required_evidence_files": merge_unique(existing_policy.get("required_evidence_files", []), required_files),
+        "required_event_types": merge_unique(existing_policy.get("required_event_types", []), required_events),
+        "required_commands": merge_unique(existing_policy.get("required_commands", []), required_commands),
+    }
+    gates = {
+        "forbidden_terms": merge_unique(existing_gates.get("forbidden_terms", []), forbidden_terms),
+        "artifact_patterns": merge_unique(existing_gates.get("artifact_patterns", []), list(DEFAULT_ARTIFACT_PATTERNS)),
+    }
+
+    write_text(policy_path, render_list_config("# Orocsy project policy.", policy))
+    write_text(gates_path, render_list_config("# Orocsy deterministic gate configuration.", gates))
+
+
 def ensure_runtime_files(repo: Path, *, intent: str, issue: str, force: bool = False) -> dict[str, Any]:
     root = delivery_root(repo)
     (root / "state").mkdir(parents=True, exist_ok=True)
@@ -647,6 +695,71 @@ def command_gate(args: argparse.Namespace) -> int:
     return 0 if status in {"passed", "warn"} else 1
 
 
+def symphony_prelude(issue: str) -> list[str]:
+    issue_text = issue or "<issue>"
+    return [
+        "Read AGENTS.md and project design/runtime docs before editing.",
+        "Load the Orocsy / agentic-delivery-loop skill.",
+        "Read .codex/delivery/state/current.json and .codex/delivery/policy.yml.",
+        f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
+        "Create or update the MIU trace before implementation.",
+        "Run pre-change gates before editing.",
+        "Implement one MIU at a time and append tool/test/build/browser events.",
+        "Run post-MIU, pre-commit, and pre-push gates before handoff.",
+    ]
+
+
+def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    issue = args.issue or ""
+    intent = args.intent or (f"Symphony issue {issue}" if issue else "Symphony worker run")
+    state = ensure_runtime_files(repo, intent=intent, issue=issue)
+    state["status"] = "dispatch-ready"
+    state["phase"] = "symphony-prepare"
+    state["intent"] = intent
+    state["issue"] = issue
+    state["workspace"] = args.workspace or str(repo)
+    if args.orocsy_cli:
+        state["orocsy_cli"] = args.orocsy_cli
+    write_json(current_state_path(repo), state)
+
+    update_runtime_config(
+        repo,
+        declared_scope=args.scope or [],
+        required_files=args.evidence_file or [],
+        required_events=args.evidence_event or [],
+        required_commands=args.evidence_command or [],
+        forbidden_terms=args.forbid or [],
+    )
+
+    event = append_event(
+        repo,
+        {
+            "event": "symphony.workspace.prepared",
+            "phase": "symphony-prepare",
+            "run_status": "dispatch-ready",
+            "issue": issue,
+            "intent": intent,
+            "workspace": state["workspace"],
+            "orocsy_cli": args.orocsy_cli,
+            "declared_scope": args.scope or [],
+            "required_evidence_files": args.evidence_file or [],
+            "required_event_types": args.evidence_event or [],
+            "required_commands": args.evidence_command or [],
+        },
+    )
+
+    prelude = symphony_prelude(issue)
+    if args.json:
+        print(json.dumps({"state": state, "event": event, "prelude": prelude}, indent=2, sort_keys=True))
+    else:
+        print(f"prepared Orocsy Symphony workspace for {issue or 'unassigned issue'}")
+        print("Worker prelude:")
+        for index, item in enumerate(prelude, 1):
+            print(f"{index}. {item}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Orocsy Delivery Runtime CLI")
     parser.add_argument("--repo", default=".", help="Project repo path")
@@ -692,6 +805,24 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("--record", action="store_true", help="Append gate result to events.jsonl")
     gate_parser.add_argument("--json", action="store_true", help="Print JSON output")
     gate_parser.set_defaults(func=command_gate)
+
+    symphony_parser = subparsers.add_parser("symphony", help="Symphony integration commands")
+    symphony_subparsers = symphony_parser.add_subparsers(dest="symphony_command", required=True)
+    prepare_parser = symphony_subparsers.add_parser(
+        "prepare-workspace",
+        help="Initialize Orocsy state and policy for a Symphony worker workspace",
+    )
+    prepare_parser.add_argument("--issue", default="", help="Issue identifier")
+    prepare_parser.add_argument("--intent", default="", help="Worker intent")
+    prepare_parser.add_argument("--workspace", default="", help="Symphony workspace path")
+    prepare_parser.add_argument("--orocsy-cli", default="", help="Resolved Orocsy runtime CLI path")
+    prepare_parser.add_argument("--scope", action="append", default=[], help="Declared write scope glob")
+    prepare_parser.add_argument("--evidence-file", action="append", default=[], help="Required evidence file")
+    prepare_parser.add_argument("--evidence-event", action="append", default=[], help="Required event type")
+    prepare_parser.add_argument("--evidence-command", action="append", default=[], help="Required command text")
+    prepare_parser.add_argument("--forbid", action="append", default=[], help="Project-specific forbidden term")
+    prepare_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    prepare_parser.set_defaults(func=command_symphony_prepare_workspace)
 
     return parser
 
