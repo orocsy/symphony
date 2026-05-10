@@ -96,7 +96,10 @@ python3 cli/orocsy.py --repo /path/to/repo init --intent "first MIU"
 python3 cli/orocsy.py --repo /path/to/repo gate all --json
 python3 cli/orocsy.py eval rubric miu-quality
 python3 cli/orocsy.py --repo /path/to/repo eval record miu-quality --status passed --summary "MIU is complete"
+python3 cli/orocsy.py --repo /path/to/repo inbox list --open-only
+python3 cli/orocsy.py symphony guidance --workspace /path/to/repo --json
 python3 cli/orocsy.py symphony monitor --root ~/.codex/symphony-workspaces/my-app-concurrent
+python3 cli/orocsy.py control status
 ```
 
 The CLI seeds `AGENTS.md`, `PROJECT_STACK.md`, MIU docs, Linear workstream
@@ -120,6 +123,12 @@ For workflow judgment, use `orocsy.py eval rubric <name>` to load the LLM/human
 rubric and `orocsy.py eval record <name>` to turn the verdict into ledger
 evidence. The first rubrics cover MIU quality, business correction, review
 classification, browser evidence, and workstream split safety.
+
+For correction and recovery, failed gates/evals can create inbox items under
+`.codex/delivery/inbox/`. `orocsy.py symphony guidance` then gives a
+non-destructive `block`, `retry`, or `continue` decision for a worker. The full
+control plane remains intentionally deferred until this evidence loop catches
+enough real failure modes.
 
 Manual fallback:
 

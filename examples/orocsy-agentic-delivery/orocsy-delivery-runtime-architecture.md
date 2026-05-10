@@ -300,8 +300,11 @@ orocsy gate pre-push
 orocsy eval list
 orocsy eval rubric miu-quality
 orocsy eval record miu-quality --status passed --summary "..."
+orocsy inbox list --open-only
 orocsy symphony prepare-workspace
+orocsy symphony guidance
 orocsy symphony monitor
+orocsy control status
 orocsy report
 ```
 
@@ -475,10 +478,18 @@ Minimum proof for the first runtime slice:
 - LLM/human eval rubrics exist as structured CLI output and generated
   `.codex/delivery/evals/*.rubric.md` files, and verdicts can be recorded as
   `eval.<rubric>` ledger events.
+- Failed gates/evals can write correction inbox items as JSON and Markdown
+  under `.codex/delivery/inbox/`, and resolved corrections are recorded as
+  ledger events.
+- Symphony guidance can return controlled `block`, `retry`, or `continue`
+  advice without mutating external trackers, provider systems, worker
+  processes, or PRs.
+- The current control-plane command clearly reports which actions are supported
+  now and which remain deferred.
 - User corrections can be translated into one of four durable forms: a
   deterministic gate, an LLM rubric, a policy entry, or a regression eval.
 
-This is the acceptance bar for implementation orders 1 through 5.
+This is the acceptance bar for implementation orders 1 through 8.
 
 ## Implementation Order
 

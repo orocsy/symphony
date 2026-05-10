@@ -163,6 +163,15 @@ EVAL_RUBRICS: dict[str, dict[str, Any]] = {
     },
 }
 
+ISSUE_REQUIREMENT_KEYS = (
+    "write_scope",
+    "shared_files",
+    "dependencies",
+    "mius",
+    "validation",
+    "out_of_scope",
+)
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -333,6 +342,52 @@ def write_eval_rubrics(repo: Path, *, force: bool = False) -> list[Path]:
     return written
 
 
+def as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def string_list(value: Any) -> list[str]:
+    return [str(item).strip() for item in as_list(value) if str(item).strip()]
+
+
+def load_issue_requirements(path: Path) -> dict[str, Any]:
+    raw = json.loads(read_text(path))
+    validation_raw = raw.get("validation") or {}
+    if isinstance(validation_raw, dict):
+        validation = {
+            "files": string_list(validation_raw.get("files") or validation_raw.get("evidence_files")),
+            "events": string_list(validation_raw.get("events") or validation_raw.get("evidence_events")),
+            "commands": string_list(validation_raw.get("commands") or validation_raw.get("evidence_commands")),
+            "scenarios": string_list(validation_raw.get("scenarios")),
+        }
+    else:
+        validation = {
+            "files": [],
+            "events": [],
+            "commands": [],
+            "scenarios": string_list(validation_raw),
+        }
+
+    return {
+        "identifier": str(raw.get("identifier") or raw.get("issue") or raw.get("id") or "").strip(),
+        "title": str(raw.get("title") or "").strip(),
+        "state": str(raw.get("state") or raw.get("status") or "").strip(),
+        "project": str(raw.get("project") or raw.get("project_slug") or "").strip(),
+        "write_scope": string_list(raw.get("write_scope") or raw.get("writeScope")),
+        "shared_files": string_list(raw.get("shared_files") or raw.get("sharedFiles")),
+        "dependencies": string_list(raw.get("dependencies")),
+        "mius": as_list(raw.get("mius") or raw.get("MIUs")),
+        "validation": validation,
+        "out_of_scope": string_list(raw.get("out_of_scope") or raw.get("outOfScope")),
+    }
+
+
 def update_runtime_config(
     repo: Path,
     *,
@@ -437,6 +492,10 @@ def events_path(repo: Path) -> Path:
     return delivery_root(repo) / "events" / "events.jsonl"
 
 
+def inbox_root(repo: Path) -> Path:
+    return delivery_root(repo) / "inbox"
+
+
 def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
     state = ensure_runtime_files(repo, intent="", issue="")
     now = utc_now()
@@ -458,6 +517,146 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
         state["status"] = event["run_status"]
     write_json(current_state_path(repo), state)
     return event
+
+
+def render_correction_markdown(correction: dict[str, Any]) -> str:
+    lines = [
+        f"# Correction {correction['correction_id']}",
+        "",
+        f"Status: {correction['status']}",
+        f"Source: {correction['source']}",
+        f"Next action: {correction['next_action']}",
+        "",
+        "## Summary",
+        "",
+        correction["summary"],
+        "",
+        "## Findings",
+        "",
+    ]
+    findings = correction.get("findings") or []
+    lines.extend(f"- {finding}" for finding in findings)
+    if not findings:
+        lines.append("- None recorded")
+    lines.extend(["", "## Required Corrections", ""])
+    required = correction.get("required_corrections") or []
+    lines.extend(f"- {item}" for item in required)
+    if not required:
+        lines.append("- Determine the smallest correction before continuing.")
+    if correction.get("resolution_summary"):
+        lines.extend(["", "## Resolution", "", correction["resolution_summary"]])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_correction_files(repo: Path, correction: dict[str, Any]) -> dict[str, str]:
+    root = inbox_root(repo)
+    root.mkdir(parents=True, exist_ok=True)
+    stem = correction["correction_id"]
+    json_path = root / f"{stem}.json"
+    markdown_path = root / f"{stem}.md"
+    write_json(json_path, correction)
+    write_text(markdown_path, render_correction_markdown(correction))
+    return {
+        "json": str(json_path.relative_to(repo)),
+        "markdown": str(markdown_path.relative_to(repo)),
+    }
+
+
+def create_correction(
+    repo: Path,
+    *,
+    source: str,
+    status: str,
+    summary: str,
+    findings: list[str],
+    required_corrections: list[str],
+    next_action: str,
+) -> dict[str, Any]:
+    state = ensure_runtime_files(repo, intent="", issue="")
+    correction = {
+        "schema_version": SCHEMA_VERSION,
+        "correction_id": new_id("correction"),
+        "status": "open",
+        "source": source,
+        "source_status": status,
+        "summary": summary,
+        "findings": findings,
+        "required_corrections": required_corrections,
+        "next_action": next_action,
+        "issue": state.get("issue", ""),
+        "run_id": state.get("run_id"),
+        "goal_id": state.get("goal_id"),
+        "created_at": utc_now(),
+        "resolved_at": None,
+        "resolution_summary": "",
+    }
+    artifacts = write_correction_files(repo, correction)
+    correction["artifacts"] = artifacts
+    write_json(repo / artifacts["json"], correction)
+    append_event(
+        repo,
+        {
+            "event": "correction.created",
+            "phase": "correction",
+            "status": "open",
+            "run_status": "blocked" if next_action in {"block", "escalate"} else "retry-ready",
+            "correction_id": correction["correction_id"],
+            "source": source,
+            "source_status": status,
+            "summary": summary,
+            "next_action": next_action,
+            "artifacts": list(artifacts.values()),
+        },
+    )
+    return correction
+
+
+def load_corrections(repo: Path) -> list[dict[str, Any]]:
+    root = inbox_root(repo)
+    if not root.exists():
+        return []
+    corrections: list[dict[str, Any]] = []
+    for path in sorted(root.glob("correction_*.json")):
+        try:
+            correction = json.loads(read_text(path))
+        except json.JSONDecodeError:
+            correction = {
+                "correction_id": path.stem,
+                "status": "invalid",
+                "source": "inbox",
+                "summary": "Correction JSON is invalid.",
+                "path": str(path),
+            }
+        corrections.append(correction)
+    return corrections
+
+
+def open_corrections(repo: Path) -> list[dict[str, Any]]:
+    return [correction for correction in load_corrections(repo) if correction.get("status") != "resolved"]
+
+
+def resolve_correction(repo: Path, correction_ref: str, summary: str) -> dict[str, Any]:
+    for correction in load_corrections(repo):
+        json_path = repo / correction.get("artifacts", {}).get("json", "")
+        if correction_ref in {correction.get("correction_id"), Path(str(json_path)).name, Path(str(json_path)).stem}:
+            correction["status"] = "resolved"
+            correction["resolved_at"] = utc_now()
+            correction["resolution_summary"] = summary
+            artifacts = correction.get("artifacts") or write_correction_files(repo, correction)
+            write_json(repo / artifacts["json"], correction)
+            write_text(repo / artifacts["markdown"], render_correction_markdown(correction))
+            append_event(
+                repo,
+                {
+                    "event": "correction.resolved",
+                    "phase": "correction",
+                    "status": "resolved",
+                    "correction_id": correction["correction_id"],
+                    "summary": summary,
+                },
+            )
+            return correction
+    raise SystemExit(f"unknown correction: {correction_ref}")
 
 
 def run_git(repo: Path, args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -889,12 +1088,44 @@ def gate_required_evidence(repo: Path, config: dict[str, list[str]], args: argpa
     return gate_result("required-evidence", findings)
 
 
+def gate_issue_requirements(repo: Path, _config: dict[str, list[str]], _args: argparse.Namespace) -> GateResult:
+    state, state_error = load_current_state(repo)
+    if state_error or not state:
+        return gate_result("issue-requirements", [Finding("issue-requirements", "warning", "runtime state is missing")])
+
+    requirements = state.get("issue_requirements") or {}
+    if not isinstance(requirements, dict) or not requirements:
+        return gate_result(
+            "issue-requirements",
+            [Finding("issue-requirements", "warning", "issue requirements are missing from runtime state")],
+        )
+
+    findings: list[Finding] = []
+    for key in ISSUE_REQUIREMENT_KEYS:
+        if key not in requirements:
+            findings.append(Finding("issue-requirements", "error", f"required issue section is missing: {key}"))
+
+    if not requirements.get("identifier"):
+        findings.append(Finding("issue-requirements", "error", "issue identifier is missing"))
+    if not requirements.get("write_scope"):
+        findings.append(Finding("issue-requirements", "error", "write_scope must name at least one path glob"))
+    if not requirements.get("mius"):
+        findings.append(Finding("issue-requirements", "error", "mius must name at least one implementable unit"))
+
+    validation = requirements.get("validation") or {}
+    if not isinstance(validation, dict) or not any(validation.get(key) for key in ("files", "events", "commands", "scenarios")):
+        findings.append(Finding("issue-requirements", "error", "validation must include files, events, commands, or scenarios"))
+
+    return gate_result("issue-requirements", findings)
+
+
 GATE_FUNCTIONS = {
     "leaks": gate_leaks,
     "secrets": gate_secrets,
     "artifacts": gate_artifacts,
     "git-state": gate_git_state,
     "declared-scope": gate_declared_scope,
+    "issue-requirements": gate_issue_requirements,
     "required-evidence": gate_required_evidence,
 }
 
@@ -936,6 +1167,12 @@ def emit_gate_output(results: list[GateResult], *, json_output: bool, strict: bo
             location = f" [{finding.path}]" if finding.path else ""
             detail = f" ({finding.detail})" if finding.detail else ""
             print(f"  {finding.severity}: {finding.message}{location}{detail}")
+
+
+def finding_text(finding: Finding) -> str:
+    location = f" [{finding.path}]" if finding.path else ""
+    detail = f" ({finding.detail})" if finding.detail else ""
+    return f"{finding.gate}: {finding.severity}: {finding.message}{location}{detail}"
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -1029,6 +1266,21 @@ def command_gate(args: argparse.Namespace) -> int:
             },
         )
 
+    if args.inbox and status == "failed":
+        findings = [finding_text(finding) for result in results for finding in result.findings]
+        create_correction(
+            repo,
+            source=f"gate.{args.gate}",
+            status=status,
+            summary=f"Gate `{args.gate}` failed.",
+            findings=findings,
+            required_corrections=[
+                "Fix the failing gate findings.",
+                f"Rerun `orocsy gate {args.gate} --strict` before continuing.",
+            ],
+            next_action="block",
+        )
+
     emit_gate_output(results, json_output=args.json, strict=args.strict)
     return 0 if status in {"passed", "warn"} else 1
 
@@ -1083,6 +1335,8 @@ def command_eval_write_rubrics(args: argparse.Namespace) -> int:
 
 def command_eval_record(args: argparse.Namespace) -> int:
     repo = repo_path(args.repo)
+    findings = args.finding or []
+    required_corrections = args.required_correction or []
     event = append_event(
         repo,
         {
@@ -1091,15 +1345,183 @@ def command_eval_record(args: argparse.Namespace) -> int:
             "status": args.status,
             "rubric": args.rubric,
             "summary": args.summary,
-            "findings": args.finding or [],
-            "required_corrections": args.required_correction or [],
+            "findings": findings,
+            "required_corrections": required_corrections,
         },
     )
+    correction = None
+    if args.inbox and args.status in {"failed", "warn"}:
+        correction = create_correction(
+            repo,
+            source=f"eval.{args.rubric}",
+            status=args.status,
+            summary=args.summary,
+            findings=findings,
+            required_corrections=required_corrections
+            or [f"Resolve `{args.rubric}` eval findings before handoff."],
+            next_action="block" if args.status == "failed" else "retry",
+        )
     if args.json:
-        print(json.dumps(event, indent=2, sort_keys=True))
+        payload: dict[str, Any] = dict(event)
+        if correction:
+            payload["correction"] = correction
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"recorded eval {args.rubric}: {args.status}")
     return 0 if args.status in {"passed", "warn"} else 1
+
+
+def command_inbox_create(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    correction = create_correction(
+        repo,
+        source=args.source,
+        status=args.status,
+        summary=args.summary,
+        findings=args.finding or [],
+        required_corrections=args.required_correction or [],
+        next_action=args.next_action,
+    )
+    if args.json:
+        print(json.dumps(correction, indent=2, sort_keys=True))
+    else:
+        print(f"created correction {correction['correction_id']}")
+    return 0
+
+
+def command_inbox_list(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    corrections = load_corrections(repo)
+    if args.open_only:
+        corrections = [correction for correction in corrections if correction.get("status") != "resolved"]
+    payload = {
+        "status": "passed",
+        "count": len(corrections),
+        "corrections": corrections,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Orocsy corrections: {len(corrections)}")
+        for correction in corrections:
+            print(f"- {correction.get('correction_id')}: {correction.get('status')} {correction.get('source')}")
+    return 0
+
+
+def command_inbox_resolve(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    correction = resolve_correction(repo, args.correction, args.summary)
+    if args.json:
+        print(json.dumps(correction, indent=2, sort_keys=True))
+    else:
+        print(f"resolved correction {correction['correction_id']}")
+    return 0
+
+
+def guidance_for_workspace(workspace: Path, *, stale_minutes: int) -> dict[str, Any]:
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0)
+    snapshot = workspace_monitor_snapshot(workspace, checked_at=checked_at, stale_minutes=stale_minutes)
+    corrections = open_corrections(workspace)
+    last_event = snapshot["events"].get("last") or {}
+    reasons: list[str] = []
+
+    if "delivery_state_missing" in snapshot["warnings"]:
+        action = "block"
+        reasons.append("Orocsy delivery state is missing; run symphony prepare-workspace first.")
+    elif corrections:
+        action = "retry" if all(correction.get("next_action") == "retry" for correction in corrections) else "block"
+        reasons.append(f"{len(corrections)} open correction inbox item(s) must be resolved.")
+    elif str(last_event.get("status")) == "failed":
+        action = "block"
+        reasons.append(f"Last event failed: {last_event.get('event') or last_event.get('type')}")
+    elif snapshot["stale"]:
+        action = "retry"
+        reasons.append("Workspace is stale; resume from existing state and rerun gates before editing.")
+    else:
+        action = "continue"
+        reasons.append("No blocking runtime conditions detected.")
+
+    allowed_next_steps = {
+        "block": [
+            "Read .codex/delivery/inbox/ and fix the listed corrections.",
+            "Record validation evidence after the fix.",
+            "Resolve the correction item before handoff.",
+        ],
+        "retry": [
+            "Resume the existing workspace, do not restart from scratch.",
+            "Read the latest event and rerun pre-change gates.",
+            "Record recovery evidence before handoff.",
+        ],
+        "continue": [
+            "Continue the current MIU.",
+            "Record tool/test/eval evidence before handoff.",
+        ],
+    }[action]
+
+    return {
+        "status": "failed" if action == "block" else "warn" if action == "retry" else "passed",
+        "action": action,
+        "workspace": str(workspace),
+        "issue": snapshot.get("issue"),
+        "reasons": reasons,
+        "open_corrections": corrections,
+        "snapshot": snapshot,
+        "allowed_next_steps": allowed_next_steps,
+    }
+
+
+def command_symphony_guidance(args: argparse.Namespace) -> int:
+    workspace = repo_path(args.workspace)
+    guidance = guidance_for_workspace(workspace, stale_minutes=args.stale_minutes)
+    if args.record and current_state_path(workspace).exists():
+        run_status = {"block": "blocked", "retry": "retry-ready", "continue": "running"}[guidance["action"]]
+        append_event(
+            workspace,
+            {
+                "event": "symphony.guidance",
+                "phase": "guidance",
+                "status": guidance["status"],
+                "run_status": run_status,
+                "action": guidance["action"],
+                "reasons": guidance["reasons"],
+            },
+        )
+    if args.json:
+        print(json.dumps(guidance, indent=2, sort_keys=True))
+    else:
+        print(f"Orocsy Symphony guidance: {guidance['action']}")
+        for reason in guidance["reasons"]:
+            print(f"- {reason}")
+    return 0 if guidance["status"] in {"passed", "warn"} else 1
+
+
+def command_control_status(args: argparse.Namespace) -> int:
+    payload = {
+        "status": "deferred",
+        "reason": "Full control-plane actions wait until ledger, gates, evals, inbox, and guidance catch real failure modes reliably.",
+        "supported_now": [
+            "runtime ledger",
+            "deterministic gates",
+            "eval rubrics and verdict events",
+            "correction inbox",
+            "read-only Symphony monitor",
+            "block/retry guidance",
+        ],
+        "deferred_actions": [
+            "pause or resume external Symphony daemon",
+            "kill worker processes",
+            "mutate Linear state automatically",
+            "mutate provider or production resources",
+            "auto-merge pull requests",
+            "budget enforcement",
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("Orocsy control plane: deferred")
+        print(payload["reason"])
+    return 0
 
 
 def symphony_prelude(issue: str) -> list[str]:
@@ -1119,24 +1541,36 @@ def symphony_prelude(issue: str) -> list[str]:
 
 def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
     repo = repo_path(args.repo)
-    issue = args.issue or ""
-    intent = args.intent or (f"Symphony issue {issue}" if issue else "Symphony worker run")
+    issue_requirements: dict[str, Any] = {}
+    if args.issue_file:
+        issue_requirements = load_issue_requirements(repo_path(args.issue_file))
+
+    issue = args.issue or issue_requirements.get("identifier") or ""
+    intent = args.intent or issue_requirements.get("title") or (f"Symphony issue {issue}" if issue else "Symphony worker run")
     state = ensure_runtime_files(repo, intent=intent, issue=issue)
     state["status"] = "dispatch-ready"
     state["phase"] = "symphony-prepare"
     state["intent"] = intent
     state["issue"] = issue
     state["workspace"] = args.workspace or str(repo)
+    if issue_requirements:
+        state["issue_requirements"] = issue_requirements
     if args.orocsy_cli:
         state["orocsy_cli"] = args.orocsy_cli
     write_json(current_state_path(repo), state)
 
+    validation = issue_requirements.get("validation") or {}
+    scope = [*(args.scope or []), *string_list(issue_requirements.get("write_scope"))]
+    evidence_files = [*(args.evidence_file or []), *string_list(validation.get("files"))]
+    evidence_events = [*(args.evidence_event or []), *string_list(validation.get("events"))]
+    evidence_commands = [*(args.evidence_command or []), *string_list(validation.get("commands"))]
+
     update_runtime_config(
         repo,
-        declared_scope=args.scope or [],
-        required_files=args.evidence_file or [],
-        required_events=args.evidence_event or [],
-        required_commands=args.evidence_command or [],
+        declared_scope=scope,
+        required_files=evidence_files,
+        required_events=evidence_events,
+        required_commands=evidence_commands,
         forbidden_terms=args.forbid or [],
     )
 
@@ -1150,10 +1584,11 @@ def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
             "intent": intent,
             "workspace": state["workspace"],
             "orocsy_cli": args.orocsy_cli,
-            "declared_scope": args.scope or [],
-            "required_evidence_files": args.evidence_file or [],
-            "required_event_types": args.evidence_event or [],
-            "required_commands": args.evidence_command or [],
+            "issue_requirements": issue_requirements,
+            "declared_scope": scope,
+            "required_evidence_files": evidence_files,
+            "required_event_types": evidence_events,
+            "required_commands": evidence_commands,
         },
     )
 
@@ -1255,6 +1690,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("--evidence-command", action="append", default=[], help="Required command text")
     gate_parser.add_argument("--strict", action="store_true", help="Treat warnings as failures")
     gate_parser.add_argument("--record", action="store_true", help="Append gate result to events.jsonl")
+    gate_parser.add_argument("--inbox", action="store_true", help="Create a correction inbox item on failure")
     gate_parser.add_argument("--json", action="store_true", help="Print JSON output")
     gate_parser.set_defaults(func=command_gate)
 
@@ -1280,8 +1716,38 @@ def build_parser() -> argparse.ArgumentParser:
     record_eval_parser.add_argument("--summary", required=True, help="Short eval summary")
     record_eval_parser.add_argument("--finding", action="append", default=[], help="Specific finding")
     record_eval_parser.add_argument("--required-correction", action="append", default=[], help="Required correction")
+    record_eval_parser.add_argument("--inbox", action="store_true", help="Create a correction inbox item on warn/failure")
     record_eval_parser.add_argument("--json", action="store_true", help="Print JSON output")
     record_eval_parser.set_defaults(func=command_eval_record)
+
+    inbox_parser = subparsers.add_parser("inbox", help="Correction inbox commands")
+    inbox_subparsers = inbox_parser.add_subparsers(dest="inbox_command", required=True)
+    inbox_create_parser = inbox_subparsers.add_parser("create", help="Create a correction item")
+    inbox_create_parser.add_argument("--source", required=True, help="Correction source")
+    inbox_create_parser.add_argument("--status", default="failed", help="Source status")
+    inbox_create_parser.add_argument("--summary", required=True, help="Correction summary")
+    inbox_create_parser.add_argument("--finding", action="append", default=[], help="Finding")
+    inbox_create_parser.add_argument("--required-correction", action="append", default=[], help="Required correction")
+    inbox_create_parser.add_argument("--next-action", choices=["block", "retry", "escalate"], default="block")
+    inbox_create_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    inbox_create_parser.set_defaults(func=command_inbox_create)
+
+    inbox_list_parser = inbox_subparsers.add_parser("list", help="List correction items")
+    inbox_list_parser.add_argument("--open-only", action="store_true", help="Only show unresolved corrections")
+    inbox_list_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    inbox_list_parser.set_defaults(func=command_inbox_list)
+
+    inbox_resolve_parser = inbox_subparsers.add_parser("resolve", help="Resolve a correction item")
+    inbox_resolve_parser.add_argument("correction", help="Correction id or file name")
+    inbox_resolve_parser.add_argument("--summary", required=True, help="Resolution summary")
+    inbox_resolve_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    inbox_resolve_parser.set_defaults(func=command_inbox_resolve)
+
+    control_parser = subparsers.add_parser("control", help="Control-plane boundary commands")
+    control_subparsers = control_parser.add_subparsers(dest="control_command", required=True)
+    control_status_parser = control_subparsers.add_parser("status", help="Show supported and deferred controls")
+    control_status_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    control_status_parser.set_defaults(func=command_control_status)
 
     symphony_parser = subparsers.add_parser("symphony", help="Symphony integration commands")
     symphony_subparsers = symphony_parser.add_subparsers(dest="symphony_command", required=True)
@@ -1290,6 +1756,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Initialize Orocsy state and policy for a Symphony worker workspace",
     )
     prepare_parser.add_argument("--issue", default="", help="Issue identifier")
+    prepare_parser.add_argument("--issue-file", default="", help="Linear-style issue requirements JSON")
     prepare_parser.add_argument("--intent", default="", help="Worker intent")
     prepare_parser.add_argument("--workspace", default="", help="Symphony workspace path")
     prepare_parser.add_argument("--orocsy-cli", default="", help="Resolved Orocsy runtime CLI path")
@@ -1315,6 +1782,16 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_parser.add_argument("--strict", action="store_true", help="Return failure when warnings are present")
     monitor_parser.add_argument("--json", action="store_true", help="Print JSON output")
     monitor_parser.set_defaults(func=command_symphony_monitor)
+
+    guidance_parser = symphony_subparsers.add_parser(
+        "guidance",
+        help="Return controlled block/retry/continue guidance for one workspace",
+    )
+    guidance_parser.add_argument("--workspace", default=".", help="Symphony workspace path")
+    guidance_parser.add_argument("--stale-minutes", type=int, default=30, help="Minutes before a run is stale")
+    guidance_parser.add_argument("--record", action="store_true", help="Append guidance event to the workspace ledger")
+    guidance_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    guidance_parser.set_defaults(func=command_symphony_guidance)
 
     return parser
 

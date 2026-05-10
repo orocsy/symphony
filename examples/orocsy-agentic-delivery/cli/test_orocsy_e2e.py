@@ -120,6 +120,154 @@ class OrocsyRuntimeE2ETests(unittest.TestCase):
             self.assertTrue(by_issue["COD-102"]["stale"])
             self.assertIn("delivery_state_missing", by_issue["COD-103"]["warnings"])
 
+    def test_dummy_linear_project_requirements_correction_and_guidance_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = self.create_workspace(root, "COD-201")
+            issue_file = root / "linear-project" / "COD-201.json"
+            issue_file.parent.mkdir()
+            issue_file.write_text(
+                json.dumps(
+                    {
+                        "identifier": "COD-201",
+                        "title": "Dummy provider setup requirements",
+                        "state": "In Progress",
+                        "project_slug": "orocsy-runtime-e2e",
+                        "write_scope": ["src/**", "evidence/**"],
+                        "shared_files": ["package.json"],
+                        "dependencies": [],
+                        "mius": [
+                            {
+                                "id": "MIU-1",
+                                "summary": "Record provider setup checklist without mutating providers.",
+                            },
+                        ],
+                        "validation": {
+                            "files": ["evidence/provider-setup.md"],
+                            "events": ["tool.finished", "eval.miu-quality"],
+                            "commands": ["unit test"],
+                        },
+                        "out_of_scope": ["live provider provisioning", "production secrets"],
+                    },
+                ),
+                encoding="utf-8",
+            )
+
+            prepared = self.run_cli(
+                "--repo",
+                str(workspace),
+                "symphony",
+                "prepare-workspace",
+                "--issue-file",
+                str(issue_file),
+                "--orocsy-cli",
+                str(CLI),
+                "--json",
+            )
+            prepared_payload = json.loads(prepared.stdout)
+            self.assertEqual(prepared_payload["state"]["issue"], "COD-201")
+            self.assertEqual(prepared_payload["state"]["issue_requirements"]["project"], "orocsy-runtime-e2e")
+
+            requirements_gate = self.run_cli(
+                "--repo",
+                str(workspace),
+                "gate",
+                "issue-requirements",
+                "--strict",
+                "--json",
+            )
+            self.assertEqual(json.loads(requirements_gate.stdout)["status"], "passed")
+
+            evidence_gate = self.run_cli(
+                "--repo",
+                str(workspace),
+                "gate",
+                "required-evidence",
+                "--strict",
+                "--record",
+                "--inbox",
+                "--json",
+                check=False,
+            )
+            self.assertEqual(evidence_gate.returncode, 1)
+            self.assertEqual(json.loads(evidence_gate.stdout)["status"], "failed")
+
+            inbox = self.run_cli("--repo", str(workspace), "inbox", "list", "--open-only", "--json")
+            corrections = json.loads(inbox.stdout)["corrections"]
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(corrections[0]["next_action"], "block")
+
+            blocked = self.run_cli(
+                "symphony",
+                "guidance",
+                "--workspace",
+                str(workspace),
+                "--record",
+                "--json",
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 1)
+            self.assertEqual(json.loads(blocked.stdout)["action"], "block")
+
+            (workspace / "evidence").mkdir()
+            (workspace / "evidence/provider-setup.md").write_text(
+                "# Provider Setup Evidence\n\nNo live provider mutation was performed.\n",
+                encoding="utf-8",
+            )
+            self.run_cli(
+                "--repo",
+                str(workspace),
+                "event",
+                "append",
+                "--type",
+                "tool.finished",
+                "--status",
+                "passed",
+                "--tool",
+                "unit test",
+            )
+            self.run_cli(
+                "--repo",
+                str(workspace),
+                "eval",
+                "record",
+                "miu-quality",
+                "--status",
+                "passed",
+                "--summary",
+                "Dummy MIU names requirements, evidence, and provider non-mutation tradeoff.",
+            )
+            self.run_cli(
+                "--repo",
+                str(workspace),
+                "inbox",
+                "resolve",
+                corrections[0]["correction_id"],
+                "--summary",
+                "Evidence file, command event, and MIU eval were recorded.",
+            )
+
+            evidence_gate_after = self.run_cli(
+                "--repo",
+                str(workspace),
+                "gate",
+                "required-evidence",
+                "--strict",
+                "--json",
+            )
+            self.assertEqual(json.loads(evidence_gate_after.stdout)["status"], "passed")
+
+            continued = self.run_cli("symphony", "guidance", "--workspace", str(workspace), "--record", "--json")
+            self.assertEqual(json.loads(continued.stdout)["action"], "continue")
+
+            monitor = self.run_cli("symphony", "monitor", "--root", str(root), "--json")
+            monitor_payload = json.loads(monitor.stdout)
+            self.assertEqual(monitor_payload["summary"]["count"], 1)
+            self.assertEqual(monitor_payload["workspaces"][0]["issue"], "COD-201")
+
+            control = self.run_cli("control", "status", "--json")
+            self.assertEqual(json.loads(control.stdout)["status"], "deferred")
+
 
 if __name__ == "__main__":
     unittest.main()

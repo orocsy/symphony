@@ -27,13 +27,17 @@ python3 cli/orocsy.py --repo /path/to/repo init --intent "ship feature"
 python3 cli/orocsy.py --repo /path/to/repo run start --issue COD-123
 python3 cli/orocsy.py --repo /path/to/repo event append --type tool.finished --status passed --tool "pnpm test"
 python3 cli/orocsy.py --repo /path/to/repo gate all --json
+python3 cli/orocsy.py --repo /path/to/repo gate issue-requirements --strict
 python3 cli/orocsy.py --repo /path/to/repo gate declared-scope --scope "src/**"
-python3 cli/orocsy.py --repo /path/to/repo gate required-evidence --evidence-event tool.finished
+python3 cli/orocsy.py --repo /path/to/repo gate required-evidence --evidence-event tool.finished --inbox
 python3 cli/orocsy.py eval list
 python3 cli/orocsy.py eval rubric miu-quality
 python3 cli/orocsy.py --repo /path/to/repo eval record miu-quality --status passed --summary "MIU is complete"
-python3 cli/orocsy.py --repo /path/to/repo symphony prepare-workspace --issue COD-123 --scope "src/**"
+python3 cli/orocsy.py --repo /path/to/repo inbox list --open-only
+python3 cli/orocsy.py --repo /path/to/repo symphony prepare-workspace --issue-file linear/COD-123.json
+python3 cli/orocsy.py symphony guidance --workspace /path/to/repo --json
 python3 cli/orocsy.py symphony monitor --root ~/.codex/symphony-workspaces/my-app-concurrent --json
+python3 cli/orocsy.py control status
 ```
 
 Useful flags:
@@ -104,6 +108,15 @@ before implementation.
 or a single workspace and reports git branch/head/dirty state, Orocsy delivery
 state, event counts, last event, stale runs, and missing runtime ledgers. Use
 `--strict` when a cron/steward job should fail on warnings.
+
+`orocsy.py inbox` stores correction items as JSON and Markdown under
+`.codex/delivery/inbox/`. Failed gates and evals can create inbox items with
+`--inbox`; workers resolve them only after recording the missing evidence.
+
+`orocsy.py symphony guidance` is controlled but non-destructive. It returns one
+of `block`, `retry`, or `continue` based on missing runtime state, stale runs,
+failed events, and unresolved corrections. `orocsy.py control status` documents
+the intentionally deferred full control plane.
 
 ## Stability Gate
 

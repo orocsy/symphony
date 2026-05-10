@@ -88,8 +88,11 @@ Orocsy worker prelude:
 12. Before handoff, print the applicable eval rubric and record the verdict:
    `python3 "$OROCSY_CLI" --repo . eval rubric miu-quality`
    `python3 "$OROCSY_CLI" --repo . eval record miu-quality --status passed --summary "<why>"`
-13. If any gate or eval fails, write the blocker to `.codex/delivery/inbox/` or the
-    Linear workpad and stop until corrected.
+13. If any gate or eval fails, create/resolve inbox items and ask for guidance:
+   `python3 "$OROCSY_CLI" --repo . gate required-evidence --strict --inbox`
+   `python3 "$OROCSY_CLI" symphony guidance --workspace . --record`
+14. If guidance says `block` or `retry`, update the Linear workpad and stop
+    until the correction is handled.
 
 Strict dispatch gate:
 

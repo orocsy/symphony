@@ -247,6 +247,128 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             leak_code, _leak_output = self.run_cli(["--repo", str(repo), "gate", "leaks"])
             self.assertEqual(leak_code, 1)
 
+    def test_prepare_workspace_reads_issue_file_and_gates_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "workspace"
+            repo.mkdir()
+            issue_file = root / "COD-201.json"
+            issue_file.write_text(
+                json.dumps(
+                    {
+                        "identifier": "COD-201",
+                        "title": "Add sample provider setup",
+                        "state": "In Progress",
+                        "project_slug": "dummy-agentic-runtime",
+                        "write_scope": ["src/**"],
+                        "shared_files": ["package.json"],
+                        "dependencies": [],
+                        "mius": [{"id": "MIU-1", "summary": "Add provider config"}],
+                        "validation": {
+                            "files": ["evidence/provider.md"],
+                            "events": ["tool.finished"],
+                            "commands": ["unit test"],
+                        },
+                        "out_of_scope": ["production provider mutation"],
+                    },
+                ),
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(
+                ["--repo", str(repo), "symphony", "prepare-workspace", "--issue-file", str(issue_file), "--json"],
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["state"]["issue"], "COD-201")
+            self.assertEqual(payload["state"]["issue_requirements"]["project"], "dummy-agentic-runtime")
+
+            policy = (repo / ".codex/delivery/policy.yml").read_text(encoding="utf-8")
+            self.assertIn("src/**", policy)
+            self.assertIn("evidence/provider.md", policy)
+            self.assertIn("tool.finished", policy)
+            self.assertIn("unit test", policy)
+
+            gate_code, gate_output = self.run_cli(["--repo", str(repo), "gate", "issue-requirements", "--strict"])
+            self.assertEqual(gate_code, 0)
+            self.assertIn("issue-requirements: passed", gate_output)
+
+    def test_gate_failure_can_create_and_resolve_correction_inbox_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.run_cli(["--repo", str(repo), "init"])
+
+            gate_code, _gate_output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "gate",
+                    "required-evidence",
+                    "--evidence-file",
+                    "evidence/missing.md",
+                    "--strict",
+                    "--inbox",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(gate_code, 1)
+            list_code, list_output = self.run_cli(["--repo", str(repo), "inbox", "list", "--open-only", "--json"])
+            self.assertEqual(list_code, 0)
+            corrections = json.loads(list_output)["corrections"]
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(corrections[0]["source"], "gate.required-evidence")
+
+            guidance_code, guidance_output = self.run_cli(["symphony", "guidance", "--workspace", str(repo), "--json"])
+            self.assertEqual(guidance_code, 1)
+            self.assertEqual(json.loads(guidance_output)["action"], "block")
+
+            resolve_code, _resolve_output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "inbox",
+                    "resolve",
+                    corrections[0]["correction_id"],
+                    "--summary",
+                    "Added missing evidence.",
+                ],
+            )
+            self.assertEqual(resolve_code, 0)
+            guidance_code_after, guidance_output_after = self.run_cli(
+                ["symphony", "guidance", "--workspace", str(repo), "--json"],
+            )
+            self.assertEqual(guidance_code_after, 0)
+            self.assertEqual(json.loads(guidance_output_after)["action"], "continue")
+
+    def test_warn_eval_inbox_produces_retry_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.run_cli(["--repo", str(repo), "init"])
+
+            eval_code, _eval_output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "eval",
+                    "record",
+                    "browser-evidence",
+                    "--status",
+                    "warn",
+                    "--summary",
+                    "Mobile evidence is missing.",
+                    "--required-correction",
+                    "Run mobile browser verification.",
+                    "--inbox",
+                ],
+            )
+
+            self.assertEqual(eval_code, 0)
+            guidance_code, guidance_output = self.run_cli(["symphony", "guidance", "--workspace", str(repo), "--json"])
+            self.assertEqual(guidance_code, 0)
+            self.assertEqual(json.loads(guidance_output)["action"], "retry")
+
     def test_symphony_monitor_reports_workspace_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
