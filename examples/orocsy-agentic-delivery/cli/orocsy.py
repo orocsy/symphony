@@ -311,9 +311,12 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_git(repo: Path, args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.setdefault("GIT_OPTIONAL_LOCKS", "0")
     return subprocess.run(
         ["git", *args],
         cwd=repo,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

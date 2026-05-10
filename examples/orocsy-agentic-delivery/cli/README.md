@@ -122,6 +122,12 @@ pnpm build
 This is the stabilization loop: debug once, then move the failure class into
 the bootstrap gate.
 
+Runtime checks:
+
+```bash
+python3 -B -m unittest test_agentic_project.py test_orocsy.py test_orocsy_e2e.py
+```
+
 ## Asset Rule
 
 Do not begin from a blank official starter when a proven asset exists. Prefer:
