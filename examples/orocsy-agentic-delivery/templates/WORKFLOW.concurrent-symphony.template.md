@@ -204,13 +204,13 @@ Orocsy worker prelude:
       workflow owner. Do not answer approval prompts by hand inside the worker.
 18. Symphony handoff recovery guard:
     - Before new product edits, inspect `git status --short --branch` and recent
-      `.orocsy/delivery/events/events.jsonl` entries when the workspace already
-      has local commits ahead of upstream or a previous `git push`, GitHub, or
-      Linear command failed.
-    - If implementation commits, validation, and gates already exist, enter
-      handoff-recovery mode: retry only the pending external handoff command
-      such as `git push`, PR review request/comment, or Linear workpad/state
-      update. Do not modify product code or rerun broad implementation work.
+      `.orocsy/delivery/events/events.jsonl` entries when the workspace has
+      dirty changes, local commits ahead of upstream, or a previous `git push`,
+      GitHub, or Linear command failed.
+    - If product changes, validation, and gates already exist, enter
+      handoff-recovery mode: complete only the pending commit, push, PR review
+      request/comment, or Linear workpad/state update. Do not modify product
+      code or rerun broad implementation work.
     - If the network or provider remains unavailable, record an Orocsy inbox
       item with next action `retry`, update the workpad when possible, and stop
       so Symphony backoff can resume without code churn.
