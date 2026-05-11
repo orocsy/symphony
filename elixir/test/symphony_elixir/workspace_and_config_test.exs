@@ -558,6 +558,68 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "issue with open Orocsy correction is not dispatch-eligible" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dispatch-correction-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-1008")
+
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      correction_path = Path.join(inbox, "correction_20260511085751_143ab7b0.json")
+
+      File.write!(
+        correction_path,
+        Jason.encode!(%{
+          "correction_id" => "correction_20260511085751_143ab7b0",
+          "issue" => "MT-1008",
+          "next_action" => "block",
+          "resolved_at" => nil,
+          "status" => "open"
+        })
+      )
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 3,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: "blocked-by-orocsy-correction",
+        identifier: "MT-1008",
+        title: "Needs human correction",
+        state: "In Progress",
+        blocked_by: []
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      File.write!(
+        correction_path,
+        Jason.encode!(%{
+          "correction_id" => "correction_20260511085751_143ab7b0",
+          "issue" => "MT-1008",
+          "next_action" => "block",
+          "resolved_at" => "2026-05-11T09:10:00Z",
+          "status" => "resolved"
+        })
+      )
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",

@@ -31,6 +31,52 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec path_for_issue(map() | String.t() | nil, worker_host()) ::
+          {:ok, Path.t()} | {:error, term()}
+  def path_for_issue(issue_or_identifier, worker_host \\ nil) do
+    issue_or_identifier
+    |> issue_context()
+    |> Map.get(:issue_identifier)
+    |> safe_identifier()
+    |> workspace_path_for_issue(worker_host)
+  end
+
+  @spec blocking_correction_for_issue?(map() | String.t() | nil, worker_host()) :: boolean()
+  def blocking_correction_for_issue?(issue_or_identifier, worker_host \\ nil) do
+    with {:ok, workspace} <- path_for_issue(issue_or_identifier, worker_host) do
+      blocking_correction_in_workspace?(workspace, worker_host)
+    else
+      _ -> false
+    end
+  end
+
+  @spec blocking_correction_in_workspace?(Path.t(), worker_host()) :: boolean()
+  def blocking_correction_in_workspace?(workspace, worker_host \\ nil)
+
+  def blocking_correction_in_workspace?(workspace, nil) when is_binary(workspace) do
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      workspace
+      |> local_correction_files()
+      |> Enum.any?(&blocking_correction_file?/1)
+    else
+      _ -> false
+    end
+  end
+
+  def blocking_correction_in_workspace?(workspace, worker_host)
+      when is_binary(workspace) and is_binary(worker_host) do
+    with :ok <- validate_workspace_path(workspace, worker_host),
+         {:ok, {output, 0}} <- run_remote_command(worker_host, remote_blocking_correction_script(workspace), Config.settings!().hooks.timeout_ms) do
+      output
+      |> IO.iodata_to_binary()
+      |> String.split("\n", trim: true)
+      |> Enum.member?("blocked")
+    else
+      _ -> false
+    end
+  end
+
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
@@ -432,6 +478,51 @@ defmodule SymphonyElixir.Workspace do
       _ ->
         {:error, {:workspace_prepare_failed, :invalid_output, output}}
     end
+  end
+
+  defp local_correction_files(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+    |> Path.wildcard()
+  end
+
+  defp blocking_correction_file?(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, %{} = correction} <- Jason.decode(body) do
+      open_blocking_correction?(correction)
+    else
+      _ -> false
+    end
+  end
+
+  defp open_blocking_correction?(%{} = correction) do
+    normalize_correction_field(correction["status"]) == "open" and
+      normalize_correction_field(correction["next_action"]) in ["block", "escalate"] and
+      is_nil(correction["resolved_at"])
+  end
+
+  defp normalize_correction_field(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_correction_field(_value), do: ""
+
+  defp remote_blocking_correction_script(workspace) do
+    [
+      remote_shell_assign("workspace", workspace),
+      "inbox=\"$workspace/.orocsy/delivery/inbox\"",
+      "if [ ! -d \"$inbox\" ]; then exit 0; fi",
+      "for correction in \"$inbox\"/correction_*.json; do",
+      "  [ -f \"$correction\" ] || continue",
+      "  if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"open\"' \"$correction\" && grep -Eq '\"next_action\"[[:space:]]*:[[:space:]]*\"(block|escalate)\"' \"$correction\" && grep -Eq '\"resolved_at\"[[:space:]]*:[[:space:]]*null' \"$correction\"; then",
+      "    printf '%s\\n' blocked",
+      "    exit 0",
+      "  fi",
+      "done"
+    ]
+    |> Enum.join("\n")
   end
 
   defp run_remote_command(worker_host, script, timeout_ms)

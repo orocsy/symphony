@@ -132,16 +132,24 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case reason do
             :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+              if workflow_blocked_by_open_correction?(running_entry) do
+                Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; open Orocsy correction blocks continuation until resolved")
 
-              state
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation,
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
+                state
+                |> complete_issue(issue_id)
+                |> release_issue_claim(issue_id)
+              else
+                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+                state
+                |> complete_issue(issue_id)
+                |> schedule_issue_retry(issue_id, 1, %{
+                  identifier: running_entry.identifier,
+                  delay_type: :continuation,
+                  worker_host: Map.get(running_entry, :worker_host),
+                  workspace_path: Map.get(running_entry, :workspace_path)
+                })
+              end
 
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
@@ -559,6 +567,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !workflow_blocked_by_open_correction?(issue) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -901,23 +910,29 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
-    else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+    cond do
+      workflow_blocked_by_open_correction?(issue, metadata) ->
+        Logger.warning("Retry blocked by open Orocsy correction for #{issue_context(issue)}; waiting for correction resolution")
+        {:noreply, release_issue_claim(state, issue.id)}
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      retry_candidate_issue?(issue, terminal_state_set()) and
+        dispatch_slots_available?(issue, state) and
+          worker_slots_available?(state, metadata[:worker_host]) ->
+        {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+
+      true ->
+        Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue.id,
+           attempt + 1,
+           Map.merge(metadata, %{
+             identifier: issue.identifier,
+             error: "no available orchestrator slots"
+           })
+         )}
     end
   end
 
@@ -1358,6 +1373,82 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
   end
+
+  defp workflow_blocked_by_open_correction?(issue_or_running_entry, metadata \\ %{})
+
+  defp workflow_blocked_by_open_correction?(%Issue{} = issue, metadata) when is_map(metadata) do
+    issue
+    |> correction_block_check_targets(metadata)
+    |> Enum.any?(&correction_block_check_target_blocked?/1)
+  end
+
+  defp workflow_blocked_by_open_correction?(%{issue: %Issue{} = issue} = running_entry, _metadata) do
+    workflow_blocked_by_open_correction?(issue, %{
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
+  defp workflow_blocked_by_open_correction?(%{identifier: identifier} = running_entry, _metadata)
+       when is_binary(identifier) do
+    metadata = %{
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    }
+
+    identifier
+    |> correction_block_check_targets(metadata)
+    |> Enum.any?(&correction_block_check_target_blocked?/1)
+  end
+
+  defp workflow_blocked_by_open_correction?(_issue_or_running_entry, _metadata), do: false
+
+  defp correction_block_check_targets(issue_or_identifier, metadata) when is_map(metadata) do
+    worker_host = normalize_worker_host(Map.get(metadata, :worker_host))
+    workspace_path = normalize_workspace_path(Map.get(metadata, :workspace_path))
+
+    cond do
+      is_binary(workspace_path) ->
+        [{:workspace, workspace_path, worker_host}]
+
+      is_binary(worker_host) ->
+        [{:issue, issue_or_identifier, worker_host}]
+
+      true ->
+        Config.settings!().worker.ssh_hosts
+        |> Enum.map(&normalize_worker_host/1)
+        |> Enum.reject(&is_nil/1)
+        |> then(&[nil | &1])
+        |> Enum.uniq()
+        |> Enum.map(&{:issue, issue_or_identifier, &1})
+    end
+  end
+
+  defp correction_block_check_target_blocked?({:workspace, workspace_path, worker_host}) do
+    Workspace.blocking_correction_in_workspace?(workspace_path, worker_host)
+  end
+
+  defp correction_block_check_target_blocked?({:issue, issue_or_identifier, worker_host}) do
+    Workspace.blocking_correction_for_issue?(issue_or_identifier, worker_host)
+  end
+
+  defp normalize_worker_host(worker_host) when is_binary(worker_host) do
+    case String.trim(worker_host) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_worker_host(_worker_host), do: nil
+
+  defp normalize_workspace_path(workspace_path) when is_binary(workspace_path) do
+    case String.trim(workspace_path) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_workspace_path(_workspace_path), do: nil
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
