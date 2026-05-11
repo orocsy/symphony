@@ -51,6 +51,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("Review hardening trigger", workflow)
             self.assertIn("OROCSY_CLI", workflow)
             self.assertIn("granular:", workflow)
+            self.assertIn("rules: false", workflow)
             self.assertIn("mcp_elicitations: true", workflow)
             self.assertNotIn("approval_policy: never", workflow)
             self.assertNotIn("reject:", workflow)
@@ -59,6 +60,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("$HOME/src/orocsy-symphony", start_script)
             self.assertIn("orocsy/symphony", start_script)
             self.assertIn("Refusing to run legacy Symphony workflow", start_script)
+            self.assertIn("granular.rules must be false", start_script)
 
     def test_init_upgrades_legacy_symphony_workflow_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +105,7 @@ Primitive workflow.
             self.assertIn("before_run", upgraded_workflow)
             self.assertIn("Review hardening trigger", upgraded_workflow)
             self.assertIn("granular:", upgraded_workflow)
+            self.assertIn("rules: false", upgraded_workflow)
             self.assertNotIn("approval_policy: never", upgraded_workflow)
             self.assertNotIn("reject:", upgraded_workflow)
             self.assertIn("$HOME/src/orocsy-symphony", upgraded_start)

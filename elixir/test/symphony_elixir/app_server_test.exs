@@ -325,6 +325,92 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server auto-approves file change approval requests when granular rules are disabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-file-change-auto-approve-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-90")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-file-change-auto-approve.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODex_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODex_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODex_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODex_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODex_TRACE:-/tmp/codex-file-change-auto-approve.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-90"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-90"}}}'
+            printf '%s\\n' '{"id":99,"method":"item/fileChange/requestApproval","params":{"itemId":"file-change-1","threadId":"thread-90","turnId":"turn-90","grantRoot":null,"reason":null}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: %{granular: %{sandbox_approval: true, rules: false, mcp_elicitations: true}}
+      )
+
+      issue = %Issue{
+        id: "issue-file-change-auto-approve",
+        identifier: "MT-90",
+        title: "Auto approve file changes",
+        description: "Ensure file change approval requests do not block worker edits",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-90",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle file change request", issue)
+
+      trace = File.read!(trace_file)
+
+      assert trace =~ ~s("id":99)
+      assert trace =~ ~s("decision":"acceptForSession")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server auto-approves command execution approval requests when approval policy is never" do
     test_root =
       Path.join(

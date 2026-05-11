@@ -175,6 +175,7 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "gate required-evidence",
         "symphony guidance",
         "granular:",
+        "rules: false",
     ]
     return (
         all(marker in content for marker in required_markers)
@@ -548,6 +549,11 @@ fi
 
 if grep -Eq "^[[:space:]]+reject:" "$WORKFLOW_FILE" || ! grep -q "granular:" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: approval_policy must use Codex app-server granular shape." >&2
+  exit 1
+fi
+
+if grep -Eq "^[[:space:]]+rules:[[:space:]]+true[[:space:]]*$" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: codex.approval_policy.granular.rules must be false so workspace file changes do not require human approval." >&2
   exit 1
 fi
 

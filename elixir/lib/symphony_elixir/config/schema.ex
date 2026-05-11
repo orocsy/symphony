@@ -163,7 +163,7 @@ defmodule SymphonyElixir.Config.Schema do
         default: %{
           "granular" => %{
             "sandbox_approval" => true,
-            "rules" => true,
+            "rules" => false,
             "mcp_elicitations" => true
           }
         }

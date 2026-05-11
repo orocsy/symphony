@@ -777,7 +777,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.approval_policy == %{
              "granular" => %{
                "sandbox_approval" => true,
-               "rules" => true,
+               "rules" => false,
                "mcp_elicitations" => true
              }
            }

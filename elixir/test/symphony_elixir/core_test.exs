@@ -1556,7 +1556,7 @@ defmodule SymphonyElixir.CoreTest do
                    expected_approval_policy = %{
                      "granular" => %{
                        "sandbox_approval" => true,
-                       "rules" => true,
+                       "rules" => false,
                        "mcp_elicitations" => true
                      }
                    }
@@ -1589,7 +1589,7 @@ defmodule SymphonyElixir.CoreTest do
                    expected_approval_policy = %{
                      "granular" => %{
                        "sandbox_approval" => true,
-                       "rules" => true,
+                       "rules" => false,
                        "mcp_elicitations" => true
                      }
                    }

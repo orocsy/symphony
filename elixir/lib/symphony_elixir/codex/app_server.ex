@@ -17,7 +17,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           port: port(),
           metadata: map(),
           approval_policy: String.t() | map(),
-          auto_approve_requests: boolean(),
+          auto_approvals: map(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           thread_id: String.t(),
@@ -51,7 +51,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            port: port,
            metadata: metadata,
            approval_policy: session_policies.approval_policy,
-           auto_approve_requests: session_policies.approval_policy == "never",
+           auto_approvals: auto_approvals(session_policies.approval_policy),
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
@@ -72,7 +72,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           port: port,
           metadata: metadata,
           approval_policy: approval_policy,
-          auto_approve_requests: auto_approve_requests,
+          auto_approvals: auto_approvals,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace
@@ -104,7 +104,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approvals) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -541,7 +541,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      auto_approve?(auto_approve_requests, :command)
     )
   end
 
@@ -598,7 +598,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      auto_approve?(auto_approve_requests, :command)
     )
   end
 
@@ -620,7 +620,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      auto_approve?(auto_approve_requests, :file_change)
     )
   end
 
@@ -642,7 +642,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      auto_approve?(auto_approve_requests, :file_change)
     )
   end
 
@@ -664,7 +664,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      auto_approve?(auto_approve_requests, :user_input)
     )
   end
 
@@ -680,6 +680,16 @@ defmodule SymphonyElixir.Codex.AppServer do
        ) do
     :unhandled
   end
+
+  defp auto_approvals("never"), do: %{all: true, file_change: true}
+
+  defp auto_approvals(%{"granular" => %{"rules" => false}}), do: %{all: false, file_change: true}
+  defp auto_approvals(%{granular: %{rules: false}}), do: %{all: false, file_change: true}
+  defp auto_approvals(_approval_policy), do: %{all: false, file_change: false}
+
+  defp auto_approve?(%{all: true}, _kind), do: true
+  defp auto_approve?(%{file_change: true}, :file_change), do: true
+  defp auto_approve?(_auto_approvals, _kind), do: false
 
   defp normalize_dynamic_tool_result(%{"success" => success} = result) when is_boolean(success) do
     output =

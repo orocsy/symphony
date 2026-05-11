@@ -68,7 +68,7 @@ codex:
   approval_policy:
     granular:
       sandbox_approval: true
-      rules: true
+      rules: false
       mcp_elicitations: true
   thread_sandbox: workspace-write
   turn_sandbox_policy:
