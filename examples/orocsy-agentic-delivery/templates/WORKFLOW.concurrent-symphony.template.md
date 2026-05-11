@@ -133,6 +133,16 @@ Orocsy worker prelude:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
 14. If guidance says `block` or `retry`, update the Linear workpad and stop
     until the correction is handled.
+15. Generated artifact cleanup:
+    - Do not run raw destructive cleanup commands such as `rm -rf`,
+      `git clean`, or `find ... -delete` inside a Symphony worker. These
+      commands are approval-bound in Codex and can abort non-interactive runs.
+    - If ignored generated artifacts such as `.next/dev`, `dist/`, `coverage/`,
+      or cache folders break validation, first prefer a project script or
+      rebuild command that safely regenerates them.
+    - If cleanup is unavoidable, stop, record an Orocsy guidance/blocker, and
+      let the workflow owner run or approve a bounded cleanup outside the
+      worker. Do not retry the same destructive command.
 
 Strict dispatch gate:
 
