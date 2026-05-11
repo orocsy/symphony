@@ -174,6 +174,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:max_turn_total_tokens, :integer, default: 1_500_000)
       field(:forbidden_command_patterns, {:array, :string}, default: [])
     end
 
@@ -190,6 +191,7 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms,
+          :max_turn_total_tokens,
           :forbidden_command_patterns
         ],
         empty_values: []
@@ -198,6 +200,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_turn_total_tokens, greater_than_or_equal_to: 0)
       |> validate_command_patterns()
     end
 

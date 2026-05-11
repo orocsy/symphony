@@ -100,6 +100,7 @@ agent:
   max_turns: 20
 codex:
   command: codex app-server
+  max_turn_total_tokens: 1500000
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -114,6 +115,7 @@ Notes:
   - `codex.approval_policy` defaults to `{"granular":{"sandbox_approval":true,"rules":false,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+  - `codex.max_turn_total_tokens` defaults to `1500000`; set it to `0` to disable the live per-turn token budget guard.
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex

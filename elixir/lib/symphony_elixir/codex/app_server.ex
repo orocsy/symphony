@@ -425,17 +425,33 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
-        handle_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests,
-          forbidden_command_patterns
-        )
+        case turn_token_budget_violation(payload, Config.settings!().codex.max_turn_total_tokens) do
+          {:error, total_tokens, max_tokens} ->
+            metadata = metadata_from_message(port, payload)
+
+            emit_message(
+              on_message,
+              :turn_token_budget_exceeded,
+              %{payload: payload, raw: payload_string, total_tokens: total_tokens, max_tokens: max_tokens},
+              metadata
+            )
+
+            stop_port(port)
+            {:error, {:turn_token_budget_exceeded, total_tokens, max_tokens}}
+
+          :ok ->
+            handle_turn_method(
+              port,
+              on_message,
+              payload,
+              payload_string,
+              method,
+              timeout_ms,
+              tool_executor,
+              auto_approve_requests,
+              forbidden_command_patterns
+            )
+        end
 
       {:ok, payload} ->
         emit_message(
@@ -708,6 +724,80 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp map_value(_map, _keys), do: nil
+
+  defp turn_token_budget_violation(_payload, max_tokens)
+       when not is_integer(max_tokens) or max_tokens <= 0,
+       do: :ok
+
+  defp turn_token_budget_violation(payload, max_tokens) when is_map(payload) do
+    case total_tokens_from_payload(payload) do
+      total_tokens when is_integer(total_tokens) and total_tokens > max_tokens ->
+        {:error, total_tokens, max_tokens}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp turn_token_budget_violation(_payload, _max_tokens), do: :ok
+
+  defp total_tokens_from_payload(payload) when is_map(payload) do
+    [
+      ["params", "msg", "payload", "info", "total_token_usage"],
+      ["params", "msg", "info", "total_token_usage"],
+      ["params", "tokenUsage", "total"],
+      ["tokenUsage", "total"],
+      ["usage"]
+    ]
+    |> Enum.find_value(fn path ->
+      payload
+      |> map_path(path)
+      |> total_tokens_from_usage()
+    end)
+  end
+
+  defp total_tokens_from_payload(_payload), do: nil
+
+  defp total_tokens_from_usage(%{} = usage) do
+    explicit_total =
+      usage
+      |> map_value(["total_tokens", "totalTokens", "total", :total_tokens, :totalTokens, :total])
+      |> integer_token_value()
+
+    input_tokens =
+      usage
+      |> map_value(["input_tokens", "inputTokens", "prompt_tokens", :input_tokens, :inputTokens, :prompt_tokens])
+      |> integer_token_value()
+
+    output_tokens =
+      usage
+      |> map_value(["output_tokens", "outputTokens", "completion_tokens", :output_tokens, :outputTokens, :completion_tokens])
+      |> integer_token_value()
+
+    cond do
+      is_integer(explicit_total) ->
+        explicit_total
+
+      is_integer(input_tokens) and is_integer(output_tokens) ->
+        input_tokens + output_tokens
+
+      true ->
+        nil
+    end
+  end
+
+  defp total_tokens_from_usage(_usage), do: nil
+
+  defp integer_token_value(value) when is_integer(value), do: value
+
+  defp integer_token_value(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} -> integer
+      _ -> nil
+    end
+  end
+
+  defp integer_token_value(_value), do: nil
 
   defp maybe_handle_approval_request(
          port,

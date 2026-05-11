@@ -114,6 +114,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          codex_max_turn_total_tokens: 1_500_000,
           codex_forbidden_command_patterns: [],
           hook_after_create: nil,
           hook_before_run: nil,
@@ -152,6 +153,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    codex_max_turn_total_tokens = Keyword.get(config, :codex_max_turn_total_tokens)
     codex_forbidden_command_patterns = Keyword.get(config, :codex_forbidden_command_patterns)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
@@ -194,6 +196,7 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "  max_turn_total_tokens: #{yaml_value(codex_max_turn_total_tokens)}",
         "  forbidden_command_patterns: #{yaml_value(codex_forbidden_command_patterns)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),

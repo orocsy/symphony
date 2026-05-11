@@ -66,6 +66,7 @@ agent:
   max_turns: 8
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  max_turn_total_tokens: 1500000
   forbidden_command_patterns:
     - '(^|\s)(pnpm|next)\s+(dev|start)(\s|$)'
     - '(^|\s)(pnpm|npm|npx|yarn)\s+(dlx|exec|x)?\s*playwright\s+install(\s|$)'
