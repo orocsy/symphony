@@ -60,6 +60,7 @@ DEFAULT_ARTIFACT_PATTERNS = (
 DEFAULT_GENERATED_CLEAN_PATHS = (
     ".next/dev",
     ".orocsy/runtime",
+    "next-env.d.ts",
 )
 
 ALLOWED_GENERATED_CLEAN_ROOTS = (
@@ -74,6 +75,10 @@ ALLOWED_GENERATED_CLEAN_ROOTS = (
     "coverage",
     "playwright-report",
     "test-results",
+)
+
+ALLOWED_TRACKED_GENERATED_PATHS = (
+    "next-env.d.ts",
 )
 
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -915,15 +920,44 @@ def remove_generated_path(target: Path) -> str:
     return "skipped"
 
 
+def restore_tracked_generated_path(repo: Path, relative_path: str) -> tuple[str, str | None]:
+    tracked = run_git(repo, ["ls-files", "--error-unmatch", "--", relative_path])
+    if tracked.returncode != 0:
+        if not (repo / relative_path).exists():
+            return "missing", None
+        return "blocked", "tracked generated path is not tracked by git"
+
+    dirty = run_git(repo, ["diff", "--quiet", "--", relative_path])
+    deleted = not (repo / relative_path).exists()
+    if dirty.returncode == 0 and not deleted:
+        return "unchanged", None
+
+    restored = run_git(repo, ["restore", "--worktree", "--", relative_path])
+    if restored.returncode != 0:
+        return "blocked", "failed to restore tracked generated path"
+    return "restored", None
+
+
 def clean_generated_paths(repo: Path, paths: list[str]) -> dict[str, Any]:
     requested = paths or list(DEFAULT_GENERATED_CLEAN_PATHS)
     removed: list[str] = []
+    restored: list[str] = []
     skipped: list[dict[str, str]] = []
     blocked: list[dict[str, str]] = []
 
     for relative_path in requested:
-        target, reason = validate_generated_clean_path(repo, relative_path)
         clean = relative_path.strip().strip("/")
+        if clean in ALLOWED_TRACKED_GENERATED_PATHS:
+            outcome, reason = restore_tracked_generated_path(repo, clean)
+            if outcome == "restored":
+                restored.append(clean)
+            elif outcome == "blocked":
+                blocked.append({"path": clean or relative_path, "reason": reason or "invalid tracked generated path"})
+            else:
+                skipped.append({"path": clean, "reason": outcome})
+            continue
+
+        target, reason = validate_generated_clean_path(repo, relative_path)
         if target is None:
             blocked.append({"path": clean or relative_path, "reason": reason or "invalid path"})
             continue
@@ -935,7 +969,7 @@ def clean_generated_paths(repo: Path, paths: list[str]) -> dict[str, Any]:
 
     if blocked:
         status = "failed"
-    elif removed:
+    elif removed or restored:
         status = "passed"
     else:
         status = "warn"
@@ -943,6 +977,7 @@ def clean_generated_paths(repo: Path, paths: list[str]) -> dict[str, Any]:
     return {
         "status": status,
         "removed": removed,
+        "restored": restored,
         "skipped": skipped,
         "blocked": blocked,
     }

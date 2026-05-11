@@ -138,10 +138,11 @@ Orocsy worker prelude:
     - Do not run raw destructive cleanup commands such as `rm -rf`,
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
-    - If ignored generated artifacts such as `.next/dev`, `.orocsy/runtime`,
-      `dist/`, `coverage/`, or cache folders break validation, first prefer a
-      project script or rebuild command that safely regenerates them. If cleanup
-      is needed, use:
+    - Before final gates, staging, or push, and whenever generated artifacts
+      such as `.next/dev`, `.orocsy/runtime`, `next-env.d.ts`, `dist/`,
+      `coverage/`, or cache folders break validation, use the bounded cleanup
+      command. It removes ignored generated folders and restores known tracked
+      framework-generated files such as `next-env.d.ts`:
       `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record`
     - If cleanup beyond the allowlisted generated-artifact command is
       unavoidable, stop, record an Orocsy guidance/blocker, and let the
@@ -157,6 +158,10 @@ Orocsy worker prelude:
       command with the workspace-local cache and keep Playwright browsers under
       package-managed ignored folders:
       `PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache <command>`
+    - For Next.js dev-server evidence through a pnpm script, prefer
+      `PORT=3101 PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache pnpm dev --port 3101`.
+      Do not use `pnpm dev -- --port 3101`; the extra separator can be passed
+      through to Next.js and fail before the browser evidence starts.
     - If no bounded browser command is available, record the harness blocker in
       `.orocsy/delivery/events/events.jsonl`, update the Linear workpad with the
       exact missing browser harness, and stop. Do not substitute an unbounded MCP
