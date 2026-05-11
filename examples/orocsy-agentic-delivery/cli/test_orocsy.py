@@ -351,6 +351,75 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             leak_code, _leak_output = self.run_cli(["--repo", str(repo), "gate", "leaks"])
             self.assertEqual(leak_code, 1)
 
+    def test_symphony_clean_generated_removes_ignored_artifact_and_records_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            (repo / ".gitignore").write_text(".next/\n", encoding="utf-8")
+            artifact = repo / ".next/dev/types/routes.d.ts"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("type AppRoutes = never\n", encoding="utf-8")
+            self.run_cli(["--repo", str(repo), "init"])
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "symphony",
+                    "clean-generated",
+                    "--path",
+                    ".next/dev",
+                    "--record",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["cleanup"]["status"], "passed")
+            self.assertIn(".next/dev", payload["cleanup"]["removed"])
+            self.assertFalse((repo / ".next/dev").exists())
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(json.loads(events[-1])["event"], "symphony.generated.cleanup")
+
+    def test_symphony_clean_generated_refuses_unignored_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            source = repo / "src/app.ts"
+            source.parent.mkdir()
+            source.write_text("export {}\n", encoding="utf-8")
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "symphony",
+                    "clean-generated",
+                    "--path",
+                    "src",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 1)
+            payload = json.loads(output)
+            self.assertEqual(payload["cleanup"]["status"], "failed")
+            self.assertTrue(source.exists())
+            self.assertEqual(payload["cleanup"]["blocked"][0]["reason"], "path is not in the generated-clean allowlist")
+
+    def test_symphony_clean_generated_allows_missing_default_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+
+            code, output = self.run_cli(["--repo", str(repo), "symphony", "clean-generated", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["cleanup"]["status"], "warn")
+            self.assertEqual(payload["cleanup"]["skipped"][0]["reason"], "missing")
+
     def test_prepare_workspace_reads_issue_file_and_gates_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -56,6 +56,7 @@ hooks:
       PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate leaks --record
       PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate secrets --record
       PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate artifacts --record
+      PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record
     else
       echo "Orocsy runtime CLI not found; refusing to run an ungoverned worker."
       exit 1
@@ -139,10 +140,12 @@ Orocsy worker prelude:
       commands are approval-bound in Codex and can abort non-interactive runs.
     - If ignored generated artifacts such as `.next/dev`, `dist/`, `coverage/`,
       or cache folders break validation, first prefer a project script or
-      rebuild command that safely regenerates them.
-    - If cleanup is unavoidable, stop, record an Orocsy guidance/blocker, and
-      let the workflow owner run or approve a bounded cleanup outside the
-      worker. Do not retry the same destructive command.
+      rebuild command that safely regenerates them. If cleanup is needed, use:
+      `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record`
+    - If cleanup beyond the allowlisted generated-artifact command is
+      unavoidable, stop, record an Orocsy guidance/blocker, and let the
+      workflow owner run or approve a bounded cleanup outside the worker. Do
+      not retry the same destructive command.
 
 Strict dispatch gate:
 

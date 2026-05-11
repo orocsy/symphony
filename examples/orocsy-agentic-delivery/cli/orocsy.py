@@ -56,6 +56,23 @@ DEFAULT_ARTIFACT_PATTERNS = (
     "__pycache__/**",
 )
 
+DEFAULT_GENERATED_CLEAN_PATHS = (
+    ".next/dev",
+)
+
+ALLOWED_GENERATED_CLEAN_ROOTS = (
+    ".next/dev",
+    ".next/cache",
+    ".turbo",
+    ".vite",
+    ".parcel-cache",
+    "dist",
+    "build",
+    "coverage",
+    "playwright-report",
+    "test-results",
+)
+
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("aws-access-key", re.compile("AK" + r"IA[0-9A-Z]{16}")),
     ("private-key", re.compile("-----BEGIN " + r"[A-Z ]*" + "PRIVATE " + "KEY-----")),
@@ -846,6 +863,88 @@ def path_matches_any(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
+def relative_path_is_child(path: str, root: str) -> bool:
+    path_parts = Path(path).parts
+    root_parts = Path(root).parts
+    return path_parts == root_parts or path_parts[: len(root_parts)] == root_parts
+
+
+def validate_generated_clean_path(repo: Path, relative_path: str) -> tuple[Path | None, str | None]:
+    clean = relative_path.strip().strip("/")
+    if not clean or clean in {".", ".."}:
+        return None, "path is empty or points at the workspace root"
+    path = Path(clean)
+    if path.is_absolute() or any(part == ".." for part in path.parts):
+        return None, "path must be a relative path inside the workspace"
+    if not any(relative_path_is_child(clean, root) for root in ALLOWED_GENERATED_CLEAN_ROOTS):
+        return None, "path is not in the generated-clean allowlist"
+
+    target = repo / path
+    try:
+        target_resolved = target.resolve(strict=target.exists())
+        repo_resolved = repo.resolve()
+        target_resolved.relative_to(repo_resolved)
+    except (OSError, ValueError):
+        return None, "path resolves outside the workspace"
+
+    if not target.exists() and not target.is_symlink():
+        return target, None
+
+    if not is_git_repo(repo):
+        return None, "workspace is not a git repository"
+
+    ignored = run_git(repo, ["check-ignore", "-q", "--", clean])
+    if ignored.returncode != 0:
+        return None, "path is not git-ignored"
+
+    return target, None
+
+
+def remove_generated_path(target: Path) -> str:
+    if not target.exists() and not target.is_symlink():
+        return "missing"
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+        return "removed"
+    if target.is_dir():
+        shutil.rmtree(target)
+        return "removed"
+    return "skipped"
+
+
+def clean_generated_paths(repo: Path, paths: list[str]) -> dict[str, Any]:
+    requested = paths or list(DEFAULT_GENERATED_CLEAN_PATHS)
+    removed: list[str] = []
+    skipped: list[dict[str, str]] = []
+    blocked: list[dict[str, str]] = []
+
+    for relative_path in requested:
+        target, reason = validate_generated_clean_path(repo, relative_path)
+        clean = relative_path.strip().strip("/")
+        if target is None:
+            blocked.append({"path": clean or relative_path, "reason": reason or "invalid path"})
+            continue
+        outcome = remove_generated_path(target)
+        if outcome == "removed":
+            removed.append(clean)
+        else:
+            skipped.append({"path": clean, "reason": outcome})
+
+    if blocked:
+        status = "failed"
+    elif removed:
+        status = "passed"
+    else:
+        status = "warn"
+
+    return {
+        "status": status,
+        "removed": removed,
+        "skipped": skipped,
+        "blocked": blocked,
+    }
+
+
 def gate_artifacts(repo: Path, config: dict[str, list[str]], _args: argparse.Namespace) -> GateResult:
     findings: list[Finding] = []
     patterns = artifact_patterns(config)
@@ -1558,6 +1657,36 @@ def command_symphony_guidance(args: argparse.Namespace) -> int:
     return 0 if guidance["status"] in {"passed", "warn"} else 1
 
 
+def command_symphony_clean_generated(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    result = clean_generated_paths(repo, args.path or [])
+    event: dict[str, Any] | None = None
+    if args.record:
+        event = append_event(
+            repo,
+            {
+                "event": "symphony.generated.cleanup",
+                "phase": "symphony-clean-generated",
+                "status": result["status"],
+                "removed": result["removed"],
+                "skipped": result["skipped"],
+                "blocked": result["blocked"],
+            },
+        )
+    payload = {"cleanup": result, "event": event}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"generated cleanup: {result['status']}")
+        for path in result["removed"]:
+            print(f"- removed {path}")
+        for item in result["skipped"]:
+            print(f"- skipped {item['path']}: {item['reason']}")
+        for item in result["blocked"]:
+            print(f"- blocked {item['path']}: {item['reason']}")
+    return 0 if result["status"] in {"passed", "warn"} else 1
+
+
 def command_control_status(args: argparse.Namespace) -> int:
     payload = {
         "status": "deferred",
@@ -1597,6 +1726,7 @@ def symphony_prelude(issue: str) -> list[str]:
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
         "Create or update the MIU trace before implementation.",
         "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; the ledger is .orocsy/delivery/events/events.jsonl.",
+        "Use `python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record` for bounded ignored generated-artifact cleanup; do not run raw cleanup shell commands.",
         "Implement one MIU at a time and append tool/test/build/browser events.",
         "Run post-MIU, pre-commit, and pre-push gates before handoff.",
         "Run or record applicable Orocsy eval rubrics before handoff.",
@@ -1873,6 +2003,20 @@ def build_parser() -> argparse.ArgumentParser:
     guidance_parser.add_argument("--record", action="store_true", help="Append guidance event to the workspace ledger")
     guidance_parser.add_argument("--json", action="store_true", help="Print JSON output")
     guidance_parser.set_defaults(func=command_symphony_guidance)
+
+    clean_parser = symphony_subparsers.add_parser(
+        "clean-generated",
+        help="Remove allowlisted git-ignored generated artifacts from a worker workspace",
+    )
+    clean_parser.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        help="Generated path to remove; defaults to .next/dev",
+    )
+    clean_parser.add_argument("--record", action="store_true", help="Append cleanup event to the workspace ledger")
+    clean_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    clean_parser.set_defaults(func=command_symphony_clean_generated)
 
     return parser
 
