@@ -34,11 +34,11 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("initialized Orocsy ledger", output)
-            state_path = repo / ".codex/delivery/state/current.json"
-            events_path = repo / ".codex/delivery/events/events.jsonl"
+            state_path = repo / ".orocsy/delivery/state/current.json"
+            events_path = repo / ".orocsy/delivery/events/events.jsonl"
             self.assertTrue(state_path.exists())
             self.assertTrue(events_path.exists())
-            self.assertTrue((repo / ".codex/delivery/evals/miu-quality.rubric.md").exists())
+            self.assertTrue((repo / ".orocsy/delivery/evals/miu-quality.rubric.md").exists())
 
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["schema_version"], 1)
@@ -69,10 +69,64 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             )
 
             self.assertEqual(code, 0)
-            events = (repo / ".codex/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(events[-1])["event"], "tool.finished")
-            state = json.loads((repo / ".codex/delivery/state/current.json").read_text(encoding="utf-8"))
+            state = json.loads((repo / ".orocsy/delivery/state/current.json").read_text(encoding="utf-8"))
             self.assertEqual(state["last_event_id"], json.loads(events[-1])["event_id"])
+
+    def test_legacy_codex_delivery_root_migrates_to_writable_runtime_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            legacy_root = repo / ".codex/delivery"
+            (legacy_root / "state").mkdir(parents=True)
+            (legacy_root / "events").mkdir(parents=True)
+            (legacy_root / "bin").mkdir(parents=True)
+            (legacy_root / "state/current.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": "run_legacy",
+                        "goal_id": "goal_legacy",
+                        "status": "running",
+                        "phase": "legacy",
+                        "intent": "Legacy run",
+                        "issue": "COD-1",
+                        "created_at": "2026-05-11T00:00:00Z",
+                        "updated_at": "2026-05-11T00:00:00Z",
+                        "last_event_id": "evt_legacy",
+                        "gates": {},
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (legacy_root / "events/events.jsonl").write_text(
+                json.dumps({"event": "legacy", "event_id": "evt_legacy"}) + "\n",
+                encoding="utf-8",
+            )
+            (legacy_root / "bin/orocsy.py").write_text("legacy binary copy\n", encoding="utf-8")
+
+            code, _output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "event",
+                    "append",
+                    "--type",
+                    "tool.finished",
+                    "--status",
+                    "passed",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertTrue((repo / ".orocsy/delivery/state/current.json").exists())
+            self.assertFalse((repo / ".orocsy/delivery/bin/orocsy.py").exists())
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(json.loads(events[0])["event"], "legacy")
+            self.assertEqual(json.loads(events[-1])["event"], "tool.finished")
 
     def test_gate_leaks_fails_for_configured_project_origin_terms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,7 +158,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             (repo / "src/app.ts").write_text("export {}\n", encoding="utf-8")
             self.commit_all(repo)
             self.run_cli(["--repo", str(repo), "init"])
-            (repo / ".codex/delivery/policy.yml").write_text("declared_scope:\n  - src/**\n", encoding="utf-8")
+            (repo / ".orocsy/delivery/policy.yml").write_text("declared_scope:\n  - src/**\n", encoding="utf-8")
             (repo / "docs.md").write_text("out of scope\n", encoding="utf-8")
 
             code, output = self.run_cli(["--repo", str(repo), "gate", "declared-scope"])
@@ -125,7 +179,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
                     "gate",
                     "required-evidence",
                     "--evidence-file",
-                    ".codex/delivery/handoff.md",
+                    ".orocsy/delivery/handoff.md",
                     "--evidence-event",
                     "tool.finished",
                 ],
@@ -189,7 +243,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertEqual(payload["rubric"], "business-correction")
             self.assertIn("provider quota not checked", payload["findings"])
 
-            events = (repo / ".codex/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(events[-1])["event"], "eval.business-correction")
 
     def test_default_runtime_files_do_not_fail_their_own_leak_gate(self) -> None:
@@ -232,15 +286,22 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             payload = json.loads(output)
             self.assertEqual(payload["state"]["issue"], "COD-123")
             self.assertEqual(payload["state"]["orocsy_cli"], "/tmp/orocsy.py")
-            self.assertIn("Confirm pre-change gates are already recorded before editing.", payload["prelude"])
+            self.assertIn(
+                "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; "
+                "the ledger is .orocsy/delivery/events/events.jsonl.",
+                payload["prelude"],
+            )
 
-            policy = (repo / ".codex/delivery/policy.yml").read_text(encoding="utf-8")
-            gates = (repo / ".codex/delivery/gates.yml").read_text(encoding="utf-8")
+            policy = (repo / ".orocsy/delivery/policy.yml").read_text(encoding="utf-8")
+            gates = (repo / ".orocsy/delivery/gates.yml").read_text(encoding="utf-8")
             self.assertIn("src/**", policy)
             self.assertIn("tool.finished", policy)
             self.assertIn("OldProject", gates)
+            git_exclude = (repo / ".git/info/exclude").read_text(encoding="utf-8")
+            self.assertIn(".orocsy/delivery/", git_exclude)
+            self.assertIn(".codex/delivery/", git_exclude)
 
-            events = (repo / ".codex/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(events[-1])["event"], "symphony.workspace.prepared")
 
     def test_symphony_prepare_workspace_installs_workspace_local_cli(self) -> None:
@@ -310,7 +371,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertEqual(payload["state"]["issue"], "COD-201")
             self.assertEqual(payload["state"]["issue_requirements"]["project"], "dummy-agentic-runtime")
 
-            policy = (repo / ".codex/delivery/policy.yml").read_text(encoding="utf-8")
+            policy = (repo / ".orocsy/delivery/policy.yml").read_text(encoding="utf-8")
             self.assertIn("src/**", policy)
             self.assertIn("evidence/provider.md", policy)
             self.assertIn("tool.finished", policy)
@@ -405,7 +466,6 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             (workspace / "README.md").write_text("workspace\n", encoding="utf-8")
             self.commit_all(workspace)
             self.run_cli(["--repo", str(workspace), "symphony", "prepare-workspace", "--issue", "COD-123"])
-            self.commit_all(workspace, "runtime")
 
             code, output = self.run_cli(["symphony", "monitor", "--root", str(root), "--json"])
 
@@ -428,11 +488,10 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             (workspace / "README.md").write_text("workspace\n", encoding="utf-8")
             self.commit_all(workspace)
             self.run_cli(["--repo", str(workspace), "symphony", "prepare-workspace", "--issue", "COD-456"])
-            state_path = workspace / ".codex/delivery/state/current.json"
+            state_path = workspace / ".orocsy/delivery/state/current.json"
             state = json.loads(state_path.read_text(encoding="utf-8"))
             state["updated_at"] = "2000-01-01T00:00:00Z"
             state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            self.commit_all(workspace, "stale-runtime")
 
             code, output = self.run_cli(["symphony", "monitor", "--root", str(root), "--stale-minutes", "1", "--strict", "--json"])
 

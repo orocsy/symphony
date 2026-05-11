@@ -53,6 +53,9 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("granular:", workflow)
             self.assertIn("rules: false", workflow)
             self.assertIn("mcp_elicitations: true", workflow)
+            self.assertIn(".orocsy/delivery/state/current.json", workflow)
+            self.assertIn(".orocsy/delivery/events/events.jsonl", workflow)
+            self.assertNotIn(".codex/delivery/events/events.jsonl", workflow)
             self.assertNotIn("approval_policy: never", workflow)
             self.assertNotIn("reject:", workflow)
 
@@ -60,6 +63,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("$HOME/src/orocsy-symphony", start_script)
             self.assertIn("orocsy/symphony", start_script)
             self.assertIn("Refusing to run legacy Symphony workflow", start_script)
+            self.assertIn("read-only .codex/delivery", start_script)
             self.assertIn("granular.rules must be false", start_script)
             self.assertIn("mix escript.build", start_script)
 
@@ -177,6 +181,8 @@ Primitive workflow.
             gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("*.tsbuildinfo", gitignore)
             self.assertIn(".DS_Store", gitignore)
+            self.assertIn(".orocsy/delivery/", gitignore)
+            self.assertIn(".codex/delivery/", gitignore)
             self.assertIn(".codex/symphony/*.legacy*", gitignore)
 
     def test_verify_scaffold_catches_structural_regressions(self) -> None:

@@ -102,17 +102,20 @@ Orocsy worker prelude:
 
 1. Read `AGENTS.md`.
 2. Load the Orocsy / `agentic-delivery-loop` skill.
-3. Read `.codex/delivery/state/current.json` and `.codex/delivery/policy.yml`.
+3. Read `.orocsy/delivery/state/current.json` and `.orocsy/delivery/policy.yml`.
    Use the workspace-local runtime CLI at `.codex/delivery/bin/orocsy.py`.
 4. Read the assigned Linear issue, including Write Scope, Shared Files,
    Dependencies, MIUs, Validation, and Out Of Scope.
-5. Before editing code, update `.codex/delivery/policy.yml` with the issue's
+5. Before editing code, update `.orocsy/delivery/policy.yml` with the issue's
    declared write-scope globs if the prepare hook could not infer them.
 6. Create or update the Technical MIU trace.
 7. Confirm the `before_run` hook already recorded `run.started`,
-   `gate.leaks`, `gate.secrets`, and `gate.artifacts` in
-   `.codex/delivery/events.jsonl`. If they are missing, stop and report
-   workflow setup failure instead of running the external `$OROCSY_CLI` path.
+   `gate.leaks`, `gate.secrets`, and `gate.artifacts` with this bounded command:
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
+   The ledger path is `.orocsy/delivery/events/events.jsonl`; do not search for
+   the retired flat path `.orocsy/delivery/events.jsonl`. If the bounded gate
+   command reports missing startup events, stop and report workflow setup
+   failure instead of running the external `$OROCSY_CLI` path.
 8. If you need to record additional runtime evidence, use:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . <command>`
 9. Implement one MIU at a time and append command evidence after each check:

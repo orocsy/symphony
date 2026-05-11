@@ -13,6 +13,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -22,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 
-DELIVERY_ROOT = Path(".codex") / "delivery"
+DELIVERY_ROOT = Path(".orocsy") / "delivery"
+LEGACY_DELIVERY_ROOT = Path(".codex") / "delivery"
 SCHEMA_VERSION = 1
 
 DEFAULT_FORBIDDEN_TERMS: tuple[str, ...] = ()
@@ -224,6 +226,10 @@ def delivery_root(repo: Path) -> Path:
     return repo / DELIVERY_ROOT
 
 
+def legacy_delivery_root(repo: Path) -> Path:
+    return repo / LEGACY_DELIVERY_ROOT
+
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -419,6 +425,7 @@ def update_runtime_config(
 
 
 def ensure_runtime_files(repo: Path, *, intent: str, issue: str, force: bool = False) -> dict[str, Any]:
+    migrate_legacy_delivery_root(repo)
     root = delivery_root(repo)
     (root / "state").mkdir(parents=True, exist_ok=True)
     (root / "events").mkdir(parents=True, exist_ok=True)
@@ -482,6 +489,19 @@ artifact_patterns:
     events_path = root / "events" / "events.jsonl"
     events_path.touch(exist_ok=True)
     return state
+
+
+def migrate_legacy_delivery_root(repo: Path) -> None:
+    root = delivery_root(repo)
+    legacy_root = legacy_delivery_root(repo)
+    if root.exists() or not legacy_root.exists() or not legacy_root.is_dir():
+        return
+
+    shutil.copytree(
+        legacy_root,
+        root,
+        ignore=shutil.ignore_patterns("bin", "__pycache__"),
+    )
 
 
 def current_state_path(repo: Path) -> Path:
@@ -676,6 +696,25 @@ def run_git(repo: Path, args: list[str], *, check: bool = False) -> subprocess.C
 def is_git_repo(repo: Path) -> bool:
     result = run_git(repo, ["rev-parse", "--is-inside-work-tree"])
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def ensure_runtime_git_excludes(repo: Path) -> None:
+    if not is_git_repo(repo):
+        return
+    result = run_git(repo, ["rev-parse", "--git-path", "info/exclude"])
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+    exclude_path = Path(result.stdout.strip())
+    if not exclude_path.is_absolute():
+        exclude_path = repo / exclude_path
+    existing = read_text(exclude_path) if exclude_path.exists() else ""
+    additions = [".orocsy/delivery/", ".codex/delivery/"]
+    missing = [entry for entry in additions if entry not in existing.splitlines()]
+    if missing:
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = "" if existing.endswith("\n") or existing == "" else "\n"
+        with exclude_path.open("a", encoding="utf-8") as handle:
+            handle.write(prefix + "\n".join(missing) + "\n")
 
 
 def git_paths(repo: Path, args: list[str]) -> list[str]:
@@ -1177,6 +1216,7 @@ def finding_text(finding: Finding) -> str:
 
 def command_init(args: argparse.Namespace) -> int:
     repo = repo_path(args.repo)
+    ensure_runtime_git_excludes(repo)
     state = ensure_runtime_files(repo, intent=args.intent or "", issue=args.issue or "", force=args.force)
     event = append_event(
         repo,
@@ -1443,7 +1483,7 @@ def guidance_for_workspace(workspace: Path, *, stale_minutes: int) -> dict[str, 
 
     allowed_next_steps = {
         "block": [
-            "Read .codex/delivery/inbox/ and fix the listed corrections.",
+            "Read .orocsy/delivery/inbox/ and fix the listed corrections.",
             "Record validation evidence after the fix.",
             "Resolve the correction item before handoff.",
         ],
@@ -1529,11 +1569,11 @@ def symphony_prelude(issue: str) -> list[str]:
     return [
         "Read AGENTS.md and project design/runtime docs before editing.",
         "Load the Orocsy / agentic-delivery-loop skill.",
-        "Read .codex/delivery/state/current.json and .codex/delivery/policy.yml.",
+        "Read .orocsy/delivery/state/current.json and .orocsy/delivery/policy.yml.",
         "Use the workspace-local .codex/delivery/bin/orocsy.py CLI for runtime gates and event evidence.",
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
         "Create or update the MIU trace before implementation.",
-        "Confirm pre-change gates are already recorded before editing.",
+        "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; the ledger is .orocsy/delivery/events/events.jsonl.",
         "Implement one MIU at a time and append tool/test/build/browser events.",
         "Run post-MIU, pre-commit, and pre-push gates before handoff.",
         "Run or record applicable Orocsy eval rubrics before handoff.",
@@ -1554,6 +1594,7 @@ def install_workspace_orocsy_cli(repo: Path, source_cli: str) -> str | None:
 
 def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
     repo = repo_path(args.repo)
+    ensure_runtime_git_excludes(repo)
     issue_requirements: dict[str, Any] = {}
     if args.issue_file:
         issue_requirements = load_issue_requirements(repo_path(args.issue_file))

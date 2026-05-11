@@ -244,7 +244,7 @@ Mandatory worker prelude:
 ```text
 1. Read AGENTS.md.
 2. Load the Orocsy / agentic-delivery-loop skill.
-3. Read .codex/delivery/state/current.json if present.
+3. Read .orocsy/delivery/state/current.json if present.
 4. Read assigned issue, write scope, dependencies, and out-of-scope notes.
 5. Create or update the MIU trace.
 6. Emit run-start event.
@@ -260,7 +260,7 @@ Mandatory worker prelude:
 Project-local runtime state:
 
 ```text
-.codex/delivery/
+.orocsy/delivery/
   policy.yml
   gates.yml
   spec.md
@@ -459,7 +459,7 @@ just the documentation.
 Minimum proof for the first runtime slice:
 
 - A fresh repo can run `orocsy init` and receive a durable
-  `.codex/delivery/state/current.json` plus `.codex/delivery/events/events.jsonl`.
+  `.orocsy/delivery/state/current.json` plus `.orocsy/delivery/events/events.jsonl`.
 - `orocsy run start` and `orocsy event append` update the ledger in a machine
   readable way without requiring chat memory.
 - `orocsy gate` exits non-zero for deterministic delivery risks: leaked old
@@ -476,10 +476,10 @@ Minimum proof for the first runtime slice:
   state, dirty worktrees, Orocsy ledger state, event counts, last event, stale
   runs, and missing ledgers without mutating any workspace.
 - LLM/human eval rubrics exist as structured CLI output and generated
-  `.codex/delivery/evals/*.rubric.md` files, and verdicts can be recorded as
+  `.orocsy/delivery/evals/*.rubric.md` files, and verdicts can be recorded as
   `eval.<rubric>` ledger events.
 - Failed gates/evals can write correction inbox items as JSON and Markdown
-  under `.codex/delivery/inbox/`, and resolved corrections are recorded as
+  under `.orocsy/delivery/inbox/`, and resolved corrections are recorded as
   ledger events.
 - Symphony guidance can return controlled `block`, `retry`, or `continue`
   advice without mutating external trackers, provider systems, worker
@@ -502,7 +502,7 @@ This is the acceptance bar for implementation orders 1 through 8.
    and stale runs.
 5. Add LLM eval rubrics for MIU quality, business correction, review
    classification, browser evidence, and workstream split safety.
-6. Add correction inbox files under `.codex/delivery/inbox/`.
+6. Add correction inbox files under `.orocsy/delivery/inbox/`.
 7. Add controlled block/retry guidance for Symphony workers.
 8. Delay full control plane behavior until the ledger and evals catch real
    failure modes reliably.

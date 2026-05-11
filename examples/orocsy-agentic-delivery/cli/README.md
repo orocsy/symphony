@@ -86,7 +86,7 @@ Scaffold flags:
 - `.codex/symphony/WORKFLOW.concurrent-symphony.md`
 - `.codex/symphony/start-symphony.sh`
 - optional `.codex/skills/agentic-delivery-loop/`
-- `.codex/delivery/evals/*.rubric.md` after runtime initialization
+- `.orocsy/delivery/evals/*.rubric.md` after runtime initialization
 
 `scaffold` additionally generates runnable project code and decision memory:
 
@@ -110,7 +110,7 @@ state, event counts, last event, stale runs, and missing runtime ledgers. Use
 `--strict` when a cron/steward job should fail on warnings.
 
 `orocsy.py inbox` stores correction items as JSON and Markdown under
-`.codex/delivery/inbox/`. Failed gates and evals can create inbox items with
+`.orocsy/delivery/inbox/`. Failed gates and evals can create inbox items with
 `--inbox`; workers resolve them only after recording the missing evidence.
 
 `orocsy.py symphony guidance` is controlled but non-destructive. It returns one

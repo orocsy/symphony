@@ -197,6 +197,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
+    manifest_warning = %{
+      "fields" => %{
+        "message" => "ignoring interface.defaultPrompt: prompt must be at most 128 characters",
+        "path" => "<codex-home>/plugins/cache/openai-curated/build-ios-apps/.codex-plugin/plugin.json"
+      },
+      "level" => "WARN",
+      "target" => "codex_core_plugins::manifest"
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :other_message,
+         payload: manifest_warning,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
 

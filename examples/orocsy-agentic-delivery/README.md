@@ -125,7 +125,7 @@ evidence. The first rubrics cover MIU quality, business correction, review
 classification, browser evidence, and workstream split safety.
 
 For correction and recovery, failed gates/evals can create inbox items under
-`.codex/delivery/inbox/`. `orocsy.py symphony guidance` then gives a
+`.orocsy/delivery/inbox/`. `orocsy.py symphony guidance` then gives a
 non-destructive `block`, `retry`, or `continue` decision for a worker. The full
 control plane remains intentionally deferred until this evidence loop catches
 enough real failure modes.

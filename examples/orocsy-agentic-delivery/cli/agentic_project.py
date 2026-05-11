@@ -542,6 +542,11 @@ if ! grep -q "OROCSY_CLI" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
+if grep -q "\\.codex/delivery/events/events\\.jsonl" "$WORKFLOW_FILE" || grep -q "\\.codex/delivery/state/current\\.json" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: mutable Orocsy ledger must live under .orocsy/delivery, not read-only .codex/delivery." >&2
+  exit 1
+fi
+
 if grep -q "approval_policy: never" "$WORKFLOW_FILE"; then
   echo "Refusing to run unsafe Symphony workflow: approval_policy must request MCP elicitation approval, not use never." >&2
   exit 1
@@ -871,6 +876,8 @@ test-results
 .env
 .env.local
 .env.*.local
+.orocsy/delivery/
+.codex/delivery/
 .codex/symphony/*.legacy*
 """,
         Path("next-env.d.ts"): """/// <reference types="next" />
@@ -1827,6 +1834,10 @@ def verify_scaffold_structure(repo: Path) -> None:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore *.tsbuildinfo")
     if ".DS_Store" not in gitignore:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .DS_Store")
+    if ".orocsy/delivery/" not in gitignore:
+        raise SystemExit("verify-scaffold failed: .gitignore must ignore .orocsy/delivery/")
+    if ".codex/delivery/" not in gitignore:
+        raise SystemExit("verify-scaffold failed: .gitignore must ignore .codex/delivery/")
 
     eslint_config = read_text(repo / "eslint.config.mjs")
     if "FlatCompat" in eslint_config:

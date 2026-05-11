@@ -83,15 +83,13 @@ class OrocsyRuntimeE2ETests(unittest.TestCase):
                 "--summary",
                 "MIU contains runtime scenario, data shape, tradeoffs, and validation.",
             )
-            self.commit_all(clean_workspace, "runtime-ledger")
 
             stale_workspace = self.create_workspace(symphony_root, "COD-102")
             self.run_cli("--repo", str(stale_workspace), "symphony", "prepare-workspace", "--issue", "COD-102")
-            state_path = stale_workspace / ".codex/delivery/state/current.json"
+            state_path = stale_workspace / ".orocsy/delivery/state/current.json"
             state = json.loads(state_path.read_text(encoding="utf-8"))
             state["updated_at"] = "2000-01-01T00:00:00Z"
             state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            self.commit_all(stale_workspace, "stale-ledger")
 
             missing_ledger_workspace = self.create_workspace(symphony_root, "COD-103")
 

@@ -1254,7 +1254,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp display_codex_update?(%{event: :notification} = update) do
+  defp display_codex_update?(%{} = update) do
     payload = update[:payload] || Map.get(update, "payload") || update
 
     cond do
@@ -1275,7 +1275,7 @@ defmodule SymphonyElixir.Orchestrator do
     warning? and
       payload
       |> inspect(limit: 80, printable_limit: 2_000)
-      |> String.match?(~r/(failed to warm featured plugin ids cache|plugins\/featured)/i)
+      |> String.match?(~r/(failed to warm featured plugin ids cache|plugins\/featured|ignoring interface\.defaultPrompt)/i)
   end
 
   defp background_plugin_warning?(_payload), do: false
