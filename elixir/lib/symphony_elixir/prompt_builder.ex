@@ -9,9 +9,12 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
+    attempt = Keyword.get(opts, :attempt)
+
     Workflow.current()
     |> prompt_template!()
     |> render_issue_template(issue, opts)
+    |> maybe_prepend_retry_prelude(attempt)
   end
 
   @spec render_issue_template(String.t(), SymphonyElixir.Linear.Issue.t() | map() | String.t() | nil, keyword()) ::
@@ -88,5 +91,37 @@ defmodule SymphonyElixir.PromptBuilder do
     else
       prompt
     end
+  end
+
+  defp maybe_prepend_retry_prelude(prompt, attempt) when is_binary(prompt) and is_integer(attempt) and attempt > 0 do
+    if retry_prelude_present?(prompt, attempt) do
+      prompt
+    else
+      retry_prelude(attempt) <> "\n\n" <> prompt
+    end
+  end
+
+  defp maybe_prepend_retry_prelude(prompt, _attempt), do: prompt
+
+  defp retry_prelude_present?(prompt, attempt) do
+    normalized = String.downcase(prompt)
+
+    String.contains?(normalized, "continuation context") or
+      String.contains?(normalized, "retry continuation") or
+      String.contains?(normalized, "retry attempt ##{attempt}") or
+      String.contains?(normalized, "handoff-recovery") or
+      String.contains?(normalized, "handoff recovery")
+  end
+
+  defp retry_prelude(attempt) do
+    """
+    Continuation context:
+
+    - This is retry attempt ##{attempt} because the issue is still active after an interrupted or failed agent turn.
+    - Resume from the current workspace state; inspect `git status --short --branch`, recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
+    - If product changes, validation, or gates already exist, do not redo implementation. Enter handoff-recovery mode and only complete the pending commit, push, PR review request, or Linear update.
+    - If a provider, network, or permission failure still blocks handoff, record an Orocsy inbox item or workpad blocker with next action `retry` and stop.
+    """
+    |> String.trim()
   end
 end

@@ -580,6 +580,12 @@ if ! grep -q "Symphony handoff recovery guard" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
+if ! grep -q "Retry continuation" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing retry continuation guard for interrupted worker turns." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
 if ! grep -q "max_turn_total_tokens" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing live Codex turn token budget guard." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2

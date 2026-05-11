@@ -104,6 +104,20 @@ Issue snapshot:
 Use this issue snapshot as the primary assignment source. If you must query
 Linear, query by `issue.id`; do not use an `IssueFilter.identifier` filter.
 
+{% if attempt %}
+Retry continuation:
+
+- This is retry attempt #{{ attempt }} because the issue is still active after
+  an interrupted or failed worker turn.
+- Resume from the current workspace state; inspect `git status --short --branch`,
+  recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
+- If product changes, validation, or gates already exist, enter
+  handoff-recovery mode and only complete the pending commit, push, PR review
+  request, or Linear update.
+- If provider/network/permission failure still blocks handoff, record an Orocsy
+  inbox item or workpad blocker with next action `retry` and stop.
+{% endif %}
+
 Orocsy worker prelude:
 
 1. Read `AGENTS.md`.

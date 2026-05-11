@@ -850,6 +850,9 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 3)
 
+    assert prompt =~ "Continuation context:"
+    assert prompt =~ "retry attempt #3"
+    assert prompt =~ "handoff-recovery mode"
     assert prompt =~ "Ticket S-1 Refactor backend request path"
     assert prompt =~ "labels=backend"
     assert prompt =~ "attempt=3"
@@ -1043,8 +1046,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "retry attempt #2"
   end
 
-  test "prompt builder adds continuation guidance for retries" do
-    workflow_prompt = "{% if attempt %}Retry #" <> "{{ attempt }}" <> "{% endif %}"
+  test "prompt builder prepends continuation guidance for retry templates that omit it" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
 
     issue = %Issue{
@@ -1058,7 +1061,38 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt == "Retry #2"
+    assert prompt =~ "Continuation context:"
+    assert prompt =~ "retry attempt #2"
+    assert prompt =~ "Resume from the current workspace state"
+    assert prompt =~ "handoff-recovery mode"
+    assert prompt =~ "Ticket MT-201"
+  end
+
+  test "prompt builder does not duplicate template-provided retry continuation guidance" do
+    workflow_prompt =
+      """
+      Retry continuation:
+      - This is retry attempt #\{{ attempt }}.
+      Ticket {{ issue.identifier }}
+      """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "MT-202",
+      title: "Continue autonomous ticket once",
+      description: "Retry flow",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-202",
+      labels: []
+    }
+
+    prompt = PromptBuilder.build_prompt(issue, attempt: 2)
+
+    assert prompt =~ "Retry continuation:"
+    assert prompt =~ "retry attempt #2"
+    assert prompt =~ "Ticket MT-202"
+    refute prompt =~ "Resume from the current workspace state"
   end
 
   test "agent runner keeps workspace after successful codex run" do
