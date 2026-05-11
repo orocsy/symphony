@@ -562,6 +562,12 @@ if grep -Eq "^[[:space:]]+rules:[[:space:]]+true[[:space:]]*$" "$WORKFLOW_FILE";
   exit 1
 fi
 
+if ! grep -q "symphony clean-generated" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing bounded generated-artifact cleanup hook." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
 linear_token_var="LINEAR""_API""_KEY"
 if [[ -z "${!linear_token_var:-}" ]]; then
   printf 'Missing %s. Add it to .env.local or export it before starting Symphony.\\n' "$linear_token_var" >&2
