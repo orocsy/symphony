@@ -792,6 +792,96 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "token budget worker failures park immediately without retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-token-budget-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        max_failed_worker_retries: 3
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-token-budget-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-TOKEN",
+        state: "In Progress",
+        title: "Token budget exhausted",
+        description: "Worker should park after the live turn budget",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :TokenBudgetParkOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(),
+         {%RuntimeError{message: "Agent run failed: {:turn_token_budget_exceeded, 1_500_000}"}, []}}
+      )
+
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.token-budget"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "token-budget"
+      assert body =~ "blocked"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()

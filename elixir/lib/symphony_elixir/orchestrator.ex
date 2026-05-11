@@ -1016,14 +1016,14 @@ defmodule SymphonyElixir.Orchestrator do
 
       token_budget_failure?(normalized) ->
         %{
-          action: :retry,
+          action: :block,
           kind: "token-budget",
-          source_status: "retryable",
+          source_status: "blocked",
           next_action: "block",
           summary: "Symphony stopped a Codex worker after it exceeded the configured live turn token budget.",
           required_corrections: [
-            "Inspect the workspace and latest worker messages for repeated context scans or missing stop conditions.",
-            "Tighten the work scope or handoff checkpoint before redispatching."
+            "Inspect the workspace and latest worker messages for repeated context scans, missing stop conditions, or dirty validated work that only needs handoff.",
+            "Commit, push, or trim the smallest safe checkpoint before redispatching."
           ]
         }
 

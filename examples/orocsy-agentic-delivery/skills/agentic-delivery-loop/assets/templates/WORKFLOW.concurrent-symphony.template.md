@@ -235,11 +235,15 @@ Orocsy worker prelude:
     - The Symphony runtime will stop a worker immediately when Codex requests
       command approval, sandbox approval, MCP elicitation, or interactive input
       that the non-interactive worker cannot safely answer.
+    - Live Codex turn token-budget exhaustion parks immediately with next action
+      `block`; it is not an automatic retry because the expensive turn already
+      happened and the workspace may contain validated dirty handoff work.
     - Retryable network/provider/runtime failures may retry only up to
       `agent.max_failed_worker_retries`. After that, Symphony must create an
       Orocsy correction, try to comment on Linear, release the worker slot, and
       stop dispatching that issue until the correction is resolved.
-    - Do not keep reasoning around a blocked permission or network condition.
+    - Do not keep reasoning around a blocked permission, token-budget, or network
+      condition.
       Record the blocker with next action `block` or `retry` and let the
       workflow owner resolve/redispatch when the environment is healthy.
 
