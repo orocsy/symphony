@@ -280,13 +280,22 @@ Review hardening trigger:
 4. Classify each finding as `accept`, `duplicate`, `stale`, `reject`, or
    `needs-design`.
 5. Fix only accepted current-code findings inside the issue's write scope.
-6. Treat the first accepted current review finding as the next MIU. Avoid
-   broad exploration after a valid actionable review item is known.
-7. Add or update focused regression tests for every accepted finding.
-8. Push to the existing PR branch, reply or update the Linear workpad with the
+6. Build a bounded current accepted review set from unresolved, non-outdated
+   findings. Fix all accepted current-code findings that are inside this
+   issue's write scope and small enough for one review-hardening batch.
+7. Review completion gate: do not move the issue back to `Human Review` until
+   a fresh thread-aware scan shows zero active accepted review threads for the
+   PR, or every remaining active thread is classified as `duplicate`, `stale`,
+   `reject`, or `needs-design` with evidence in the Linear workpad.
+8. If multiple accepted findings are too broad or unrelated for one MIU, fix the
+   first safe batch, push it, leave the issue in `Rework`, and list the
+   remaining active thread IDs and next action in Linear instead of handing back
+   as complete.
+9. Add or update focused regression tests for every accepted finding.
+10. Push to the existing PR branch, reply or update the Linear workpad with the
    classification and validation evidence, request review again, then move the
-   issue back to `Human Review`.
-9. If push, GitHub review request, or Linear update fails after validation,
+   issue back to `Human Review` only after the review completion gate passes.
+11. If push, GitHub review request, or Linear update fails after validation,
    record a handoff blocker and stop in handoff-recovery mode instead of
    repeating the implementation MIU.
 

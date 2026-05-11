@@ -34,6 +34,9 @@ Flat PR comments are not enough. Fetch review threads with:
 6. Commit and push.
 7. Trigger another review.
 8. Poll for fresh review result and distinguish it from old unresolved threads.
+9. Do not hand back as complete while active accepted review threads remain.
+   If accepted threads are too broad or unrelated for one MIU, leave the issue
+   in Rework and record the remaining thread IDs plus next action.
 
 ## Squash Merge Caveat
 
@@ -49,4 +52,3 @@ may still list old feature commits. Compare trees or PR merge commit instead:
 git diff --name-status origin/main origin/feature
 gh pr view <number> --json state,mergedAt,mergeCommit,headRefName
 ```
-

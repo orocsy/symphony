@@ -176,6 +176,7 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "symphony guidance",
         "Dirty validated handoff checkpoint",
         "Runtime failure parking guard",
+        "Review completion gate",
         "max_failed_worker_retries",
         "granular:",
         "rules: false",
@@ -210,6 +211,7 @@ def start_script_uses_orocsy_runtime(content: str) -> bool:
         "symphony prepare-workspace",
         "Dirty validated handoff checkpoint",
         "missing failed worker retry parking guard",
+        "missing review completion guard",
         "approval_policy: never",
     ]
     return all(marker in content for marker in required_markers)
@@ -593,6 +595,12 @@ fi
 
 if ! grep -q "Retry continuation" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing retry continuation guard for interrupted worker turns." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "Review completion gate" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing review completion guard for active review threads." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi
