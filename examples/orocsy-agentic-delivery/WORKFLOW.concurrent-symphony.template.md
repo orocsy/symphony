@@ -176,6 +176,17 @@ Orocsy worker prelude:
       `.orocsy/delivery/events/events.jsonl`, update the Linear workpad, and
       stop. Do not install dependencies/browsers ad hoc from the worker and do
       not claim product browser verification passed.
+17. Symphony permission guard:
+    - Do not set `codex.approval_policy` to `never`. The generated start
+      script refuses that mode because it can silently approve dangerous
+      non-interactive worker requests.
+    - In granular mode, Symphony may auto-approve only Codex file-change
+      approvals caused by workspace edit rules being disabled. Command
+      approvals, sandbox escalations, MCP elicitations, and external mutation
+      approvals must not be auto-approved by the worker.
+    - If a command approval or MCP/tool approval prompt appears, record the
+      blocker in the Orocsy ledger, update the Linear workpad, and stop for the
+      workflow owner. Do not answer approval prompts by hand inside the worker.
 
 Strict dispatch gate:
 
