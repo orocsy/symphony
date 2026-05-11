@@ -20,6 +20,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           auto_approvals: map(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
+          forbidden_command_patterns: [String.t()],
           thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil
@@ -54,6 +55,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            auto_approvals: auto_approvals(session_policies.approval_policy),
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
+           forbidden_command_patterns: session_policies.forbidden_command_patterns,
            thread_id: thread_id,
            workspace: expanded_workspace,
            worker_host: worker_host
@@ -73,6 +75,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata: metadata,
           approval_policy: approval_policy,
           auto_approvals: auto_approvals,
+          forbidden_command_patterns: forbidden_command_patterns,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace
@@ -104,7 +107,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approvals) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approvals, forbidden_command_patterns) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -326,22 +329,40 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, forbidden_command_patterns) do
     receive_loop(
       port,
       on_message,
       Config.settings!().codex.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      forbidden_command_patterns
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(
+         port,
+         on_message,
+         timeout_ms,
+         pending_line,
+         tool_executor,
+         auto_approve_requests,
+         forbidden_command_patterns
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          forbidden_command_patterns
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -350,7 +371,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          forbidden_command_patterns
         )
 
       {^port, {:exit_status, status}} ->
@@ -361,7 +383,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(
+         port,
+         on_message,
+         data,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests,
+         forbidden_command_patterns
+       ) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -403,7 +433,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           method,
           timeout_ms,
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          forbidden_command_patterns
         )
 
       {:ok, payload} ->
@@ -417,7 +448,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, forbidden_command_patterns)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -434,7 +465,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, forbidden_command_patterns)
     end
   end
 
@@ -459,10 +490,50 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         forbidden_command_patterns
        ) do
     metadata = metadata_from_message(port, payload)
 
+    case forbidden_command_violation(payload, forbidden_command_patterns) do
+      {:error, command, pattern} ->
+        emit_message(
+          on_message,
+          :forbidden_command,
+          %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+          metadata
+        )
+
+        {:error, {:forbidden_command, command, pattern}}
+
+      :ok ->
+        handle_allowed_turn_method(
+          port,
+          on_message,
+          payload,
+          payload_string,
+          method,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          metadata,
+          forbidden_command_patterns
+        )
+    end
+  end
+
+  defp handle_allowed_turn_method(
+         port,
+         on_message,
+         payload,
+         payload_string,
+         method,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests,
+         metadata,
+         forbidden_command_patterns
+       ) do
     case maybe_handle_approval_request(
            port,
            method,
@@ -484,7 +555,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          forbidden_command_patterns
+        )
 
       :approval_required ->
         emit_message(
@@ -518,10 +597,117 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
+          receive_loop(
+            port,
+            on_message,
+            timeout_ms,
+            "",
+            tool_executor,
+            auto_approve_requests,
+            forbidden_command_patterns
+          )
         end
     end
   end
+
+  defp forbidden_command_violation(payload, patterns) when is_list(patterns) do
+    command = command_text(payload)
+
+    cond do
+      is_nil(command) ->
+        :ok
+
+      match = first_matching_forbidden_command_pattern(command, patterns) ->
+        {:error, command, match}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp first_matching_forbidden_command_pattern(command, patterns) when is_binary(command) do
+    Enum.find(patterns, fn pattern ->
+      case Regex.compile(pattern) do
+        {:ok, regex} -> Regex.match?(regex, command)
+        {:error, _reason} -> false
+      end
+    end)
+  end
+
+  defp command_text(%{"method" => "codex/event/exec_command_begin"} = payload) do
+    payload
+    |> command_candidate()
+    |> normalize_command()
+  end
+
+  defp command_text(%{"method" => "item/commandExecution/requestApproval"} = payload) do
+    payload
+    |> command_candidate()
+    |> normalize_command()
+  end
+
+  defp command_text(_payload), do: nil
+
+  defp command_candidate(payload) do
+    map_path(payload, ["params", "msg", "command"]) ||
+      map_path(payload, ["params", "command"]) ||
+      map_path(payload, ["params", "parsedCmd"]) ||
+      map_path(payload, ["params", "cmd"]) ||
+      map_path(payload, ["params", "item", "command"]) ||
+      map_path(payload, ["params", "item", "parsedCmd"])
+  end
+
+  defp normalize_command(%{} = command) do
+    binary_command = map_value(command, ["parsedCmd", "command", "cmd"])
+    args = map_value(command, ["args", "argv"])
+
+    cond do
+      is_binary(binary_command) and is_list(args) -> normalize_command([binary_command | args])
+      is_binary(binary_command) -> normalize_command(binary_command)
+      is_list(args) -> normalize_command(args)
+      true -> nil
+    end
+  end
+
+  defp normalize_command(command) when is_binary(command) do
+    command
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_command(command) when is_list(command) do
+    if Enum.all?(command, &is_binary/1) do
+      command
+      |> Enum.join(" ")
+      |> normalize_command()
+    end
+  end
+
+  defp normalize_command(_command), do: nil
+
+  defp map_path(value, []), do: value
+
+  defp map_path(%{} = map, [key | rest]) when is_binary(key) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> map_path(value, rest)
+      :error -> nil
+    end
+  end
+
+  defp map_path(_value, _path), do: nil
+
+  defp map_value(%{} = map, keys) when is_list(keys) do
+    Enum.find_value(keys, fn key -> Map.get(map, key) end)
+  end
+
+  defp map_value(_map, _keys), do: nil
 
   defp maybe_handle_approval_request(
          port,

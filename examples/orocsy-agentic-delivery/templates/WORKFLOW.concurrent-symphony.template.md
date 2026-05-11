@@ -66,6 +66,10 @@ agent:
   max_turns: 20
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  forbidden_command_patterns:
+    - '(^|\s)(pnpm|next)\s+(dev|start)(\s|$)'
+    - '(^|\s)(pnpm|npm|npx|yarn)\s+(dlx|exec|x)?\s*playwright\s+install(\s|$)'
+    - '(^|\s)playwright\s+install(\s|$)'
   approval_policy:
     granular:
       sandbox_approval: true
@@ -149,23 +153,29 @@ Orocsy worker prelude:
       workflow owner run or approve a bounded cleanup outside the worker. Do
       not retry the same destructive command.
 16. Symphony browser verification guard:
-    - Browser evidence is still required for UI-impacting work, but do not use
-      raw MCP browser calls such as `mcp__playwright__browser_run_code_unsafe`
-      from a Symphony app-server worker. If that tool blocks, Symphony cannot
-      recover the turn or hand off the MIU cleanly.
-    - Prefer project-owned, bounded commands such as `pnpm exec playwright ...`
-      or an existing browser smoke script. Prefix any npm/npx-backed browser
-      command with the workspace-local cache and keep Playwright browsers under
-      package-managed ignored folders:
+    - Browser evidence is still required for UI-impacting work, but Symphony
+      command guard denies raw dev-server and browser-install commands in
+      non-interactive workers.
+    - Do not run `pnpm dev`, `next dev`, `pnpm start`, `next start`,
+      `pnpm dlx playwright install`, `npx playwright install`, or
+      `playwright install` from a worker turn. The runtime is configured to
+      fail the turn when these commands start, because they create unbounded
+      servers/downloads that a non-interactive worker may not cleanly stop.
+    - Do not use raw MCP browser calls such as
+      `mcp__playwright__browser_run_code_unsafe` from a Symphony app-server
+      worker. If that tool blocks, Symphony cannot recover the turn or hand off
+      the MIU cleanly.
+    - Use only a project-owned bounded browser harness, such as `pnpm e2e`,
+      `pnpm exec playwright test`, or `node scripts/browser-smoke.mjs`, where
+      the top-level command owns any server startup and always stops it before
+      exit. Prefix any npm/npx-backed browser command with the workspace-local
+      cache and keep generated browser artifacts under ignored folders:
       `PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache NPM_CONFIG_STORE_DIR=.orocsy/runtime/pnpm-store npm_config_store_dir=.orocsy/runtime/pnpm-store <command>`
-    - For Next.js dev-server evidence through a pnpm script, prefer
-      `PORT=3101 PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache NPM_CONFIG_STORE_DIR=.orocsy/runtime/pnpm-store npm_config_store_dir=.orocsy/runtime/pnpm-store pnpm dev --port 3101`.
-      Do not use `pnpm dev -- --port 3101`; the extra separator can be passed
-      through to Next.js and fail before the browser evidence starts.
-    - If no bounded browser command is available, record the harness blocker in
-      `.orocsy/delivery/events/events.jsonl`, update the Linear workpad with the
-      exact missing browser harness, and stop. Do not substitute an unbounded MCP
-      browser session and do not claim product browser verification passed.
+    - If the project lacks Playwright/browser dependencies, installed browser
+      binaries, or a bounded smoke harness, record the exact blocker in
+      `.orocsy/delivery/events/events.jsonl`, update the Linear workpad, and
+      stop. Do not install dependencies/browsers ad hoc from the worker and do
+      not claim product browser verification passed.
 
 Strict dispatch gate:
 
