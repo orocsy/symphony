@@ -25,6 +25,8 @@ from typing import Any
 
 DELIVERY_ROOT = Path(".orocsy") / "delivery"
 LEGACY_DELIVERY_ROOT = Path(".codex") / "delivery"
+LEGACY_MUTABLE_DELIVERY_PREFIX = ".codex/delivery"
+MUTABLE_DELIVERY_PREFIX = ".orocsy/delivery"
 SCHEMA_VERSION = 1
 
 DEFAULT_FORBIDDEN_TERMS: tuple[str, ...] = ()
@@ -362,12 +364,27 @@ def string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in as_list(value) if str(item).strip()]
 
 
+def normalize_mutable_delivery_path(value: str) -> str:
+    text = str(value).strip()
+    if text == LEGACY_MUTABLE_DELIVERY_PREFIX:
+        return MUTABLE_DELIVERY_PREFIX
+    if text.startswith(f"{LEGACY_MUTABLE_DELIVERY_PREFIX}/"):
+        return f"{MUTABLE_DELIVERY_PREFIX}/{text[len(LEGACY_MUTABLE_DELIVERY_PREFIX) + 1:]}"
+    return text
+
+
+def normalize_mutable_delivery_paths(values: list[str]) -> list[str]:
+    return [normalize_mutable_delivery_path(value) for value in values]
+
+
 def load_issue_requirements(path: Path) -> dict[str, Any]:
     raw = json.loads(read_text(path))
     validation_raw = raw.get("validation") or {}
     if isinstance(validation_raw, dict):
         validation = {
-            "files": string_list(validation_raw.get("files") or validation_raw.get("evidence_files")),
+            "files": normalize_mutable_delivery_paths(
+                string_list(validation_raw.get("files") or validation_raw.get("evidence_files"))
+            ),
             "events": string_list(validation_raw.get("events") or validation_raw.get("evidence_events")),
             "commands": string_list(validation_raw.get("commands") or validation_raw.get("evidence_commands")),
             "scenarios": string_list(validation_raw.get("scenarios")),
@@ -385,8 +402,8 @@ def load_issue_requirements(path: Path) -> dict[str, Any]:
         "title": str(raw.get("title") or "").strip(),
         "state": str(raw.get("state") or raw.get("status") or "").strip(),
         "project": str(raw.get("project") or raw.get("project_slug") or "").strip(),
-        "write_scope": string_list(raw.get("write_scope") or raw.get("writeScope")),
-        "shared_files": string_list(raw.get("shared_files") or raw.get("sharedFiles")),
+        "write_scope": normalize_mutable_delivery_paths(string_list(raw.get("write_scope") or raw.get("writeScope"))),
+        "shared_files": normalize_mutable_delivery_paths(string_list(raw.get("shared_files") or raw.get("sharedFiles"))),
         "dependencies": string_list(raw.get("dependencies")),
         "mius": as_list(raw.get("mius") or raw.get("MIUs")),
         "validation": validation,
@@ -410,8 +427,14 @@ def update_runtime_config(
     existing_gates = parse_simple_list_config(gates_path)
 
     policy = {
-        "declared_scope": merge_unique(existing_policy.get("declared_scope", []), declared_scope),
-        "required_evidence_files": merge_unique(existing_policy.get("required_evidence_files", []), required_files),
+        "declared_scope": merge_unique(
+            normalize_mutable_delivery_paths(existing_policy.get("declared_scope", [])),
+            normalize_mutable_delivery_paths(declared_scope),
+        ),
+        "required_evidence_files": merge_unique(
+            normalize_mutable_delivery_paths(existing_policy.get("required_evidence_files", [])),
+            normalize_mutable_delivery_paths(required_files),
+        ),
         "required_event_types": merge_unique(existing_policy.get("required_event_types", []), required_events),
         "required_commands": merge_unique(existing_policy.get("required_commands", []), required_commands),
     }
@@ -877,8 +900,8 @@ def changed_paths(repo: Path) -> list[str]:
 
 
 def gate_declared_scope(repo: Path, config: dict[str, list[str]], args: argparse.Namespace) -> GateResult:
-    scope = list(config.get("declared_scope", []))
-    scope.extend(args.scope or [])
+    scope = normalize_mutable_delivery_paths(list(config.get("declared_scope", [])))
+    scope.extend(normalize_mutable_delivery_paths(args.scope or []))
     if not scope:
         return GateResult(
             "declared-scope",
@@ -1094,10 +1117,10 @@ def emit_monitor_output(payload: dict[str, Any], *, json_output: bool) -> None:
 
 
 def gate_required_evidence(repo: Path, config: dict[str, list[str]], args: argparse.Namespace) -> GateResult:
-    required_files = list(config.get("required_evidence_files", []))
+    required_files = normalize_mutable_delivery_paths(list(config.get("required_evidence_files", [])))
     required_events = list(config.get("required_event_types", []))
     required_commands = list(config.get("required_commands", []))
-    required_files.extend(args.evidence_file or [])
+    required_files.extend(normalize_mutable_delivery_paths(args.evidence_file or []))
     required_events.extend(args.evidence_event or [])
     required_commands.extend(args.evidence_command or [])
 

@@ -188,6 +188,23 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("required-evidence: passed", output)
 
+    def test_gate_required_evidence_normalizes_legacy_delivery_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.run_cli(["--repo", str(repo), "init"])
+            evidence = repo / ".orocsy/delivery/evidence/proof.txt"
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_text("browser proof\n", encoding="utf-8")
+            (repo / ".orocsy/delivery/policy.yml").write_text(
+                "required_evidence_files:\n  - .codex/delivery/evidence/proof.txt\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["--repo", str(repo), "gate", "required-evidence"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("required-evidence: passed", output)
+
     def test_gate_all_can_emit_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -347,12 +364,12 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
                         "title": "Add sample provider setup",
                         "state": "In Progress",
                         "project_slug": "dummy-agentic-runtime",
-                        "write_scope": ["src/**"],
+                        "write_scope": ["src/**", ".codex/delivery/**"],
                         "shared_files": ["package.json"],
                         "dependencies": [],
                         "mius": [{"id": "MIU-1", "summary": "Add provider config"}],
                         "validation": {
-                            "files": ["evidence/provider.md"],
+                            "files": [".codex/delivery/evidence/provider.md"],
                             "events": ["tool.finished"],
                             "commands": ["unit test"],
                         },
@@ -370,10 +387,17 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             payload = json.loads(output)
             self.assertEqual(payload["state"]["issue"], "COD-201")
             self.assertEqual(payload["state"]["issue_requirements"]["project"], "dummy-agentic-runtime")
+            self.assertIn(".orocsy/delivery/**", payload["state"]["issue_requirements"]["write_scope"])
+            self.assertIn(
+                ".orocsy/delivery/evidence/provider.md",
+                payload["state"]["issue_requirements"]["validation"]["files"],
+            )
 
             policy = (repo / ".orocsy/delivery/policy.yml").read_text(encoding="utf-8")
             self.assertIn("src/**", policy)
-            self.assertIn("evidence/provider.md", policy)
+            self.assertIn(".orocsy/delivery/**", policy)
+            self.assertIn(".orocsy/delivery/evidence/provider.md", policy)
+            self.assertNotIn(".codex/delivery/evidence/provider.md", policy)
             self.assertIn("tool.finished", policy)
             self.assertIn("unit test", policy)
 
