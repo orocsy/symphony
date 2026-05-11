@@ -43,6 +43,7 @@ Continuation context:
 
 - This is retry attempt #{{ attempt }} because the ticket is still in an active state.
 - Resume from the current workspace state instead of restarting from scratch.
+- If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty validated handoff checkpoint: inspect the focused diff, stage, commit, push, request/update PR review, and update the tracker before broad scans or validation reruns.
 - Do not repeat already-completed investigation or validation unless needed for new code changes.
 - Do not end the turn while the issue remains in an active state unless you are blocked by missing required permissions/secrets.
   {% endif %}

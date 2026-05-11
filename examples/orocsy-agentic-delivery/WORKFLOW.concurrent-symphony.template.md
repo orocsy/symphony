@@ -111,6 +111,12 @@ Retry continuation:
   an interrupted or failed worker turn.
 - Resume from the current workspace state; inspect `git status --short --branch`,
   recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
+- If `git status` is dirty/ahead and recent `tool.finished`, `gate.post-miu`,
+  `gate.required-evidence`, or `gate.declared-scope` events passed, this is a
+  dirty validated handoff checkpoint.
+- At a dirty validated handoff checkpoint, inspect the focused diff, then stage,
+  commit, push, request/update PR review, and update Linear before any broad
+  PR/Linear scans or broad validation reruns.
 - If product changes, validation, or gates already exist, enter
   handoff-recovery mode and only complete the pending commit, push, PR review
   request, or Linear update.
@@ -207,6 +213,13 @@ Orocsy worker prelude:
       `.orocsy/delivery/events/events.jsonl` entries when the workspace has
       dirty changes, local commits ahead of upstream, or a previous `git push`,
       GitHub, or Linear command failed.
+    - Dirty validated handoff checkpoint: when `git status` is dirty/ahead and
+      recent `tool.finished`, `gate.post-miu`, `gate.required-evidence`, or
+      `gate.declared-scope` events passed, the next worker action is focused
+      diff inspection, staging, commit, push, PR review request/update, and
+      Linear handoff. Do not query broad Linear/GitHub context or rerun broad
+      validations before the commit unless the focused diff is incomplete or
+      invalid.
     - If product changes, validation, and gates already exist, enter
       handoff-recovery mode: complete only the pending commit, push, PR review
       request/comment, or Linear workpad/state update. Do not modify product

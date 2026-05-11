@@ -1068,6 +1068,51 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-201"
   end
 
+  test "prompt builder prepends dirty validated handoff checkpoint for retry workspaces" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-validated-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(workspace, "src"))
+      File.write!(Path.join(workspace, "src/app.ts"), "export const ready = true;\n")
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "guest continue regression passed", "ts": "2026-05-11T14:38:47Z"}\n)
+      )
+
+      issue = %Issue{
+        identifier: "MT-203",
+        title: "Finish handoff",
+        description: "Retry flow",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-203",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Dirty validated handoff checkpoint:")
+      assert prompt =~ "guest continue regression passed"
+      assert prompt =~ "First action: inspect the focused diff, stage the intended files, commit, and push"
+      assert prompt =~ "Do not query broad Linear/GitHub context"
+      assert prompt =~ "Ticket MT-203"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder does not duplicate template-provided retry continuation guidance" do
     workflow_prompt =
       """

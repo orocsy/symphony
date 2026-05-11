@@ -90,7 +90,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
@@ -130,19 +130,31 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, workspace, 1, _max_turns) do
+    PromptBuilder.build_prompt(issue, Keyword.put(opts, :workspace, workspace))
+  end
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
-    """
-    Continuation guidance:
+  defp build_turn_prompt(_issue, _opts, workspace, turn_number, max_turns) do
+    checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)
 
-    - The previous Codex turn completed normally, but the Linear issue is still in an active state.
-    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
-    - Resume from the current workspace and workpad state instead of restarting from scratch.
-    - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.
-    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
-    """
+    guidance =
+      """
+      Continuation guidance:
+
+      - The previous Codex turn completed normally, but the Linear issue is still in an active state.
+      - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+      - Resume from the current workspace and workpad state instead of restarting from scratch.
+      - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
+      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty validated handoff checkpoint. Inspect the focused diff, then stage, commit, push, request/update PR review, and update Linear before any broad scans or validation reruns.
+      - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.
+      - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+      """
+
+    if checkpoint == "" do
+      guidance
+    else
+      checkpoint <> "\n\n" <> guidance
+    end
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do

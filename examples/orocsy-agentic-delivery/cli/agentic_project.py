@@ -174,6 +174,7 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "OROCSY_CLI",
         "gate required-evidence",
         "symphony guidance",
+        "Dirty validated handoff checkpoint",
         "granular:",
         "rules: false",
     ]
@@ -205,6 +206,7 @@ def start_script_uses_orocsy_runtime(content: str) -> bool:
         "orocsy/symphony",
         "OROCSY_CLI",
         "symphony prepare-workspace",
+        "Dirty validated handoff checkpoint",
         "approval_policy: never",
     ]
     return all(marker in content for marker in required_markers)
@@ -576,6 +578,12 @@ fi
 
 if ! grep -q "Symphony handoff recovery guard" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing handoff recovery guard for push/GitHub/Linear failures." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "Dirty validated handoff checkpoint" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing dirty validated handoff checkpoint guard." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi
