@@ -48,6 +48,7 @@ DEFAULT_ARTIFACT_PATTERNS = (
     "*.tsbuildinfo",
     ".next/**",
     "node_modules/**",
+    ".orocsy/runtime/**",
     "dist/**",
     "build/**",
     "coverage/**",
@@ -58,11 +59,13 @@ DEFAULT_ARTIFACT_PATTERNS = (
 
 DEFAULT_GENERATED_CLEAN_PATHS = (
     ".next/dev",
+    ".orocsy/runtime",
 )
 
 ALLOWED_GENERATED_CLEAN_ROOTS = (
     ".next/dev",
     ".next/cache",
+    ".orocsy/runtime",
     ".turbo",
     ".vite",
     ".parcel-cache",
@@ -748,7 +751,7 @@ def ensure_runtime_git_excludes(repo: Path) -> None:
     if not exclude_path.is_absolute():
         exclude_path = repo / exclude_path
     existing = read_text(exclude_path) if exclude_path.exists() else ""
-    additions = [".orocsy/delivery/", ".codex/delivery/"]
+    additions = [".orocsy/delivery/", ".orocsy/runtime/", ".codex/delivery/"]
     missing = [entry for entry in additions if entry not in existing.splitlines()]
     if missing:
         exclude_path.parent.mkdir(parents=True, exist_ok=True)

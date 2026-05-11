@@ -51,6 +51,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("Symphony browser verification guard", workflow)
             self.assertIn("mcp__playwright__browser_run_code_unsafe", workflow)
             self.assertIn("NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache", workflow)
+            self.assertIn("PLAYWRIGHT_BROWSERS_PATH=0", workflow)
             self.assertIn("before_run", workflow)
             self.assertIn("Review hardening trigger", workflow)
             self.assertIn("OROCSY_CLI", workflow)
@@ -72,7 +73,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("missing bounded generated-artifact cleanup hook", start_script)
             self.assertIn("missing bounded browser verification guard", start_script)
             self.assertIn("NPM_CONFIG_CACHE", start_script)
-            self.assertIn("PLAYWRIGHT_BROWSERS_PATH", start_script)
+            self.assertIn("export PLAYWRIGHT_BROWSERS_PATH=0", start_script)
             self.assertIn("mix escript.build", start_script)
 
     def test_init_upgrades_legacy_symphony_workflow_without_force(self) -> None:
@@ -118,6 +119,7 @@ Primitive workflow.
             self.assertIn("symphony clean-generated", upgraded_workflow)
             self.assertIn("Symphony browser verification guard", upgraded_workflow)
             self.assertIn("NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache", upgraded_workflow)
+            self.assertIn("PLAYWRIGHT_BROWSERS_PATH=0", upgraded_workflow)
             self.assertIn("before_run", upgraded_workflow)
             self.assertIn("Review hardening trigger", upgraded_workflow)
             self.assertIn("granular:", upgraded_workflow)
@@ -128,6 +130,7 @@ Primitive workflow.
             self.assertIn("missing bounded generated-artifact cleanup hook", upgraded_start)
             self.assertIn("missing bounded browser verification guard", upgraded_start)
             self.assertIn("NPM_CONFIG_CACHE", upgraded_start)
+            self.assertIn("export PLAYWRIGHT_BROWSERS_PATH=0", upgraded_start)
             self.assertIn("mix escript.build", upgraded_start)
             self.assertTrue((repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md.legacy").exists())
             self.assertTrue((repo / ".codex/symphony/start-symphony.sh.legacy").exists())
@@ -196,8 +199,12 @@ Primitive workflow.
             self.assertIn("*.tsbuildinfo", gitignore)
             self.assertIn(".DS_Store", gitignore)
             self.assertIn(".orocsy/delivery/", gitignore)
+            self.assertIn(".orocsy/runtime/", gitignore)
             self.assertIn(".codex/delivery/", gitignore)
             self.assertIn(".codex/symphony/*.legacy*", gitignore)
+
+            eslint_config = (repo / "eslint.config.mjs").read_text(encoding="utf-8")
+            self.assertIn('".orocsy/**"', eslint_config)
 
     def test_verify_scaffold_catches_structural_regressions(self) -> None:
         output = self.run_cli(

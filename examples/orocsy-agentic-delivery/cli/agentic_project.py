@@ -595,7 +595,7 @@ export OROCSY_CLI
 export SYMPHONY_REPO
 export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-.orocsy/runtime/npm-cache}"
 export npm_config_cache="${npm_config_cache:-$NPM_CONFIG_CACHE}"
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-0}"
+export PLAYWRIGHT_BROWSERS_PATH=0
 
 cd "$SYMPHONY_REPO/elixir"
 mise exec -- mix escript.build
@@ -892,6 +892,7 @@ test-results
 .env.local
 .env.*.local
 .orocsy/delivery/
+.orocsy/runtime/
 .codex/delivery/
 .codex/symphony/*.legacy*
 """,
@@ -936,6 +937,8 @@ const config = [
   ...nextTypescript,
   {
     ignores: [
+      ".codex/**",
+      ".orocsy/**",
       "design/**",
       "Design/**",
       "*Design/**",
@@ -1851,10 +1854,14 @@ def verify_scaffold_structure(repo: Path) -> None:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .DS_Store")
     if ".orocsy/delivery/" not in gitignore:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .orocsy/delivery/")
+    if ".orocsy/runtime/" not in gitignore:
+        raise SystemExit("verify-scaffold failed: .gitignore must ignore .orocsy/runtime/")
     if ".codex/delivery/" not in gitignore:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .codex/delivery/")
 
     eslint_config = read_text(repo / "eslint.config.mjs")
+    if '".orocsy/**"' not in eslint_config:
+        raise SystemExit("verify-scaffold failed: ESLint must ignore Orocsy runtime files")
     if "FlatCompat" in eslint_config:
         raise SystemExit("verify-scaffold failed: generated ESLint config must not use FlatCompat")
 

@@ -138,9 +138,10 @@ Orocsy worker prelude:
     - Do not run raw destructive cleanup commands such as `rm -rf`,
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
-    - If ignored generated artifacts such as `.next/dev`, `dist/`, `coverage/`,
-      or cache folders break validation, first prefer a project script or
-      rebuild command that safely regenerates them. If cleanup is needed, use:
+    - If ignored generated artifacts such as `.next/dev`, `.orocsy/runtime`,
+      `dist/`, `coverage/`, or cache folders break validation, first prefer a
+      project script or rebuild command that safely regenerates them. If cleanup
+      is needed, use:
       `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record`
     - If cleanup beyond the allowlisted generated-artifact command is
       unavoidable, stop, record an Orocsy guidance/blocker, and let the
@@ -153,8 +154,9 @@ Orocsy worker prelude:
       recover the turn or hand off the MIU cleanly.
     - Prefer project-owned, bounded commands such as `pnpm exec playwright ...`
       or an existing browser smoke script. Prefix any npm/npx-backed browser
-      command with the workspace-local cache:
-      `NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache <command>`
+      command with the workspace-local cache and keep Playwright browsers under
+      package-managed ignored folders:
+      `PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache <command>`
     - If no bounded browser command is available, record the harness blocker in
       `.orocsy/delivery/events/events.jsonl`, update the Linear workpad with the
       exact missing browser harness, and stop. Do not substitute an unbounded MCP

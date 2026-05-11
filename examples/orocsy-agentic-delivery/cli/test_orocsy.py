@@ -382,6 +382,32 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(events[-1])["event"], "symphony.generated.cleanup")
 
+    def test_symphony_clean_generated_removes_ignored_runtime_cache_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            runtime_artifact = repo / ".orocsy/runtime/ms-playwright/browser.js"
+            runtime_artifact.parent.mkdir(parents=True)
+            runtime_artifact.write_text("generated browser cache\n", encoding="utf-8")
+            self.run_cli(["--repo", str(repo), "init"])
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "symphony",
+                    "clean-generated",
+                    "--record",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["cleanup"]["status"], "passed")
+            self.assertIn(".orocsy/runtime", payload["cleanup"]["removed"])
+            self.assertFalse((repo / ".orocsy/runtime").exists())
+
     def test_symphony_clean_generated_refuses_unignored_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
