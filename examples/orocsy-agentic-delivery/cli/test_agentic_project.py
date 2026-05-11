@@ -61,6 +61,7 @@ class AgenticProjectCliTests(unittest.TestCase):
             self.assertIn("orocsy/symphony", start_script)
             self.assertIn("Refusing to run legacy Symphony workflow", start_script)
             self.assertIn("granular.rules must be false", start_script)
+            self.assertIn("mix escript.build", start_script)
 
     def test_init_upgrades_legacy_symphony_workflow_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,6 +110,7 @@ Primitive workflow.
             self.assertNotIn("approval_policy: never", upgraded_workflow)
             self.assertNotIn("reject:", upgraded_workflow)
             self.assertIn("$HOME/src/orocsy-symphony", upgraded_start)
+            self.assertIn("mix escript.build", upgraded_start)
             self.assertTrue((repo / ".codex/symphony/WORKFLOW.concurrent-symphony.md.legacy").exists())
             self.assertTrue((repo / ".codex/symphony/start-symphony.sh.legacy").exists())
 

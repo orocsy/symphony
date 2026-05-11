@@ -578,6 +578,7 @@ export OROCSY_CLI
 export SYMPHONY_REPO
 
 cd "$SYMPHONY_REPO/elixir"
+mise exec -- mix escript.build
 exec mise exec -- ./bin/symphony "$WORKFLOW_FILE" --i-understand-that-this-will-be-running-without-the-usual-guardrails
 """
 
