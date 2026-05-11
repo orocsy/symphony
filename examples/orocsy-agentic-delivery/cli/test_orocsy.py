@@ -232,7 +232,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             payload = json.loads(output)
             self.assertEqual(payload["state"]["issue"], "COD-123")
             self.assertEqual(payload["state"]["orocsy_cli"], "/tmp/orocsy.py")
-            self.assertIn("Run pre-change gates before editing.", payload["prelude"])
+            self.assertIn("Confirm pre-change gates are already recorded before editing.", payload["prelude"])
 
             policy = (repo / ".codex/delivery/policy.yml").read_text(encoding="utf-8")
             gates = (repo / ".codex/delivery/gates.yml").read_text(encoding="utf-8")
@@ -242,6 +242,32 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
 
             events = (repo / ".codex/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(events[-1])["event"], "symphony.workspace.prepared")
+
+    def test_symphony_prepare_workspace_installs_workspace_local_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "symphony",
+                    "prepare-workspace",
+                    "--issue",
+                    "COD-124",
+                    "--orocsy-cli",
+                    str(Path(__file__).resolve().parent / "orocsy.py"),
+                    "--forbid",
+                    "OldProject",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["state"]["workspace_orocsy_cli"], ".codex/delivery/bin/orocsy.py")
+            self.assertTrue((repo / ".codex/delivery/bin/orocsy.py").exists())
 
             (repo / "README.md").write_text("OldProject leak\n", encoding="utf-8")
             leak_code, _leak_output = self.run_cli(["--repo", str(repo), "gate", "leaks"])

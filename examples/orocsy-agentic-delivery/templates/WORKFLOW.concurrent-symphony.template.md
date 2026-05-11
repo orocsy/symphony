@@ -52,6 +52,10 @@ hooks:
         --orocsy-cli "$orocsy_cli" \
         --evidence-event tool.finished \
         --evidence-event gate.post-miu
+      PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . run start --issue "{{ issue.identifier }}"
+      PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate leaks --record
+      PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate secrets --record
+      PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate artifacts --record
     else
       echo "Orocsy runtime CLI not found; refusing to run an ungoverned worker."
       exit 1
@@ -81,37 +85,49 @@ codex:
 
 You are working on Linear issue `{{ issue.identifier }}`.
 
+Issue snapshot:
+- ID: `{{ issue.id }}`
+- Title: {{ issue.title }}
+- State: {{ issue.state }}
+- Branch: {{ issue.branch_name }}
+- URL: {{ issue.url }}
+- Labels: {{ issue.labels }}
+- Description:
+{{ issue.description }}
+
+Use this issue snapshot as the primary assignment source. If you must query
+Linear, query by `issue.id`; do not use an `IssueFilter.identifier` filter.
+
 Orocsy worker prelude:
 
 1. Read `AGENTS.md`.
 2. Load the Orocsy / `agentic-delivery-loop` skill.
 3. Read `.codex/delivery/state/current.json` and `.codex/delivery/policy.yml`.
-   If `$OROCSY_CLI` is unset, use the `orocsy_cli` value from
-   `.codex/delivery/state/current.json`.
+   Use the workspace-local runtime CLI at `.codex/delivery/bin/orocsy.py`.
 4. Read the assigned Linear issue, including Write Scope, Shared Files,
    Dependencies, MIUs, Validation, and Out Of Scope.
 5. Before editing code, update `.codex/delivery/policy.yml` with the issue's
    declared write-scope globs if the prepare hook could not infer them.
 6. Create or update the Technical MIU trace.
-7. Emit a run-start event:
-   `python3 "$OROCSY_CLI" --repo . run start --issue "{{ issue.identifier }}"`
-8. Run pre-change gates:
-   `python3 "$OROCSY_CLI" --repo . gate leaks --record`
-   `python3 "$OROCSY_CLI" --repo . gate secrets --record`
-   `python3 "$OROCSY_CLI" --repo . gate artifacts --record`
+7. Confirm the `before_run` hook already recorded `run.started`,
+   `gate.leaks`, `gate.secrets`, and `gate.artifacts` in
+   `.codex/delivery/events.jsonl`. If they are missing, stop and report
+   workflow setup failure instead of running the external `$OROCSY_CLI` path.
+8. If you need to record additional runtime evidence, use:
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . <command>`
 9. Implement one MIU at a time and append command evidence after each check:
-   `python3 "$OROCSY_CLI" --repo . event append --type tool.finished --status passed --tool "<command>"`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "<command>"`
 10. Before commit, run:
-   `python3 "$OROCSY_CLI" --repo . gate declared-scope --strict --record`
-   `python3 "$OROCSY_CLI" --repo . gate required-evidence --strict --record`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate declared-scope --strict --record`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --record`
 11. Before push, run:
-   `python3 "$OROCSY_CLI" --repo . gate all --json`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
 12. Before handoff, print the applicable eval rubric and record the verdict:
-   `python3 "$OROCSY_CLI" --repo . eval rubric miu-quality`
-   `python3 "$OROCSY_CLI" --repo . eval record miu-quality --status passed --summary "<why>"`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval rubric miu-quality`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval record miu-quality --status passed --summary "<why>"`
 13. If any gate or eval fails, create/resolve inbox items and ask for guidance:
-   `python3 "$OROCSY_CLI" --repo . gate required-evidence --strict --inbox`
-   `python3 "$OROCSY_CLI" symphony guidance --workspace . --record`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --inbox`
+   `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
 14. If guidance says `block` or `retry`, update the Linear workpad and stop
     until the correction is handled.
 

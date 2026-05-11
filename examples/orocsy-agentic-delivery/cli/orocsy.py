@@ -1530,13 +1530,26 @@ def symphony_prelude(issue: str) -> list[str]:
         "Read AGENTS.md and project design/runtime docs before editing.",
         "Load the Orocsy / agentic-delivery-loop skill.",
         "Read .codex/delivery/state/current.json and .codex/delivery/policy.yml.",
+        "Use the workspace-local .codex/delivery/bin/orocsy.py CLI for runtime gates and event evidence.",
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
         "Create or update the MIU trace before implementation.",
-        "Run pre-change gates before editing.",
+        "Confirm pre-change gates are already recorded before editing.",
         "Implement one MIU at a time and append tool/test/build/browser events.",
         "Run post-MIU, pre-commit, and pre-push gates before handoff.",
         "Run or record applicable Orocsy eval rubrics before handoff.",
     ]
+
+
+def install_workspace_orocsy_cli(repo: Path, source_cli: str) -> str | None:
+    if not source_cli:
+        return None
+    source_path = Path(source_cli).expanduser()
+    if not source_path.exists() or not source_path.is_file():
+        return None
+    target_path = repo / ".codex" / "delivery" / "bin" / "orocsy.py"
+    write_text(target_path, read_text(source_path))
+    target_path.chmod(0o755)
+    return str(target_path.relative_to(repo))
 
 
 def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
@@ -1557,6 +1570,9 @@ def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
         state["issue_requirements"] = issue_requirements
     if args.orocsy_cli:
         state["orocsy_cli"] = args.orocsy_cli
+    workspace_cli = install_workspace_orocsy_cli(repo, args.orocsy_cli)
+    if workspace_cli:
+        state["workspace_orocsy_cli"] = workspace_cli
     write_json(current_state_path(repo), state)
 
     validation = issue_requirements.get("validation") or {}
@@ -1584,6 +1600,7 @@ def command_symphony_prepare_workspace(args: argparse.Namespace) -> int:
             "intent": intent,
             "workspace": state["workspace"],
             "orocsy_cli": args.orocsy_cli,
+            "workspace_orocsy_cli": workspace_cli,
             "issue_requirements": issue_requirements,
             "declared_scope": scope,
             "required_evidence_files": evidence_files,
