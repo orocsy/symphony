@@ -574,6 +574,12 @@ if ! grep -q "Symphony browser verification guard" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
+if ! grep -q "Symphony handoff recovery guard" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing handoff recovery guard for push/GitHub/Linear failures." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
 if ! grep -q "forbidden_command_patterns" "$WORKFLOW_FILE" || ! grep -Eq "pnpm.*dev|playwright.*install" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing non-interactive command guard for raw dev-server/browser-install commands." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2

@@ -63,7 +63,7 @@ hooks:
     fi
 agent:
   max_concurrent_agents: 3
-  max_turns: 20
+  max_turns: 8
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   forbidden_command_patterns:
@@ -187,6 +187,21 @@ Orocsy worker prelude:
     - If a command approval or MCP/tool approval prompt appears, record the
       blocker in the Orocsy ledger, update the Linear workpad, and stop for the
       workflow owner. Do not answer approval prompts by hand inside the worker.
+18. Symphony handoff recovery guard:
+    - Before new product edits, inspect `git status --short --branch` and recent
+      `.orocsy/delivery/events/events.jsonl` entries when the workspace already
+      has local commits ahead of upstream or a previous `git push`, GitHub, or
+      Linear command failed.
+    - If implementation commits, validation, and gates already exist, enter
+      handoff-recovery mode: retry only the pending external handoff command
+      such as `git push`, PR review request/comment, or Linear workpad/state
+      update. Do not modify product code or rerun broad implementation work.
+    - If the network or provider remains unavailable, record an Orocsy inbox
+      item with next action `retry`, update the workpad when possible, and stop
+      so Symphony backoff can resume without code churn.
+    - On a later retry, resume from the same workspace and finish push/review
+      handoff. Do not create duplicate commits unless a current review thread
+      still requires a code change.
 
 Strict dispatch gate:
 
@@ -227,6 +242,9 @@ Review hardening trigger:
 8. Push to the existing PR branch, reply or update the Linear workpad with the
    classification and validation evidence, request review again, then move the
    issue back to `Human Review`.
+9. If push, GitHub review request, or Linear update fails after validation,
+   record a handoff blocker and stop in handoff-recovery mode instead of
+   repeating the implementation MIU.
 
 Execution:
 
