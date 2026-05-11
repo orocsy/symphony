@@ -34,6 +34,7 @@ DEFAULT_FORBIDDEN_TERMS: tuple[str, ...] = ()
 DEFAULT_EXCLUDED_DIRS = {
     ".git",
     ".next",
+    ".pnpm-store",
     "node_modules",
     "dist",
     "build",
@@ -47,6 +48,7 @@ DEFAULT_ARTIFACT_PATTERNS = (
     ".DS_Store",
     "*.tsbuildinfo",
     ".next/**",
+    ".pnpm-store/**",
     "node_modules/**",
     ".orocsy/runtime/**",
     "dist/**",
@@ -60,6 +62,7 @@ DEFAULT_ARTIFACT_PATTERNS = (
 DEFAULT_GENERATED_CLEAN_PATHS = (
     ".next/dev",
     ".orocsy/runtime",
+    ".pnpm-store",
     "next-env.d.ts",
 )
 
@@ -67,6 +70,7 @@ ALLOWED_GENERATED_CLEAN_ROOTS = (
     ".next/dev",
     ".next/cache",
     ".orocsy/runtime",
+    ".pnpm-store",
     ".turbo",
     ".vite",
     ".parcel-cache",
@@ -756,7 +760,7 @@ def ensure_runtime_git_excludes(repo: Path) -> None:
     if not exclude_path.is_absolute():
         exclude_path = repo / exclude_path
     existing = read_text(exclude_path) if exclude_path.exists() else ""
-    additions = [".orocsy/delivery/", ".orocsy/runtime/", ".codex/delivery/"]
+    additions = [".orocsy/delivery/", ".orocsy/runtime/", ".pnpm-store/", ".codex/delivery/"]
     missing = [entry for entry in additions if entry not in existing.splitlines()]
     if missing:
         exclude_path.parent.mkdir(parents=True, exist_ok=True)

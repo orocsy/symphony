@@ -408,6 +408,32 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertIn(".orocsy/runtime", payload["cleanup"]["removed"])
             self.assertFalse((repo / ".orocsy/runtime").exists())
 
+    def test_symphony_clean_generated_removes_legacy_pnpm_store_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            store_artifact = repo / ".pnpm-store/v3/files/cache-index.json"
+            store_artifact.parent.mkdir(parents=True)
+            store_artifact.write_text("{}\n", encoding="utf-8")
+            self.run_cli(["--repo", str(repo), "init"])
+
+            code, output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "symphony",
+                    "clean-generated",
+                    "--record",
+                    "--json",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["cleanup"]["status"], "passed")
+            self.assertIn(".pnpm-store", payload["cleanup"]["removed"])
+            self.assertFalse((repo / ".pnpm-store").exists())
+
     def test_symphony_clean_generated_restores_next_env_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

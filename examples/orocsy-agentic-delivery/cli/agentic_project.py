@@ -595,6 +595,8 @@ export OROCSY_CLI
 export SYMPHONY_REPO
 export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-.orocsy/runtime/npm-cache}"
 export npm_config_cache="${npm_config_cache:-$NPM_CONFIG_CACHE}"
+export NPM_CONFIG_STORE_DIR="${NPM_CONFIG_STORE_DIR:-.orocsy/runtime/pnpm-store}"
+export npm_config_store_dir="${npm_config_store_dir:-$NPM_CONFIG_STORE_DIR}"
 export PLAYWRIGHT_BROWSERS_PATH=0
 
 cd "$SYMPHONY_REPO/elixir"
@@ -893,6 +895,7 @@ test-results
 .env.*.local
 .orocsy/delivery/
 .orocsy/runtime/
+.pnpm-store/
 .codex/delivery/
 .codex/symphony/*.legacy*
 """,
@@ -1856,6 +1859,8 @@ def verify_scaffold_structure(repo: Path) -> None:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .orocsy/delivery/")
     if ".orocsy/runtime/" not in gitignore:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .orocsy/runtime/")
+    if ".pnpm-store/" not in gitignore:
+        raise SystemExit("verify-scaffold failed: .gitignore must ignore .pnpm-store/")
     if ".codex/delivery/" not in gitignore:
         raise SystemExit("verify-scaffold failed: .gitignore must ignore .codex/delivery/")
 

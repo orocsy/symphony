@@ -139,7 +139,7 @@ Orocsy worker prelude:
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
     - Before final gates, staging, or push, and whenever generated artifacts
-      such as `.next/dev`, `.orocsy/runtime`, `next-env.d.ts`, `dist/`,
+      such as `.next/dev`, `.orocsy/runtime`, `.pnpm-store`, `next-env.d.ts`, `dist/`,
       `coverage/`, or cache folders break validation, use the bounded cleanup
       command. It removes ignored generated folders and restores known tracked
       framework-generated files such as `next-env.d.ts`:
@@ -157,9 +157,9 @@ Orocsy worker prelude:
       or an existing browser smoke script. Prefix any npm/npx-backed browser
       command with the workspace-local cache and keep Playwright browsers under
       package-managed ignored folders:
-      `PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache <command>`
+      `PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache NPM_CONFIG_STORE_DIR=.orocsy/runtime/pnpm-store npm_config_store_dir=.orocsy/runtime/pnpm-store <command>`
     - For Next.js dev-server evidence through a pnpm script, prefer
-      `PORT=3101 PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache pnpm dev --port 3101`.
+      `PORT=3101 PLAYWRIGHT_BROWSERS_PATH=0 NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache NPM_CONFIG_STORE_DIR=.orocsy/runtime/pnpm-store npm_config_store_dir=.orocsy/runtime/pnpm-store pnpm dev --port 3101`.
       Do not use `pnpm dev -- --port 3101`; the extra separator can be passed
       through to Next.js and fail before the browser evidence starts.
     - If no bounded browser command is available, record the harness blocker in
