@@ -1086,15 +1086,24 @@ defmodule SymphonyElixir.Codex.AppServer do
          metadata,
          false
        ) do
-    reply_with_non_interactive_tool_input_answer(
-      port,
-      id,
-      params,
-      payload,
-      payload_string,
-      on_message,
-      metadata
-    )
+    cond do
+      tool_request_user_input_approval_prompt?(params) ->
+        :approval_required
+
+      tool_request_user_input_prompt?(params) ->
+        :input_required
+
+      true ->
+        reply_with_non_interactive_tool_input_answer(
+          port,
+          id,
+          params,
+          payload,
+          payload_string,
+          on_message,
+          metadata
+        )
+    end
   end
 
   defp tool_request_user_input_approval_answers(%{"questions" => questions}) when is_list(questions) do
@@ -1117,6 +1126,22 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp tool_request_user_input_approval_answers(_params), do: :error
+
+  defp tool_request_user_input_approval_prompt?(params) do
+    case tool_request_user_input_approval_answers(params) do
+      {:ok, _answers, _decision} -> true
+      :error -> false
+    end
+  end
+
+  defp tool_request_user_input_prompt?(%{"questions" => questions}) when is_list(questions) do
+    Enum.any?(questions, fn
+      %{"id" => question_id} when is_binary(question_id) -> String.trim(question_id) != ""
+      _ -> false
+    end)
+  end
+
+  defp tool_request_user_input_prompt?(_params), do: false
 
   defp reply_with_non_interactive_tool_input_answer(
          port,
@@ -1347,10 +1372,17 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp needs_input?(method, payload)
        when is_binary(method) and is_map(payload) do
-    String.starts_with?(method, "turn/") && input_required_method?(method, payload)
+    (String.starts_with?(method, "turn/") && input_required_method?(method, payload)) or
+      mcp_elicitation_request?(method)
   end
 
   defp needs_input?(_method, _payload), do: false
+
+  defp mcp_elicitation_request?(method) when is_binary(method) do
+    method
+    |> String.downcase()
+    |> String.contains?("elicitation/request")
+  end
 
   defp input_required_method?(method, payload) when is_binary(method) do
     method in [

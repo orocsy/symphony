@@ -153,15 +153,7 @@ defmodule SymphonyElixir.Orchestrator do
 
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
+              handle_agent_failure(state, issue_id, running_entry, reason)
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -934,6 +926,221 @@ defmodule SymphonyElixir.Orchestrator do
            })
          )}
     end
+  end
+
+  defp handle_agent_failure(%State{} = state, issue_id, running_entry, reason) do
+    next_attempt = planned_retry_attempt(running_entry)
+    failure = classify_agent_failure(reason)
+
+    cond do
+      failure.action == :block ->
+        park_failed_issue(state, issue_id, running_entry, reason, failure)
+
+      next_attempt > Config.settings!().agent.max_failed_worker_retries ->
+        park_failed_issue(state, issue_id, running_entry, reason, failure_retry_exhausted(failure, next_attempt))
+
+      true ->
+        schedule_issue_retry(state, issue_id, next_attempt, %{
+          identifier: Map.get(running_entry, :identifier),
+          error: "agent exited: #{inspect(reason)}",
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
+    end
+  end
+
+  defp planned_retry_attempt(running_entry) do
+    case next_retry_attempt_from_running(running_entry) do
+      attempt when is_integer(attempt) and attempt > 0 -> attempt
+      _ -> 1
+    end
+  end
+
+  defp park_failed_issue(%State{} = state, issue_id, running_entry, reason, failure) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    workspace_path = Map.get(running_entry, :workspace_path)
+    worker_host = Map.get(running_entry, :worker_host)
+    issue = Map.get(running_entry, :issue)
+
+    correction_result =
+      if is_binary(workspace_path) do
+        Workspace.create_correction_in_workspace(
+          workspace_path,
+          issue || identifier,
+          %{
+            source: "symphony.runtime.#{failure.kind}",
+            source_status: failure.source_status,
+            summary: failure.summary,
+            findings: [failure_reason_text(reason)],
+            required_corrections: failure.required_corrections,
+            next_action: failure.next_action
+          },
+          worker_host
+        )
+      else
+        {:error, :missing_workspace_path}
+      end
+
+    case correction_result do
+      {:ok, correction} ->
+        Logger.warning("Parked issue after worker failure: issue_id=#{issue_id} issue_identifier=#{identifier} correction=#{correction["correction_id"]} next_action=#{correction["next_action"]}")
+        maybe_comment_runtime_failure(issue, correction, failure)
+
+      {:error, correction_reason} ->
+        Logger.warning("Unable to write Orocsy correction for issue_id=#{issue_id} issue_identifier=#{identifier}: #{inspect(correction_reason)}")
+        maybe_comment_runtime_failure(issue, nil, failure)
+    end
+
+    state
+    |> release_issue_claim(issue_id)
+    |> Map.update!(:retry_attempts, &Map.delete(&1, issue_id))
+  end
+
+  defp classify_agent_failure(reason) do
+    text = failure_reason_text(reason)
+    normalized = String.downcase(text)
+
+    cond do
+      permission_or_input_failure?(normalized) ->
+        %{
+          action: :block,
+          kind: "permission",
+          source_status: "blocked",
+          next_action: "block",
+          summary: "Symphony stopped because the Codex worker requested approval or interactive input that cannot be safely granted in non-interactive automation.",
+          required_corrections: [
+            "Review the requested approval/input and decide whether the workflow config should allow a narrower safe path.",
+            "Resolve this Orocsy correction before redispatching the issue."
+          ]
+        }
+
+      token_budget_failure?(normalized) ->
+        %{
+          action: :retry,
+          kind: "token-budget",
+          source_status: "retryable",
+          next_action: "block",
+          summary: "Symphony stopped a Codex worker after it exceeded the configured live turn token budget.",
+          required_corrections: [
+            "Inspect the workspace and latest worker messages for repeated context scans or missing stop conditions.",
+            "Tighten the work scope or handoff checkpoint before redispatching."
+          ]
+        }
+
+      transient_environment_failure?(normalized) ->
+        %{
+          action: :retry,
+          kind: "environment",
+          source_status: "retryable",
+          next_action: "retry",
+          summary: "Symphony hit a retryable environment, network, or provider failure while running the worker.",
+          required_corrections: [
+            "Verify network/provider availability and credentials.",
+            "Resolve this Orocsy correction and redispatch when the environment is healthy."
+          ]
+        }
+
+      true ->
+        %{
+          action: :retry,
+          kind: "worker",
+          source_status: "retryable",
+          next_action: "block",
+          summary: "Symphony worker exited unexpectedly and exceeded the safe retry policy.",
+          required_corrections: [
+            "Inspect the worker log and workspace state.",
+            "Resolve this Orocsy correction after identifying the smallest safe recovery step."
+          ]
+        }
+    end
+  end
+
+  defp failure_retry_exhausted(failure, next_attempt) do
+    %{
+      failure
+      | source_status: "retry-exhausted",
+        summary:
+          "#{failure.summary} The worker reached retry attempt #{next_attempt}, which exceeds agent.max_failed_worker_retries=#{Config.settings!().agent.max_failed_worker_retries}; Symphony is parking the issue instead of spending more tokens."
+    }
+  end
+
+  defp permission_or_input_failure?(text) do
+    String.contains?(text, [
+      "approval_required",
+      "turn_input_required",
+      "mcp_elicitation",
+      "elicitation/request",
+      "forbidden_command",
+      "permission denied",
+      "requires approval"
+    ])
+  end
+
+  defp token_budget_failure?(text) do
+    String.contains?(text, "turn_token_budget_exceeded")
+  end
+
+  defp transient_environment_failure?(text) do
+    String.contains?(text, [
+      "turn_timeout",
+      "response_timeout",
+      "port_exit",
+      "linear_api_request",
+      "timeout",
+      "timed out",
+      "network",
+      "econn",
+      "nxdomain",
+      "could not resolve",
+      "connection refused",
+      "failed to set up container"
+    ])
+  end
+
+  defp maybe_comment_runtime_failure(%Issue{id: issue_id} = issue, correction, failure)
+       when is_binary(issue_id) do
+    body = runtime_failure_comment(issue, correction, failure)
+
+    case Tracker.create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Unable to add Linear runtime blocker comment for #{issue_context(issue)}: #{inspect(reason)}")
+    end
+  end
+
+  defp maybe_comment_runtime_failure(_issue, _correction, _failure), do: :ok
+
+  defp runtime_failure_comment(issue, correction, failure) do
+    correction_line =
+      case correction do
+        %{"artifacts" => %{"markdown" => path}, "correction_id" => correction_id} ->
+          "- Orocsy correction: `#{correction_id}` at `#{path}`"
+
+        _ ->
+          "- Orocsy correction: not written; inspect the Symphony supervisor log."
+      end
+
+    """
+    Symphony runtime parked this issue to avoid meaningless token burn.
+
+    - Issue: `#{issue.identifier}`
+    - Runtime class: `#{failure.kind}`
+    - Status: `#{failure.source_status}`
+    - Next action: `#{failure.next_action}`
+    #{correction_line}
+
+    #{failure.summary}
+    """
+    |> String.trim()
+  end
+
+  defp failure_reason_text(reason) do
+    reason
+    |> inspect(limit: 50, printable_limit: 4_000)
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do

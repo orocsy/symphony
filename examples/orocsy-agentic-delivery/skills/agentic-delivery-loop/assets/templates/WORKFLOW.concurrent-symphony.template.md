@@ -64,6 +64,7 @@ hooks:
 agent:
   max_concurrent_agents: 3
   max_turns: 8
+  max_failed_worker_retries: 3
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   max_turn_total_tokens: 1500000
@@ -230,6 +231,17 @@ Orocsy worker prelude:
     - On a later retry, resume from the same workspace and finish push/review
       handoff. Do not create duplicate commits unless a current review thread
       still requires a code change.
+19. Runtime failure parking guard:
+    - The Symphony runtime will stop a worker immediately when Codex requests
+      command approval, sandbox approval, MCP elicitation, or interactive input
+      that the non-interactive worker cannot safely answer.
+    - Retryable network/provider/runtime failures may retry only up to
+      `agent.max_failed_worker_retries`. After that, Symphony must create an
+      Orocsy correction, try to comment on Linear, release the worker slot, and
+      stop dispatching that issue until the correction is resolved.
+    - Do not keep reasoning around a blocked permission or network condition.
+      Record the blocker with next action `block` or `retry` and let the
+      workflow owner resolve/redispatch when the environment is healthy.
 
 Strict dispatch gate:
 

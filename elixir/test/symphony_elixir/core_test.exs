@@ -623,6 +623,175 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "approval failures park the issue with an Orocsy correction and tracker comment" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-approval-failure-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-approval-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-APPROVAL",
+        state: "In Progress",
+        title: "Needs approval",
+        description: "Worker should park",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :ApprovalFailureParkOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed: {:approval_required, %{}}"}, []}})
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.permission"
+      assert correction["next_action"] == "block"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "parked this issue"
+      assert body =~ "permission"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "retryable worker failures park after the configured retry budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-retry-exhaustion-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        max_failed_worker_retries: 2
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-timeout-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-TIMEOUT",
+        state: "In Progress",
+        title: "Provider timeout",
+        description: "Worker should park after retries",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :RetryExhaustionParkOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace,
+        retry_attempt: 2
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, {:turn_timeout, 3_600_000}}})
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.environment"
+      assert correction["source_status"] == "retry-exhausted"
+      assert correction["next_action"] == "retry"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "retry-exhausted"
+      assert body =~ "agent.max_failed_worker_retries=2"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()

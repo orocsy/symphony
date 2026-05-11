@@ -77,6 +77,33 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec create_correction_in_workspace(Path.t(), map() | String.t() | nil, map(), worker_host()) ::
+          {:ok, map()} | {:error, term()}
+  def create_correction_in_workspace(workspace, issue_or_identifier, attrs, worker_host \\ nil)
+
+  def create_correction_in_workspace(workspace, issue_or_identifier, attrs, nil)
+      when is_binary(workspace) and is_map(attrs) do
+    issue_context = issue_context(issue_or_identifier)
+
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      correction = build_correction(issue_context, attrs)
+      artifacts = write_local_correction_files(workspace, correction)
+      correction = Map.put(correction, "artifacts", artifacts)
+      write_local_correction_json(workspace, artifacts["json"], correction)
+
+      {:ok, correction}
+    else
+      false -> {:error, {:workspace_missing, workspace}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def create_correction_in_workspace(workspace, _issue_or_identifier, _attrs, worker_host)
+      when is_binary(workspace) and is_binary(worker_host) do
+    {:error, {:remote_correction_write_not_supported, worker_host, workspace}}
+  end
+
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
@@ -497,7 +524,7 @@ defmodule SymphonyElixir.Workspace do
 
   defp open_blocking_correction?(%{} = correction) do
     normalize_correction_field(correction["status"]) == "open" and
-      normalize_correction_field(correction["next_action"]) in ["block", "escalate"] and
+      normalize_correction_field(correction["next_action"]) in ["block", "retry", "escalate"] and
       is_nil(correction["resolved_at"])
   end
 
@@ -516,7 +543,7 @@ defmodule SymphonyElixir.Workspace do
       "if [ ! -d \"$inbox\" ]; then exit 0; fi",
       "for correction in \"$inbox\"/correction_*.json; do",
       "  [ -f \"$correction\" ] || continue",
-      "  if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"open\"' \"$correction\" && grep -Eq '\"next_action\"[[:space:]]*:[[:space:]]*\"(block|escalate)\"' \"$correction\" && grep -Eq '\"resolved_at\"[[:space:]]*:[[:space:]]*null' \"$correction\"; then",
+      "  if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"open\"' \"$correction\" && grep -Eq '\"next_action\"[[:space:]]*:[[:space:]]*\"(block|retry|escalate)\"' \"$correction\" && grep -Eq '\"resolved_at\"[[:space:]]*:[[:space:]]*null' \"$correction\"; then",
       "    printf '%s\\n' blocked",
       "    exit 0",
       "  fi",
@@ -548,6 +575,109 @@ defmodule SymphonyElixir.Workspace do
 
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
+
+  defp build_correction(issue_context, attrs) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    correction_id = correction_id(now)
+
+    %{
+      "schema_version" => 1,
+      "correction_id" => correction_id,
+      "status" => "open",
+      "source" => Map.get(attrs, :source, "symphony.runtime"),
+      "source_status" => Map.get(attrs, :source_status, "failed"),
+      "summary" => Map.get(attrs, :summary, "Symphony runtime parked this issue."),
+      "findings" => string_list(Map.get(attrs, :findings, [])),
+      "required_corrections" => string_list(Map.get(attrs, :required_corrections, [])),
+      "next_action" => normalize_next_action(Map.get(attrs, :next_action, "block")),
+      "issue" => issue_context.issue_identifier,
+      "issue_id" => issue_context.issue_id,
+      "created_at" => now,
+      "resolved_at" => nil,
+      "resolution_summary" => ""
+    }
+  end
+
+  defp write_local_correction_files(workspace, correction) do
+    inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+    File.mkdir_p!(inbox)
+
+    stem = correction["correction_id"]
+    json_relative = ".orocsy/delivery/inbox/#{stem}.json"
+    markdown_relative = ".orocsy/delivery/inbox/#{stem}.md"
+
+    File.write!(Path.join(workspace, markdown_relative), render_correction_markdown(correction))
+
+    %{
+      "json" => json_relative,
+      "markdown" => markdown_relative
+    }
+  end
+
+  defp write_local_correction_json(workspace, relative_path, correction) do
+    workspace
+    |> Path.join(relative_path)
+    |> File.write!(Jason.encode!(correction, pretty: true) <> "\n")
+  end
+
+  defp render_correction_markdown(correction) do
+    findings = correction["findings"] || []
+    required_corrections = correction["required_corrections"] || []
+
+    [
+      "# Correction #{correction["correction_id"]}",
+      "",
+      "Status: #{correction["status"]}",
+      "Source: #{correction["source"]}",
+      "Next action: #{correction["next_action"]}",
+      "",
+      "## Summary",
+      "",
+      correction["summary"],
+      "",
+      "## Findings",
+      "",
+      render_markdown_list(findings, "None recorded"),
+      "",
+      "## Required Corrections",
+      "",
+      render_markdown_list(required_corrections, "Determine the smallest safe recovery step before continuing.")
+    ]
+    |> List.flatten()
+    |> Enum.join("\n")
+    |> Kernel.<>("\n")
+  end
+
+  defp render_markdown_list([], fallback), do: ["- #{fallback}"]
+  defp render_markdown_list(items, _fallback), do: Enum.map(items, &"- #{&1}")
+
+  defp string_list(values) when is_list(values) do
+    values
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp string_list(value) when is_binary(value), do: string_list([value])
+  defp string_list(_value), do: []
+
+  defp normalize_next_action(next_action) when is_binary(next_action) do
+    case next_action |> String.trim() |> String.downcase() do
+      action when action in ["block", "retry", "escalate"] -> action
+      _ -> "block"
+    end
+  end
+
+  defp normalize_next_action(_next_action), do: "block"
+
+  defp correction_id(iso8601) do
+    timestamp =
+      iso8601
+      |> String.replace(~r/[^0-9]/, "")
+      |> String.slice(0, 14)
+
+    "correction_#{timestamp}_#{System.unique_integer([:positive])}"
+  end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do
     %{

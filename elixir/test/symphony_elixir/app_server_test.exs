@@ -552,7 +552,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server does not auto-approve MCP tool approval prompts under granular defaults" do
+  test "app server stops on MCP tool approval prompts under granular defaults" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -627,27 +627,13 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} =
+      assert {:error, {:approval_required, payload}} =
                AppServer.run(workspace, "Handle MCP tool approval prompt", issue)
 
+      assert payload["method"] == "item/tool/requestUserInput"
+
       trace = File.read!(trace_file)
-      lines = String.split(trace, "\n", trim: true)
-
-      assert Enum.any?(lines, fn line ->
-               if String.starts_with?(line, "JSON:") do
-                 payload =
-                   line
-                   |> String.trim_leading("JSON:")
-                   |> Jason.decode!()
-
-                 payload["id"] == 110 and
-                   get_in(payload, ["result", "answers", "mcp_tool_call_approval_call-91", "answers"]) == [
-                     "This is a non-interactive session. Operator input is unavailable."
-                   ]
-               else
-                 false
-               end
-             end)
+      refute trace =~ "Approve this Session"
     after
       File.rm_rf(test_root)
     end
@@ -965,7 +951,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server sends a generic non-interactive answer for option-based tool input prompts" do
+  test "app server stops on option-based tool input prompts" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1039,27 +1025,13 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} =
+      assert {:error, {:turn_input_required, payload}} =
                AppServer.run(workspace, "Handle option based tool input", issue)
 
+      assert payload["method"] == "item/tool/requestUserInput"
+
       trace = File.read!(trace_file)
-      lines = String.split(trace, "\n", trim: true)
-
-      assert Enum.any?(lines, fn line ->
-               if String.starts_with?(line, "JSON:") do
-                 payload =
-                   line
-                   |> String.trim_leading("JSON:")
-                   |> Jason.decode!()
-
-                 payload["id"] == 112 and
-                   get_in(payload, ["result", "answers", "options-719", "answers"]) == [
-                     "This is a non-interactive session. Operator input is unavailable."
-                   ]
-               else
-                 false
-               end
-             end)
+      refute trace =~ "options-719"
     after
       File.rm_rf(test_root)
     end
