@@ -146,6 +146,19 @@ Orocsy worker prelude:
       unavoidable, stop, record an Orocsy guidance/blocker, and let the
       workflow owner run or approve a bounded cleanup outside the worker. Do
       not retry the same destructive command.
+16. Symphony browser verification guard:
+    - Browser evidence is still required for UI-impacting work, but do not use
+      raw MCP browser calls such as `mcp__playwright__browser_run_code_unsafe`
+      from a Symphony app-server worker. If that tool blocks, Symphony cannot
+      recover the turn or hand off the MIU cleanly.
+    - Prefer project-owned, bounded commands such as `pnpm exec playwright ...`
+      or an existing browser smoke script. Prefix any npm/npx-backed browser
+      command with the workspace-local cache:
+      `NPM_CONFIG_CACHE=.orocsy/runtime/npm-cache npm_config_cache=.orocsy/runtime/npm-cache <command>`
+    - If no bounded browser command is available, record the harness blocker in
+      `.orocsy/delivery/events/events.jsonl`, update the Linear workpad with the
+      exact missing browser harness, and stop. Do not substitute an unbounded MCP
+      browser session and do not claim product browser verification passed.
 
 Strict dispatch gate:
 
