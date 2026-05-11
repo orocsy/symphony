@@ -142,17 +142,32 @@ Strict dispatch gate:
 5. If this issue's declared write scope overlaps another active issue, update
    the workpad with `blocked-overlap` and stop.
 
+CI/CD timing:
+
+1. Do not dispatch full CI/CD as an early product feature lane.
+2. Keep early lanes on focused local validation, branch discipline, PR review,
+   and browser evidence when UI is touched.
+3. Create CI/CD as its own platform MIU after the app baseline, package scripts,
+   environment requirements, and merge flow are stable on `main`.
+
 Review hardening trigger:
 
 1. If the issue state is `Rework`, or the issue has an attached open PR with
    unresolved Codex/human review threads, run the review hardening loop before
    any new feature work.
 2. Fetch thread-aware PR review comments, not only flat PR comments.
-3. Classify each finding as `accept`, `duplicate`, `stale`, `reject`, or
+   Prefer the bounded GitHub GraphQL `reviewThreads` shape with only path, line,
+   resolved/outdated state, latest reviewed commit, and comment body.
+3. Do not fetch broad PR payloads such as full `statusCheckRollup`, flat
+   `comments`, full `reviews`, images, screenshots, or design files unless a
+   current accepted review thread specifically requires that evidence.
+4. Classify each finding as `accept`, `duplicate`, `stale`, `reject`, or
    `needs-design`.
-4. Fix only accepted current-code findings inside the issue's write scope.
-5. Add or update focused regression tests for every accepted finding.
-6. Push to the existing PR branch, reply or update the Linear workpad with the
+5. Fix only accepted current-code findings inside the issue's write scope.
+6. Treat the first accepted current review finding as the next MIU. Avoid
+   broad exploration after a valid actionable review item is known.
+7. Add or update focused regression tests for every accepted finding.
+8. Push to the existing PR branch, reply or update the Linear workpad with the
    classification and validation evidence, request review again, then move the
    issue back to `Human Review`.
 

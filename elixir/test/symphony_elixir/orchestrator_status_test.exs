@@ -101,6 +101,183 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "orchestrator keeps last actionable codex update through background notifications" do
+    issue_id = "issue-background-noise"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-189",
+      title: "Background notification test",
+      description: "Keep the dashboard focused on actionable agent work",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-189"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BackgroundNotificationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-review-loop",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    actionable_at = DateTime.utc_now()
+
+    actionable_payload = %{
+      "method" => "item/started",
+      "params" => %{
+        "item" => %{
+          "type" => "commandExecution",
+          "status" => "running"
+        }
+      }
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: actionable_payload,
+         timestamp: actionable_at
+       }}
+    )
+
+    background_warning = %{
+      "method" => "warning",
+      "level" => "WARN",
+      "fields" => %{
+        "message" => "failed to warm featured plugin ids cache",
+        "error" => "GET /plugins/featured failed with status 403"
+      }
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: background_warning,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "mcpServer/startupStatus/updated",
+           "params" => %{"server" => "linear", "status" => "ready"}
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+
+    assert snapshot_entry.last_codex_timestamp == actionable_at
+
+    assert snapshot_entry.last_codex_message == %{
+             event: :notification,
+             message: actionable_payload,
+             timestamp: actionable_at
+           }
+  end
+
+  test "orchestrator still surfaces failed MCP startup notifications" do
+    issue_id = "issue-startup-failure"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-190",
+      title: "Startup failure notification test",
+      description: "Do not hide actionable startup failures",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-190"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :StartupFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-review-loop",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    failed_at = DateTime.utc_now()
+
+    failed_payload = %{
+      "method" => "mcpServer/startupStatus/updated",
+      "params" => %{"server" => "linear", "status" => "failed", "error" => "unauthorized"}
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: failed_payload,
+         timestamp: failed_at
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+
+    assert snapshot_entry.last_codex_message == %{
+             event: :notification,
+             message: failed_payload,
+             timestamp: failed_at
+           }
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 

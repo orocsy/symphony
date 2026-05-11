@@ -1180,12 +1180,23 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
+    {last_codex_timestamp, last_codex_message, last_codex_event} =
+      if display_codex_update?(update) do
+        {timestamp, summarize_codex_update(update), event}
+      else
+        {
+          Map.get(running_entry, :last_codex_timestamp),
+          Map.get(running_entry, :last_codex_message),
+          Map.get(running_entry, :last_codex_event)
+        }
+      end
+
     {
       Map.merge(running_entry, %{
-        last_codex_timestamp: timestamp,
-        last_codex_message: summarize_codex_update(update),
+        last_codex_timestamp: last_codex_timestamp,
+        last_codex_message: last_codex_message,
         session_id: session_id_for_update(running_entry.session_id, update),
-        last_codex_event: event,
+        last_codex_event: last_codex_event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
@@ -1241,6 +1252,46 @@ defmodule SymphonyElixir.Orchestrator do
       message: update[:payload] || update[:raw],
       timestamp: update[:timestamp]
     }
+  end
+
+  defp display_codex_update?(%{event: :notification} = update) do
+    payload = update[:payload] || Map.get(update, "payload") || update
+
+    cond do
+      background_plugin_warning?(payload) -> false
+      benign_mcp_startup_status?(payload) -> false
+      true -> true
+    end
+  end
+
+  defp display_codex_update?(_update), do: true
+
+  defp background_plugin_warning?(payload) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+    level = Map.get(payload, "level") || Map.get(payload, :level)
+    level_text = if is_binary(level) or is_atom(level), do: to_string(level), else: ""
+    warning? = method in ["warning", :warning] or String.match?(level_text, ~r/^warn/i)
+
+    warning? and
+      payload
+      |> inspect(limit: 80, printable_limit: 2_000)
+      |> String.match?(~r/(failed to warm featured plugin ids cache|plugins\/featured)/i)
+  end
+
+  defp background_plugin_warning?(_payload), do: false
+
+  defp benign_mcp_startup_status?(payload) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+
+    method == "mcpServer/startupStatus/updated" and not errorish_payload?(payload)
+  end
+
+  defp benign_mcp_startup_status?(_payload), do: false
+
+  defp errorish_payload?(payload) do
+    payload
+    |> inspect(limit: 80, printable_limit: 2_000)
+    |> String.match?(~r/\b(error|failed|failure|fatal|panic|exception|unauthorized|forbidden)\b/i)
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
