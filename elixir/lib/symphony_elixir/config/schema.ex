@@ -308,7 +308,8 @@ defmodule SymphonyElixir.Config.Schema do
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
       %{} = policy ->
-        {:ok, policy}
+        policy
+        |> normalize_runtime_turn_sandbox_policy(default_workspace_root(workspace, settings.workspace.root), opts)
 
       _ ->
         workspace
@@ -503,6 +504,65 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp default_runtime_turn_sandbox_policy(workspace_root, _opts) do
     {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
+  end
+
+  defp normalize_runtime_turn_sandbox_policy(%{"type" => "workspaceWrite"} = policy, workspace_root, opts)
+       when is_binary(workspace_root) and workspace_root != "" do
+    if Keyword.get(opts, :remote, false) do
+      {:ok, policy}
+    else
+      with base when is_binary(base) <- expand_local_workspace_root(workspace_root),
+           {:ok, writable_roots} <- normalize_local_writable_roots(Map.get(policy, "writableRoots", []), base) do
+        {:ok, Map.put(policy, "writableRoots", writable_roots)}
+      else
+        {:error, reason} -> {:error, {:unsafe_turn_sandbox_policy, reason}}
+        invalid -> {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, invalid}}}
+      end
+    end
+  end
+
+  defp normalize_runtime_turn_sandbox_policy(%{"type" => "workspaceWrite"}, workspace_root, _opts) do
+    {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
+  end
+
+  defp normalize_runtime_turn_sandbox_policy(policy, _workspace_root, _opts), do: {:ok, policy}
+
+  defp normalize_local_writable_roots(roots, base) when is_list(roots) do
+    roots
+    |> Enum.reduce_while({:ok, []}, fn root, {:ok, acc} ->
+      case normalize_local_writable_root(root, base) do
+        {:ok, normalized_root} -> {:cont, {:ok, [normalized_root | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, normalized_roots} -> {:ok, Enum.reverse(normalized_roots)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_local_writable_roots(roots, _base), do: {:error, {:invalid_writable_roots, roots}}
+
+  defp normalize_local_writable_root(root, base) when is_binary(root) do
+    case normalize_path_token(root) do
+      :missing ->
+        {:error, {:missing_env_writable_root, root}}
+
+      "" ->
+        {:error, {:invalid_writable_root, root}}
+
+      path ->
+        {:ok, expand_local_writable_root(path, base)}
+    end
+  end
+
+  defp normalize_local_writable_root(root, _base), do: {:error, {:invalid_writable_root, root}}
+
+  defp expand_local_writable_root(path, base) do
+    case Path.type(path) do
+      :absolute -> Path.expand(path)
+      _ -> Path.expand(path, base)
+    end
   end
 
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",

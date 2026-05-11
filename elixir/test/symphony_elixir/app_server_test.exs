@@ -76,7 +76,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server passes explicit turn sandbox policies through unchanged" do
+  test "app server forwards turn sandbox policies with local writable roots expanded" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -100,6 +100,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
       File.mkdir_p!(workspace)
+      {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
 
       File.write!(codex_binary, """
       #!/bin/sh
@@ -151,6 +152,15 @@ defmodule SymphonyElixir.AppServerTest do
       ]
 
       Enum.each(policy_cases, fn configured_policy ->
+        expected_policy =
+          case configured_policy do
+            %{"type" => "workspaceWrite", "writableRoots" => writable_roots} ->
+              Map.put(configured_policy, "writableRoots", Enum.map(writable_roots, &Path.expand(&1, canonical_workspace)))
+
+            _ ->
+              configured_policy
+          end
+
         File.rm(trace_file)
 
         write_workflow_file!(Workflow.workflow_file_path(),
@@ -171,7 +181,7 @@ defmodule SymphonyElixir.AppServerTest do
                    |> Jason.decode!()
                    |> then(fn payload ->
                      payload["method"] == "turn/start" &&
-                       get_in(payload, ["params", "sandboxPolicy"]) == configured_policy
+                       get_in(payload, ["params", "sandboxPolicy"]) == expected_policy
                    end)
                  else
                    false
