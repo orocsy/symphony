@@ -26,21 +26,17 @@ defmodule SymphonyElixir.PromptBuilder do
   def workspace_recovery_checkpoint(workspace) when is_binary(workspace) do
     with true <- File.dir?(workspace),
          {:ok, status} <- git_status(workspace),
-         true <- handoff_risk?(status),
          event_summary when event_summary != "" <- recent_passed_event_summary(workspace) do
-      """
-      Dirty validated handoff checkpoint:
+      cond do
+        dirty_handoff_risk?(status) ->
+          dirty_validated_handoff_checkpoint(status, event_summary)
 
-      - Current workspace has local work that must be handed off before more investigation.
-      - `git status --short --branch`:
-      #{indent(status)}
-      - Recent passed validation/gate evidence:
-      #{indent(event_summary)}
-      - First action: inspect the focused diff, stage the intended files, commit, and push this branch.
-      - Do not query broad Linear/GitHub context or rerun broad validations before the commit unless the focused diff is incomplete or invalid.
-      - After the push, request/update PR review and Linear handoff. If network/provider/permission blocks that handoff, record a retry blocker and stop.
-      """
-      |> String.trim()
+        pushed_handoff_risk?(status) ->
+          pushed_validated_handoff_checkpoint(status, event_summary)
+
+        true ->
+          ""
+      end
     else
       _ -> ""
     end
@@ -210,12 +206,78 @@ defmodule SymphonyElixir.PromptBuilder do
     error -> {:error, error}
   end
 
-  defp handoff_risk?(status) when is_binary(status) do
+  defp dirty_handoff_risk?(status) when is_binary(status) do
     lines = String.split(status, "\n", trim: true)
     branch_line = List.first(lines) || ""
     dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
 
     dirty_lines != [] or String.contains?(branch_line, ["ahead", "behind", "diverged"])
+  end
+
+  defp pushed_handoff_risk?(status) when is_binary(status) do
+    lines = String.split(status, "\n", trim: true)
+    branch_line = List.first(lines) || ""
+    dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+    branch = status_branch_name(branch_line)
+
+    dirty_lines == [] and clean_tracking_branch?(branch_line) and handoff_branch?(branch)
+  end
+
+  defp pushed_handoff_risk?(_status), do: false
+
+  defp clean_tracking_branch?(branch_line) when is_binary(branch_line) do
+    String.contains?(branch_line, "...") and
+      not String.contains?(branch_line, ["ahead", "behind", "diverged"])
+  end
+
+  defp handoff_branch?(branch) when is_binary(branch) do
+    branch = String.trim(branch)
+    branch != "" and branch not in ["main", "master", "trunk", "develop", "dev"]
+  end
+
+  defp handoff_branch?(_branch), do: false
+
+  defp status_branch_name("## " <> rest) do
+    rest
+    |> String.split(["...", " "], parts: 2)
+    |> List.first()
+    |> to_string()
+    |> String.trim()
+  end
+
+  defp status_branch_name(_branch_line), do: nil
+
+  defp dirty_validated_handoff_checkpoint(status, event_summary) do
+    """
+    Dirty validated handoff checkpoint:
+
+    - Current workspace has local work that must be handed off before more investigation.
+    - `git status --short --branch`:
+    #{indent(status)}
+    - Recent passed validation/gate evidence:
+    #{indent(event_summary)}
+    - First action: inspect the focused diff, stage the intended files, commit, and push this branch.
+    - Do not query broad Linear/GitHub context or rerun broad validations before the commit unless the focused diff is incomplete or invalid.
+    - After the push, request/update PR review and Linear handoff. If network/provider/permission blocks that handoff, record a retry blocker and stop.
+    """
+    |> String.trim()
+  end
+
+  defp pushed_validated_handoff_checkpoint(status, event_summary) do
+    """
+    Pushed validated handoff checkpoint:
+
+    - Current workspace is clean on a pushed non-main branch with recent passed validation/gate evidence.
+    - `git status --short --branch`:
+    #{indent(status)}
+    - Recent passed validation/gate evidence:
+    #{indent(event_summary)}
+    - First action: verify whether a PR already exists for this branch. If none exists, create one against `main`.
+    - Do not redo implementation, broad context scans, or broad validations before the PR/Linear handoff.
+    - Request/update PR review and update Linear with branch, PR, commit, validation, and blockers.
+    - If network/provider/permission blocks that handoff, record a retry blocker and stop.
+    """
+    |> String.trim()
   end
 
   defp recent_passed_event_summary(workspace) do

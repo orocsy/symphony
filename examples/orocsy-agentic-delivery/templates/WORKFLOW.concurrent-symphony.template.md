@@ -123,6 +123,9 @@ Retry continuation:
 - At a dirty validated handoff checkpoint, inspect the focused diff, then stage,
   commit, push, request/update PR review, and update Linear before any broad
   PR/Linear scans or broad validation reruns.
+- If `git status` is clean on a pushed non-main branch and recent validation/gate
+  events passed, this is a pushed validated handoff checkpoint: verify/create
+  the PR, request/update PR review, and update Linear before any broad scans.
 - If product changes, validation, or gates already exist, enter
   handoff-recovery mode and only complete the pending commit, push, PR review
   request, or Linear update.
@@ -244,6 +247,11 @@ Orocsy worker prelude:
       Linear handoff. Do not query broad Linear/GitHub context or rerun broad
       validations before the commit unless the focused diff is incomplete or
       invalid.
+    - Pushed validated handoff checkpoint: when `git status` is clean on a
+      pushed non-main branch and recent validation/gate events passed, the next
+      worker action is only PR existence/create/update, PR review request, and
+      Linear handoff. Do not redo implementation, broad context scans, or broad
+      validations first.
     - If product changes, validation, and gates already exist, enter
       handoff-recovery mode: complete only the pending commit, push, PR review
       request/comment, or Linear workpad/state update. Do not modify product
