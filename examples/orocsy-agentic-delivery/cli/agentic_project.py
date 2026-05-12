@@ -646,8 +646,8 @@ if ! grep -q "max_failed_worker_retries" "$WORKFLOW_FILE" || ! grep -q "Runtime 
   exit 1
 fi
 
-if ! grep -q "token-budget exhaustion parks immediately" "$WORKFLOW_FILE"; then
-  echo "Refusing to run stale Symphony workflow: missing token-budget immediate parking guard." >&2
+if ! grep -q "constrained handoff-recovery retry" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing token-budget handoff-recovery guard." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi

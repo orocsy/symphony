@@ -274,8 +274,10 @@ Orocsy worker prelude:
       command approval, sandbox approval, MCP elicitation, or interactive input
       that the non-interactive worker cannot safely answer.
     - Live Codex turn token-budget exhaustion parks immediately with next action
-      `block`; it is not an automatic retry because the expensive turn already
-      happened and the workspace may contain validated dirty handoff work.
+      `block` when no fresh local handoff progress exists. If the same run
+      produced dirty files or local commits ahead of base, Symphony schedules a
+      constrained handoff-recovery retry first so the worker can validate,
+      push, request review, and update Linear without redoing product work.
     - High token usage by itself is not a failure. Symphony parks only the
       high-token/no-recent-durable-progress case: after the configured progress
       window, the worker must have recent dirty files, local commits/ahead

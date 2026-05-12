@@ -25,13 +25,18 @@ defmodule SymphonyElixir.PromptBuilder do
   @spec workspace_recovery_checkpoint(String.t() | nil) :: String.t()
   def workspace_recovery_checkpoint(workspace) when is_binary(workspace) do
     with true <- File.dir?(workspace),
-         {:ok, status} <- git_status(workspace),
-         event_summary when event_summary != "" <- recent_passed_event_summary(workspace) do
+         {:ok, status} <- git_status(workspace) do
+      event_summary = recent_passed_event_summary(workspace)
+      local_handoff? = local_handoff_risk?(status) or local_commit_handoff_risk?(workspace)
+
       cond do
-        dirty_handoff_risk?(status) ->
+        local_handoff? and event_summary != "" ->
           dirty_validated_handoff_checkpoint(status, event_summary)
 
-        pushed_handoff_risk?(status) ->
+        local_handoff? ->
+          unvalidated_local_handoff_checkpoint(status)
+
+        pushed_handoff_risk?(status) and event_summary != "" ->
           pushed_validated_handoff_checkpoint(status, event_summary)
 
         true ->
@@ -206,12 +211,44 @@ defmodule SymphonyElixir.PromptBuilder do
     error -> {:error, error}
   end
 
-  defp dirty_handoff_risk?(status) when is_binary(status) do
+  defp local_handoff_risk?(status) when is_binary(status) do
     lines = String.split(status, "\n", trim: true)
     branch_line = List.first(lines) || ""
     dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
 
-    dirty_lines != [] or String.contains?(branch_line, ["ahead", "behind", "diverged"])
+    dirty_lines != [] or String.contains?(branch_line, ["ahead", "diverged"])
+  end
+
+  defp local_handoff_risk?(_status), do: false
+
+  defp local_commit_handoff_risk?(workspace) when is_binary(workspace) do
+    base_refs =
+      ["@{upstream}", "origin/main", "main"]
+      |> Enum.filter(&git_ref_exists?(workspace, &1))
+
+    if base_refs == [] do
+      false
+    else
+      args = ["log", "-1", "--format=%H", "HEAD"] ++ Enum.flat_map(base_refs, &[~s(--not), &1])
+
+      case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+        {output, 0} -> String.trim(output) != ""
+        {_error, _exit_code} -> false
+      end
+    end
+  rescue
+    _error -> false
+  end
+
+  defp local_commit_handoff_risk?(_workspace), do: false
+
+  defp git_ref_exists?(workspace, ref) do
+    case System.cmd("git", ["rev-parse", "--verify", "--quiet", ref], cd: workspace, stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _exit_code} -> false
+    end
+  rescue
+    _error -> false
   end
 
   defp pushed_handoff_risk?(status) when is_binary(status) do
@@ -259,6 +296,21 @@ defmodule SymphonyElixir.PromptBuilder do
     - First action: inspect the focused diff, stage the intended files, commit, and push this branch.
     - Do not query broad Linear/GitHub context or rerun broad validations before the commit unless the focused diff is incomplete or invalid.
     - After the push, request/update PR review and Linear handoff. If network/provider/permission blocks that handoff, record a retry blocker and stop.
+    """
+    |> String.trim()
+  end
+
+  defp unvalidated_local_handoff_checkpoint(status) do
+    """
+    Local handoff recovery checkpoint:
+
+    - Current workspace has local work but no recent passed Orocsy validation/gate evidence was found.
+    - `git status --short --branch`:
+    #{indent(status)}
+    - First action: inspect the focused local diff and local commits, then run the smallest validation needed for those changed files.
+    - If the focused diff is complete and validation passes, commit any dirty intended files, push the branch, request/update PR review, and update Linear.
+    - Do not redo implementation, broad codebase scans, or broad validations first unless the focused diff is incomplete, invalid, or a current review thread requires another code change.
+    - If network/provider/permission blocks handoff, record the blocker with next action `retry` and stop.
     """
     |> String.trim()
   end

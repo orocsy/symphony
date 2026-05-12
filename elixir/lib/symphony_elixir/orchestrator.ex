@@ -1183,7 +1183,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_agent_failure(%State{} = state, issue_id, running_entry, reason) do
     next_attempt = planned_retry_attempt(running_entry)
-    failure = classify_agent_failure(reason)
+
+    failure =
+      reason
+      |> classify_agent_failure()
+      |> maybe_recover_token_budget_handoff(running_entry)
 
     cond do
       failure.action == :block ->
@@ -1312,6 +1316,38 @@ defmodule SymphonyElixir.Orchestrator do
         }
     end
   end
+
+  defp maybe_recover_token_budget_handoff(%{kind: "token-budget"} = failure, running_entry) do
+    if fresh_local_handoff_progress?(running_entry) do
+      %{
+        failure
+        | action: :retry,
+          kind: "token-budget-handoff",
+          source_status: "retryable",
+          next_action: "retry",
+          summary:
+            "Symphony stopped a Codex worker after it exceeded the configured live turn token budget, but the workspace contains fresh local handoff progress from this run. Symphony will retry once through a constrained handoff-recovery prompt instead of parking the issue as unfinished product work.",
+          required_corrections: [
+            "Resume from the existing workspace and inspect only the focused local diff/local commits first.",
+            "Run focused validation for the changed files, then push the existing branch and update PR/Linear handoff before any broad rediscovery.",
+            "If the next turn hits the token budget again without new local progress, park with a blocking correction."
+          ]
+      }
+    else
+      failure
+    end
+  end
+
+  defp maybe_recover_token_budget_handoff(failure, _running_entry), do: failure
+
+  defp fresh_local_handoff_progress?(%{workspace_path: workspace, started_at: %DateTime{} = started_at})
+       when is_binary(workspace) do
+    File.dir?(workspace) and git_durable_progress_times(workspace, started_at) != []
+  rescue
+    _error -> false
+  end
+
+  defp fresh_local_handoff_progress?(_running_entry), do: false
 
   defp no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens) do
     %{
