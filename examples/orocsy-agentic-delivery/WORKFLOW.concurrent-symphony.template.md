@@ -155,12 +155,23 @@ Orocsy worker prelude:
 12. Before handoff, print the applicable eval rubric and record the verdict:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval rubric miu-quality`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval record miu-quality --status passed --summary "<why>"`
-13. If any gate or eval fails, create/resolve inbox items and ask for guidance:
+13. Handoff git-state verification guard:
+   - After the final push and before any GitHub or Linear completion update,
+     verify the actual repository state:
+     `git status --short --branch`
+     `git rev-parse HEAD`
+     `git rev-parse @{upstream}`
+   - The branch must be clean and local `HEAD` must equal upstream. A narrative eval
+     summary saying "committed" or "pushed" is not evidence.
+   - If the branch is dirty, ahead of upstream, missing an upstream, or the
+     remote PR head does not match local `HEAD`, stop in handoff-recovery mode,
+     record the blocker, and do not move the issue to review/completion.
+14. If any gate or eval fails, create/resolve inbox items and ask for guidance:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --inbox`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
-14. If guidance says `block` or `retry`, update the Linear workpad and stop
+15. If guidance says `block` or `retry`, update the Linear workpad and stop
     until the correction is handled.
-15. Generated artifact cleanup:
+16. Generated artifact cleanup:
     - Do not run raw destructive cleanup commands such as `rm -rf`,
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
@@ -174,7 +185,7 @@ Orocsy worker prelude:
       unavoidable, stop, record an Orocsy guidance/blocker, and let the
       workflow owner run or approve a bounded cleanup outside the worker. Do
       not retry the same destructive command.
-16. Symphony browser verification guard:
+17. Symphony browser verification guard:
     - Browser evidence is still required for UI-impacting work, but Symphony
       command guard denies raw dev-server and browser-install commands in
       non-interactive workers.
@@ -198,7 +209,7 @@ Orocsy worker prelude:
       `.orocsy/delivery/events/events.jsonl`, update the Linear workpad, and
       stop. Do not install dependencies/browsers ad hoc from the worker and do
       not claim product browser verification passed.
-17. Symphony permission guard:
+18. Symphony permission guard:
     - Do not set `codex.approval_policy` to `never`. The generated start
       script refuses that mode because it can silently approve dangerous
       non-interactive worker requests.
@@ -209,7 +220,7 @@ Orocsy worker prelude:
     - If a command approval or MCP/tool approval prompt appears, record the
       blocker in the Orocsy ledger, update the Linear workpad, and stop for the
       workflow owner. Do not answer approval prompts by hand inside the worker.
-18. Symphony handoff recovery guard:
+19. Symphony handoff recovery guard:
     - Before new product edits, inspect `git status --short --branch` and recent
       `.orocsy/delivery/events/events.jsonl` entries when the workspace has
       dirty changes, local commits ahead of upstream, or a previous `git push`,
@@ -231,7 +242,7 @@ Orocsy worker prelude:
     - On a later retry, resume from the same workspace and finish push/review
       handoff. Do not create duplicate commits unless a current review thread
       still requires a code change.
-19. Runtime failure parking guard:
+20. Runtime failure parking guard:
     - The Symphony runtime will stop a worker immediately when Codex requests
       command approval, sandbox approval, MCP elicitation, or interactive input
       that the non-interactive worker cannot safely answer.
