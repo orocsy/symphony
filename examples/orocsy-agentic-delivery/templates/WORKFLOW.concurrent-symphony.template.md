@@ -15,6 +15,13 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/.codex/symphony-workspaces/<project>-concurrent
+review_monitor:
+  enabled: true
+  provider: github
+  repo: "$PROJECT_REPO"
+  states:
+    - Human Review
+  rework_state: Rework
 hooks:
   timeout_ms: 300000
   after_create: |
@@ -316,6 +323,9 @@ CI/CD timing:
 
 Review hardening trigger:
 
+0. The runtime `review_monitor` polls `Human Review` issues for current-head
+   GitHub PR feedback and moves them to `Rework` before dispatch. A worker
+   should not need a human to copy Codex review comments back into Linear.
 1. If the issue state is `Rework`, or the issue has an attached open PR with
    unresolved Codex/human review threads, run the review hardening loop before
    any new feature work.

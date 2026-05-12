@@ -132,6 +132,9 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
+      settings.review_monitor.enabled and not is_binary(settings.review_monitor.repo) ->
+        {:error, {:invalid_workflow_config, "review_monitor.repo must be set when review_monitor.enabled is true"}}
+
       true ->
         :ok
     end

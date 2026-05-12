@@ -101,6 +101,11 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+          review_monitor_enabled: false,
+          review_monitor_provider: "github",
+          review_monitor_repo: nil,
+          review_monitor_states: ["Human Review"],
+          review_monitor_rework_state: "Rework",
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
@@ -144,6 +149,11 @@ defmodule SymphonyElixir.TestSupport do
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    review_monitor_enabled = Keyword.get(config, :review_monitor_enabled)
+    review_monitor_provider = Keyword.get(config, :review_monitor_provider)
+    review_monitor_repo = Keyword.get(config, :review_monitor_repo)
+    review_monitor_states = Keyword.get(config, :review_monitor_states)
+    review_monitor_rework_state = Keyword.get(config, :review_monitor_rework_state)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -190,6 +200,12 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        "review_monitor:",
+        "  enabled: #{yaml_value(review_monitor_enabled)}",
+        "  provider: #{yaml_value(review_monitor_provider)}",
+        "  repo: #{yaml_value(review_monitor_repo)}",
+        "  states: #{yaml_value(review_monitor_states)}",
+        "  rework_state: #{yaml_value(review_monitor_rework_state)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",

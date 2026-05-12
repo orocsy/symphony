@@ -538,6 +538,121 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "review monitor moves human-review issues with current-head PR feedback to rework" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "issue-review-1",
+        identifier: "COD-151",
+        title: "Guest session and limit engine",
+        state: "Human Review",
+        branch_name: "orocsy/cod-151-guest-session"
+      }
+    ])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 3,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/3",
+               "head" => %{"sha" => "abc123current", "ref" => "orocsy/cod-151-guest-session"}
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/3/comments" ->
+          {:ok,
+           [
+             %{
+               "body" => "**P2** Honor existing guest gates before accepting swipes",
+               "commit_id" => "abc123current",
+               "path" => "src/lib/domain/guest-limit.ts",
+               "line" => 45,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/3#discussion"
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
+          {:ok, []}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:memory_tracker_state_update, "issue-review-1", "Rework"}
+    assert_receive {:memory_tracker_comment, "issue-review-1", body}
+    assert body =~ "current PR feedback"
+    assert body =~ "src/lib/domain/guest-limit.ts:45"
+    assert body =~ "Rework lane"
+  end
+
+  test "review monitor ignores stale PR feedback from older commits" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "issue-review-2",
+        identifier: "COD-151",
+        title: "Guest session and limit engine",
+        state: "Human Review",
+        branch_name: "orocsy/cod-151-guest-session"
+      }
+    ])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 3,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/3",
+               "head" => %{"sha" => "abc123current", "ref" => "orocsy/cod-151-guest-session"}
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/3/comments" ->
+          {:ok, [%{"body" => "**P2** Old feedback", "commit_id" => "oldsha"}]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
+          {:ok, []}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    refute_receive {:memory_tracker_state_update, "issue-review-2", "Rework"}, 50
+  end
+
   test "todo issue with terminal blockers remains dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,

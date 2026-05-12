@@ -176,6 +176,7 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "symphony guidance",
         "Dirty validated handoff checkpoint",
         "Pushed validated handoff checkpoint",
+        "review_monitor:",
         "Runtime failure parking guard",
         "Review completion gate",
         "Handoff git-state verification guard",
@@ -215,6 +216,7 @@ def start_script_uses_orocsy_runtime(content: str) -> bool:
         "OROCSY_CLI",
         "symphony prepare-workspace",
         "Dirty validated handoff checkpoint",
+        "review_monitor:",
         "missing failed worker retry parking guard",
         "missing review completion guard",
         "missing handoff git-state verification guard",
@@ -522,6 +524,9 @@ for env_file in "$ROOT/.env.local" "$ROOT/.env"; do
   fi
 done
 
+PROJECT_REPO="${PROJECT_REPO:-$(git -C "$ROOT" config --get remote.origin.url)}"
+export PROJECT_REPO
+
 if [[ ! -d "$SYMPHONY_REPO/elixir" ]]; then
   echo "Missing Symphony Elixir checkout at $SYMPHONY_REPO/elixir" >&2
   exit 1
@@ -601,6 +606,12 @@ fi
 
 if ! grep -q "Pushed validated handoff checkpoint" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing pushed validated handoff checkpoint guard." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "review_monitor:" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing GitHub review monitor bridge for Human Review -> Rework." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi

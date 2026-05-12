@@ -100,6 +100,49 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule ReviewMonitor do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:provider, :string, default: "github")
+      field(:repo, :string)
+      field(:states, {:array, :string}, default: ["Human Review"])
+      field(:rework_state, :string, default: "Rework")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :provider, :repo, :states, :rework_state], empty_values: [])
+      |> validate_inclusion(:provider, ["github"])
+      |> validate_required_when_enabled()
+    end
+
+    defp validate_required_when_enabled(%Ecto.Changeset{} = changeset) do
+      if get_field(changeset, :enabled) do
+        changeset
+        |> validate_required([:states, :rework_state])
+        |> validate_non_empty_states()
+      else
+        changeset
+      end
+    end
+
+    defp validate_non_empty_states(%Ecto.Changeset{} = changeset) do
+      validate_change(changeset, :states, fn :states, states ->
+        if Enum.any?(states, &(to_string(&1) |> String.trim() == "")) do
+          [states: "must not contain blank values"]
+        else
+          []
+        end
+      end)
+    end
+  end
+
   defmodule Worker do
     @moduledoc false
     use Ecto.Schema
@@ -305,6 +348,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:review_monitor, ReviewMonitor, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
@@ -398,6 +442,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
+    |> cast_embed(:review_monitor, with: &ReviewMonitor.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
@@ -418,13 +463,18 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
+    review_monitor = %{
+      settings.review_monitor
+      | repo: resolve_repo_value(settings.review_monitor.repo, System.get_env("PROJECT_REPO"))
+    }
+
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    %{settings | tracker: tracker, workspace: workspace, review_monitor: review_monitor, codex: codex}
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -476,6 +526,16 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defp resolve_repo_value(nil, fallback), do: normalize_repo_token(fallback)
+
+  defp resolve_repo_value(value, fallback) when is_binary(value) do
+    value
+    |> resolve_env_value(fallback)
+    |> normalize_repo_token()
+  end
+
+  defp resolve_repo_value(_value, fallback), do: normalize_repo_token(fallback)
+
   defp resolve_env_value(value, fallback) when is_binary(value) do
     case env_reference_name(value) do
       {:ok, env_name} ->
@@ -496,6 +556,20 @@ defmodule SymphonyElixir.Config.Schema do
       :error -> value
     end
   end
+
+  defp normalize_repo_token(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.replace_prefix("https://github.com/", "")
+    |> String.replace_prefix("git@github.com:", "")
+    |> String.replace_suffix(".git", "")
+    |> case do
+      "" -> nil
+      repo -> repo
+    end
+  end
+
+  defp normalize_repo_token(_value), do: nil
 
   defp env_reference_name("$" <> env_name) do
     if String.match?(env_name, ~r/^[A-Za-z_][A-Za-z0-9_]*$/) do

@@ -17,6 +17,13 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
+review_monitor:
+  enabled: false
+  provider: github
+  repo: "$PROJECT_REPO"
+  states:
+    - Human Review
+  rework_state: Rework
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
