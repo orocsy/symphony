@@ -224,6 +224,13 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, []} = Client.fetch_issue_states_by_ids([])
   end
 
+  test "linear project slug normalizes UI slug to slug id" do
+    assert Client.normalize_project_slug_id_for_test("nutribuddy-mvp-delivery-e08d1e292a64") ==
+             "e08d1e292a64"
+
+    assert Client.normalize_project_slug_id_for_test("e08d1e292a64") == "e08d1e292a64"
+  end
+
   test "non-active issue state stops running agent without cleaning workspace" do
     test_root =
       Path.join(

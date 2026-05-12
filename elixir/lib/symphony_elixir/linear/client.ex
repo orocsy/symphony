@@ -215,6 +215,10 @@ defmodule SymphonyElixir.Linear.Client do
   def next_page_cursor_for_test(page_info) when is_map(page_info), do: next_page_cursor(page_info)
 
   @doc false
+  @spec normalize_project_slug_id_for_test(String.t() | nil) :: String.t() | nil
+  def normalize_project_slug_id_for_test(project_slug), do: normalize_project_slug_id(project_slug)
+
+  @doc false
   @spec merge_issue_pages_for_test([[Issue.t()]]) :: [Issue.t()]
   def merge_issue_pages_for_test(issue_pages) when is_list(issue_pages) do
     issue_pages
@@ -239,7 +243,16 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+    do_fetch_by_states_page(normalize_project_slug_id(project_slug), state_names, assignee_filter, nil, [])
+  end
+
+  defp normalize_project_slug_id(nil), do: nil
+
+  defp normalize_project_slug_id(project_slug) when is_binary(project_slug) do
+    project_slug
+    |> String.trim()
+    |> String.split("-")
+    |> List.last()
   end
 
   defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
