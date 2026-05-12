@@ -634,8 +634,8 @@ if ! grep -q "token-budget exhaustion parks immediately" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
-if ! grep -q "durable_progress_min_tokens" "$WORKFLOW_FILE" || ! grep -q "no-durable-progress" "$WORKFLOW_FILE"; then
-  echo "Refusing to run stale Symphony workflow: missing durable progress watchdog guard." >&2
+if ! grep -q "durable_progress_min_tokens" "$WORKFLOW_FILE" || ! grep -q "no-recent-durable-progress" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing recent durable progress watchdog guard." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi

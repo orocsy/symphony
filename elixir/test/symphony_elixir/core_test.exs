@@ -937,7 +937,7 @@ defmodule SymphonyElixir.CoreTest do
         ref: nil,
         identifier: issue.identifier,
         issue: issue,
-        started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+        started_at: DateTime.add(DateTime.utc_now(), -10, :second),
         workspace_path: workspace,
         codex_total_tokens: 500
       }
@@ -974,6 +974,127 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "stale durable progress from an earlier run still parks" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 10,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-stale-progress"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-STALEPROGRESS",
+        state: "In Progress",
+        title: "Stale durable progress",
+        description: "Worker should park when all durable evidence predates this run",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      stale_ts = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_iso8601()
+      baseline_ts = DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 env: [{"GIT_AUTHOR_DATE", baseline_ts}, {"GIT_COMMITTER_DATE", baseline_ts}],
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
+
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(events_dir, "events.jsonl"),
+        Jason.encode!(%{"event" => "gate.declared-scope", "status" => "passed", "ts" => stale_ts}) <> "\n"
+      )
+
+      assert {_output, 0} = System.cmd("git", ["add", ".orocsy/delivery/events/events.jsonl"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Record stale durable event"],
+                 cd: workspace,
+                 env: [{"GIT_AUTHOR_DATE", stale_ts}, {"GIT_COMMITTER_DATE", stale_ts}],
+                 stderr_to_stdout: true
+               )
+
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      orchestrator_name = Module.concat(__MODULE__, :StaleDurableProgressOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: worker_pid,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.add(DateTime.utc_now(), -10, :second),
+        workspace_path: workspace,
+        codex_total_tokens: 500
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, :run_poll_cycle)
+
+      Process.sleep(100)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["guard"]["quiet_ms"] >= 10
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "high-token worker with durable progress is not parked" do
     test_root =
       Path.join(
@@ -988,7 +1109,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         workspace_root: workspace_root,
         codex_stall_timeout_ms: 0,
-        codex_durable_progress_timeout_ms: 10,
+        codex_durable_progress_timeout_ms: 60_000,
         codex_durable_progress_min_tokens: 100
       )
 
@@ -1008,8 +1129,33 @@ defmodule SymphonyElixir.CoreTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+      baseline_ts = DateTime.add(started_at, -60, :second) |> DateTime.to_iso8601()
+
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      File.write!(Path.join(workspace, "progress.txt"), "dirty work proves progress\n")
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 env: [{"GIT_AUTHOR_DATE", baseline_ts}, {"GIT_COMMITTER_DATE", baseline_ts}],
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "progress.txt"), "committed work proves progress\n")
+      assert {_output, 0} = System.cmd("git", ["add", "progress.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add progress"], cd: workspace, stderr_to_stdout: true)
+
+      assert {commit_ts, 0} =
+               System.cmd("git", ["log", "-1", "--format=%cI", "HEAD", "--not", "main"], cd: workspace)
+
+      assert String.trim(commit_ts) != ""
+
       worker_pid = spawn(fn -> Process.sleep(:infinity) end)
 
       orchestrator_name = Module.concat(__MODULE__, :DurableProgressOrchestrator)
@@ -1032,22 +1178,19 @@ defmodule SymphonyElixir.CoreTest do
         ref: nil,
         identifier: issue.identifier,
         issue: issue,
-        started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+        started_at: started_at,
         workspace_path: workspace,
         codex_total_tokens: 500
       }
 
-      :sys.replace_state(pid, fn _ ->
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+
+      state =
         initial_state
         |> Map.put(:running, %{issue_id => running_entry})
         |> Map.put(:claimed, MapSet.new([issue_id]))
         |> Map.put(:retry_attempts, %{})
-      end)
-
-      send(pid, :run_poll_cycle)
-
-      Process.sleep(100)
-      state = :sys.get_state(pid)
+        |> Orchestrator.reconcile_no_durable_progress_for_test()
 
       assert Map.has_key?(state.running, issue_id)
       assert MapSet.member?(state.claimed, issue_id)

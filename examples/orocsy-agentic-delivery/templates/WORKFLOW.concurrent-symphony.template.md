@@ -255,10 +255,11 @@ Orocsy worker prelude:
       `block`; it is not an automatic retry because the expensive turn already
       happened and the workspace may contain validated dirty handoff work.
     - High token usage by itself is not a failure. Symphony parks only the
-      high-token/no-durable-progress case: after the configured progress window,
-      the worker must have dirty files, local commits/ahead status, or passed
-      MIU/gate evidence such as `tool.finished`, `gate.post-miu`,
-      `gate.required-evidence`, or `gate.declared-scope`.
+      high-token/no-recent-durable-progress case: after the configured progress
+      window, the worker must have recent dirty files, local commits/ahead
+      status, or passed MIU/gate evidence such as `tool.finished`,
+      `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope`.
+      Stale commits or gate events from an earlier run do not count.
     - If the watchdog parks with `no-durable-progress`, treat the root cause as
       a handoff-quality or hidden-blocker defect. Inspect the workspace/log, add
       code-level MIU details, and redispatch only after the correction is clear.

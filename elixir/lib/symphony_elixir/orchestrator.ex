@@ -319,6 +319,13 @@ defmodule SymphonyElixir.Orchestrator do
     reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
   end
 
+  if Code.ensure_loaded?(Mix) and Mix.env() == :test do
+    @doc false
+    def reconcile_no_durable_progress_for_test(%State{} = state) do
+      reconcile_no_durable_progress_running_issues(state)
+    end
+  end
+
   @doc false
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
@@ -501,17 +508,19 @@ defmodule SymphonyElixir.Orchestrator do
     elapsed_ms = runtime_elapsed_ms(running_entry, now)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
 
-    if is_integer(elapsed_ms) and elapsed_ms > timeout_ms and total_tokens >= min_tokens and
-         not durable_progress_detected?(running_entry) do
+    quiet_ms = durable_progress_quiet_ms(running_entry, now)
+
+    if is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
+         total_tokens >= min_tokens do
       identifier = Map.get(running_entry, :identifier, issue_id)
       session_id = running_entry_session_id(running_entry)
 
       Logger.warning(
-        "Issue has no durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} codex_total_tokens=#{total_tokens}; parking for workflow correction"
+        "Issue has no recent durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms} codex_total_tokens=#{total_tokens}; parking for workflow correction"
       )
 
-      failure = no_durable_progress_failure(elapsed_ms, total_tokens, timeout_ms, min_tokens)
-      reason = {:no_durable_progress, elapsed_ms, total_tokens, timeout_ms, min_tokens}
+      failure = no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens)
+      reason = {:no_durable_progress, elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens}
 
       park_running_issue(state, issue_id, running_entry, reason, failure)
     else
@@ -525,41 +534,127 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_elapsed_ms(_running_entry, _now), do: nil
 
-  defp durable_progress_detected?(%{worker_host: worker_host}) when is_binary(worker_host) and worker_host != "" do
-    # Remote workspaces need a remote progress probe before they can be parked safely.
-    true
+  if Code.ensure_loaded?(Mix) and Mix.env() == :test do
+    @doc false
+    def durable_progress_quiet_ms_for_test(running_entry, now) do
+      durable_progress_quiet_ms(running_entry, now)
+    end
   end
 
-  defp durable_progress_detected?(%{workspace_path: workspace}) when is_binary(workspace) do
-    File.dir?(workspace) and (git_durable_progress?(workspace) or event_durable_progress?(workspace))
+  defp durable_progress_quiet_ms(%{worker_host: worker_host}, _now)
+       when is_binary(worker_host) and worker_host != "" do
+    # Remote workspaces need a remote progress probe before they can be parked safely.
+    nil
+  end
+
+  defp durable_progress_quiet_ms(%{workspace_path: workspace, started_at: %DateTime{} = started_at}, %DateTime{} = now)
+       when is_binary(workspace) do
+    observed_at =
+      if File.dir?(workspace) do
+        workspace
+        |> durable_progress_observed_times(started_at)
+        |> latest_datetime()
+      end
+
+    reference_at = observed_at || started_at
+    max(0, DateTime.diff(now, reference_at, :millisecond))
   rescue
     error ->
       Logger.debug("Unable to inspect durable progress for workspace=#{workspace}: #{inspect(error)}")
-      false
+      runtime_elapsed_ms(%{started_at: started_at}, now)
   end
 
-  defp durable_progress_detected?(_running_entry), do: true
+  defp durable_progress_quiet_ms(_running_entry, _now), do: nil
 
-  defp git_durable_progress?(workspace) do
-    case System.cmd("git", ["status", "--short", "--branch"], cd: workspace, stderr_to_stdout: true) do
+  defp durable_progress_observed_times(workspace, started_at) do
+    git_durable_progress_times(workspace, started_at) ++ event_durable_progress_times(workspace, started_at)
+  end
+
+  defp git_durable_progress_times(workspace, started_at) do
+    [git_dirty_observed_at(workspace), git_ahead_commit_observed_at(workspace)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&datetime_at_or_after?(&1, started_at))
+  end
+
+  defp git_dirty_observed_at(workspace) do
+    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
       {status, 0} ->
-        lines = String.split(status, "\n", trim: true)
-        branch_line = List.first(lines) || ""
-        dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
-
-        dirty_lines != [] or String.contains?(branch_line, ["ahead", "behind", "diverged"])
+        status
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&porcelain_status_paths/1)
+        |> Enum.map(&Path.join(workspace, &1))
+        |> Enum.map(&file_mtime_datetime/1)
+        |> Enum.reject(&is_nil/1)
+        |> latest_datetime()
 
       {_error, _exit_code} ->
-        false
+        nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp git_ahead_commit_observed_at(workspace) do
+    base_refs =
+      ["origin/main", "main"]
+      |> Enum.filter(&git_ref_exists?(workspace, &1))
+
+    if base_refs == [] do
+      nil
+    else
+      args = ["log", "-1", "--format=%cI", "HEAD"] ++ Enum.flat_map(base_refs, &[~s(--not), &1])
+
+      case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+        {output, 0} ->
+          output
+          |> String.trim()
+          |> datetime_from_iso8601()
+
+        {_error, _exit_code} ->
+          nil
+      end
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp git_ref_exists?(workspace, ref) do
+    case System.cmd("git", ["rev-parse", "--verify", "--quiet", ref], cd: workspace, stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _exit_code} -> false
     end
   rescue
     _error -> false
   end
 
-  defp event_durable_progress?(workspace) do
+  defp porcelain_status_paths(line) when byte_size(line) >= 4 do
+    path =
+      line
+      |> String.slice(3..-1//1)
+      |> String.replace_prefix(~s("), "")
+      |> String.replace_suffix(~s("), "")
+
+    case path do
+      "" -> []
+      path -> [path |> String.split(" -> ") |> List.last()]
+    end
+  end
+
+  defp porcelain_status_paths(_line), do: []
+
+  defp file_mtime_datetime(path) do
+    with {:ok, %{mtime: mtime}} <- File.stat(path, time: :posix),
+         {:ok, datetime} <- DateTime.from_unix(mtime) do
+      datetime
+    else
+      _ -> nil
+    end
+  end
+
+  defp event_durable_progress_times(workspace, started_at) do
     workspace
     |> durable_progress_event_paths()
-    |> Enum.any?(&durable_progress_event_file?/1)
+    |> Enum.flat_map(&durable_progress_event_file_times(&1, started_at))
   end
 
   defp durable_progress_event_paths(workspace) do
@@ -569,15 +664,56 @@ defmodule SymphonyElixir.Orchestrator do
     ]
   end
 
-  defp durable_progress_event_file?(path) do
-    File.regular?(path) and Enum.any?(File.stream!(path), &durable_progress_event_line?/1)
+  defp durable_progress_event_file_times(path, started_at) do
+    if File.regular?(path) do
+      path
+      |> File.stream!()
+      |> Enum.flat_map(&durable_progress_event_line_times(&1, started_at))
+    else
+      []
+    end
   rescue
-    _error -> false
+    _error -> []
   end
 
-  defp durable_progress_event_line?(line) when is_binary(line) do
-    String.contains?(line, ~s("status": "passed")) and
-      String.contains?(line, @durable_progress_event_patterns)
+  defp durable_progress_event_line_times(line, started_at) when is_binary(line) do
+    if String.contains?(line, ~s("status": "passed")) and
+         String.contains?(line, @durable_progress_event_patterns) do
+      case Jason.decode(line) do
+        {:ok, %{"ts" => ts}} ->
+          case datetime_from_iso8601(ts) do
+            %DateTime{} = datetime ->
+              if datetime_at_or_after?(datetime, started_at), do: [datetime], else: []
+
+            nil ->
+              []
+          end
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
+  end
+
+  defp datetime_from_iso8601(value) when is_binary(value) and value != "" do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp datetime_from_iso8601(_value), do: nil
+
+  defp datetime_at_or_after?(%DateTime{} = datetime, %DateTime{} = reference) do
+    # Git commit dates and file mtimes are second-granularity on common filesystems,
+    # so allow a tiny boundary tolerance for work produced in the same poll second.
+    DateTime.diff(datetime, reference, :second) >= -2
+  end
+
+  defp latest_datetime(datetimes) do
+    Enum.max_by(datetimes, &DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
@@ -1176,14 +1312,14 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp no_durable_progress_failure(elapsed_ms, total_tokens, timeout_ms, min_tokens) do
+  defp no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens) do
     %{
       action: :block,
       kind: "no-durable-progress",
       source_status: "blocked",
       next_action: "block",
       summary:
-        "Symphony stopped a Codex worker because it used #{total_tokens} tokens over #{elapsed_ms}ms without durable progress evidence. High token usage is allowed when the worker has dirty files, commits, or passed MIU/gate evidence; this guard only parks the high-token/no-progress case.",
+        "Symphony stopped a Codex worker because it used #{total_tokens} tokens over #{elapsed_ms}ms and had no recent durable progress for #{quiet_ms}ms. High token usage is allowed when the worker continues to produce dirty files, commits, or passed MIU/gate evidence; this guard only parks the high-token/no-recent-progress case.",
       required_corrections: [
         "Inspect the workspace and worker log to confirm whether the turn was rediscovering context, blocked on hidden tool state, or missing a code-level MIU handoff.",
         "Add or refresh a Technical MIU handoff with current file paths, target code shape, data lifetime, concurrency rule, exact tests, and validation commands before redispatching.",
@@ -1191,6 +1327,7 @@ defmodule SymphonyElixir.Orchestrator do
       ],
       guard: %{
         elapsed_ms: elapsed_ms,
+        quiet_ms: quiet_ms,
         total_tokens: total_tokens,
         timeout_ms: timeout_ms,
         min_tokens: min_tokens
