@@ -173,6 +173,8 @@ Orocsy worker prelude:
 13. Before handoff, print the applicable eval rubric and record the verdict:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval rubric miu-quality`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval record miu-quality --status passed --summary "<why>"`
+   Dynamic `eval.*` events are durable progress. Do not invent a separate
+   narrative status when the eval command can record the proof.
 14. Handoff git-state verification guard:
    - After the final push and before any GitHub or Linear completion update,
      verify the actual repository state:
@@ -184,6 +186,8 @@ Orocsy worker prelude:
    - If the branch is dirty, ahead of upstream, missing an upstream, or the
      remote PR head does not match local `HEAD`, stop in handoff-recovery mode,
      record the blocker, and do not move the issue to review/completion.
+   - After PR/review/Linear handoff succeeds, append a durable handoff event:
+     `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.completed --status passed --tool "github-linear-handoff"`
 15. If any gate or eval fails, create/resolve inbox items and ask for guidance:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --inbox`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
@@ -284,9 +288,14 @@ Orocsy worker prelude:
       status, or passed MIU/gate evidence such as `tool.finished`,
       `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope`.
       Stale commits or gate events from an earlier run do not count.
+      Dynamic `eval.*` and `handoff.*` events also count as durable progress.
     - If the watchdog parks with `no-durable-progress`, treat the root cause as
       a handoff-quality or hidden-blocker defect. Inspect the workspace/log, add
       code-level MIU details, and redispatch only after the correction is clear.
+    - Runtime blocker comments must be written to the affected Linear issue
+      whenever Linear is reachable. Include the correction id plus redacted
+      runtime evidence so the issue timeline is the durable human log; the
+      local Orocsy correction remains the machine-readable recovery state.
     - Retryable network/provider/runtime failures may retry only up to
       `agent.max_failed_worker_retries`. After that, Symphony must create an
       Orocsy correction, try to comment on Linear, release the worker slot, and

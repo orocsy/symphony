@@ -419,6 +419,30 @@ flowchart LR
 | Correct | Orocsy writes correction inbox items and can block or restart work with guidance. | Soon |
 | Control plane | Orocsy owns pause/resume/retry/budget/provider operations. | Later |
 
+## Incident Logging Contract
+
+Workflow incidents need two durable records:
+
+- `.orocsy/delivery/inbox/*` is the local machine-readable recovery state.
+- The affected Linear issue is the human/team-visible incident log.
+
+When Symphony parks an issue for permission, MCP elicitation, forbidden command,
+token-budget, no-durable-progress, retry exhaustion, or provider/network failure,
+it should write an Orocsy correction and then comment on the Linear issue if
+Linear is reachable. The Linear comment should include:
+
+- issue identifier
+- runtime class
+- source status
+- next action
+- correction id and local correction path
+- redacted runtime evidence, such as the requested approval method or command
+
+This avoids unstable thread/process notifications as the only source of truth.
+The workflow owner can then inspect Linear first, open the correction file when
+needed, patch the reusable runtime or project workflow, resolve the correction,
+and redispatch.
+
 ## Runtime State Machine
 
 ```mermaid

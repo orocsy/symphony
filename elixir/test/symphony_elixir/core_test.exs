@@ -683,7 +683,26 @@ defmodule SymphonyElixir.CoreTest do
         |> Map.put(:retry_attempts, %{})
       end)
 
-      send(pid, {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed: {:approval_required, %{}}"}, []}})
+      fake_linear_token = "lin" <> "_api_should_not_leak"
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(),
+         {%RuntimeError{
+            message:
+              "Agent run failed: {:approval_required, " <>
+                inspect(%{
+                  "method" => "item/commandExecution/requestApproval",
+                  "params" => %{
+                    "command" => ~s(/bin/zsh -lc "ps -axo pid,ppid,stat,command | rg 'git push|ssh'"),
+                    "reason" => "command failed; retry without sandbox?",
+                    "token" => fake_linear_token
+                  }
+                }) <>
+                "}"
+          }, []}}
+      )
+
       Process.sleep(50)
       state = :sys.get_state(pid)
 
@@ -701,6 +720,10 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_comment, ^issue_id, body}
       assert body =~ "parked this issue"
       assert body =~ "permission"
+      assert body =~ "Runtime evidence"
+      assert body =~ "item/commandExecution/requestApproval"
+      assert body =~ "ps -axo pid,ppid,stat,command"
+      refute body =~ fake_linear_token
     after
       File.rm_rf(test_root)
     end
@@ -1297,6 +1320,100 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dynamic eval events count as durable progress for high-token workers" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-eval-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-eval-progress"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-EVALPROGRESS",
+        state: "In Progress",
+        title: "Eval progress",
+        description: "Worker should not park after dynamic eval proof",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(events_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "eval.miu-quality",
+          "phase" => "eval",
+          "rubric" => "miu-quality",
+          "status" => "passed",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      orchestrator_name = Module.concat(__MODULE__, :EvalDurableProgressOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: worker_pid,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: started_at,
+        workspace_path: workspace,
+        codex_total_tokens: 500
+      }
+
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+
+      state =
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+        |> Orchestrator.reconcile_no_durable_progress_for_test()
+
+      assert Map.has_key?(state.running, issue_id)
+      assert MapSet.member?(state.claimed, issue_id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
@@ -1772,6 +1889,56 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Current paths: src/lib/session.ts"
       assert prompt =~ "Target shape: resolveGuestSession()"
       assert prompt =~ "Ticket MT-202"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder does not duplicate issue brief already embedded in rendered issue description" do
+    workflow_prompt =
+      """
+      Issue description:
+      {{ issue.description }}
+      """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-brief-dedupe-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
+      File.mkdir_p!(brief_dir)
+
+      brief =
+        """
+        # MT-202 Technical MIU Brief - Guest Session
+
+        Current paths: src/lib/session.ts
+        Target shape: resolveGuestSession()
+        """
+        |> String.trim()
+
+      File.write!(Path.join(brief_dir, "MT-202.md"), brief)
+
+      issue = %Issue{
+        identifier: "MT-202",
+        title: "Use issue brief",
+        description: "Primary MIUs\n\n#{brief}",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-202",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+
+      refute String.starts_with?(prompt, "Issue technical brief:")
+      assert prompt =~ "Primary MIUs"
+      assert prompt =~ "Current paths: src/lib/session.ts"
+      assert prompt |> String.split("MT-202 Technical MIU Brief") |> length() == 2
     after
       File.rm_rf(workspace)
     end

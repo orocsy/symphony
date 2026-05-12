@@ -138,7 +138,15 @@ defmodule SymphonyElixir.PromptBuilder do
   defp maybe_prepend_issue_brief(prompt, issue, workspace) do
     case issue_brief(issue, workspace) do
       "" -> prompt
-      brief -> "Issue technical brief:\n\n" <> brief <> "\n\n" <> prompt
+      brief -> maybe_prepend_issue_brief_content(prompt, brief)
+    end
+  end
+
+  defp maybe_prepend_issue_brief_content(prompt, brief) do
+    if prompt_already_contains_issue_brief?(prompt, brief) do
+      prompt
+    else
+      "Issue technical brief:\n\n" <> brief <> "\n\n" <> prompt
     end
   end
 
@@ -177,6 +185,35 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp trim_issue_brief(content), do: content
+
+  defp prompt_already_contains_issue_brief?(prompt, brief) do
+    brief
+    |> markdown_heading()
+    |> case do
+      nil -> false
+      heading -> String.contains?(prompt, heading)
+    end
+  end
+
+  defp markdown_heading(markdown) when is_binary(markdown) do
+    markdown
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      line = String.trim(line)
+
+      if String.starts_with?(line, "#") do
+        line
+        |> String.trim_leading("#")
+        |> String.trim()
+        |> case do
+          "" -> nil
+          heading -> heading
+        end
+      end
+    end)
+  end
+
+  defp markdown_heading(_markdown), do: nil
 
   defp retry_prelude_present?(prompt, attempt) do
     normalized = String.downcase(prompt)
@@ -371,20 +408,28 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp passed_validation_event?(line) do
-    String.contains?(line, ~s("status": "passed")) and
-      String.contains?(line, [
-        ~s("event": "tool.finished"),
-        ~s("event": "gate.post-miu"),
-        ~s("event": "gate.required-evidence"),
-        ~s("event": "gate.declared-scope")
-      ])
+    with true <- String.contains?(line, ~s("status": "passed")),
+         {:ok, decoded} <- Jason.decode(line) do
+      passed_validation_event_decoded?(decoded)
+    else
+      _ -> false
+    end
   end
+
+  defp passed_validation_event_decoded?(%{"event" => event} = decoded) when is_binary(event) do
+    event in ["tool.finished", "gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+      String.starts_with?(event, "eval.") or
+      String.starts_with?(event, "handoff.") or
+      Map.get(decoded, "phase") == "eval"
+  end
+
+  defp passed_validation_event_decoded?(_decoded), do: false
 
   defp event_summary_line(line) do
     with {:ok, decoded} <- Jason.decode(line) do
       ts = Map.get(decoded, "ts", "unknown-time")
       event = Map.get(decoded, "event", "event")
-      detail = Map.get(decoded, "tool") || Map.get(decoded, "step") || Map.get(decoded, "gate") || "passed"
+      detail = Map.get(decoded, "tool") || Map.get(decoded, "step") || Map.get(decoded, "gate") || Map.get(decoded, "rubric") || "passed"
 
       "- #{ts} #{event}: #{detail}"
     else

@@ -14,13 +14,13 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
-  @durable_progress_event_patterns [
-    ~s("event": "tool.finished"),
-    ~s("event": "gate.post-miu"),
-    ~s("event": "gate.required-evidence"),
-    ~s("event": "gate.declared-scope"),
-    ~s("event": "eval.recorded"),
-    ~s("event": "handoff.completed")
+  @durable_progress_event_names [
+    "tool.finished",
+    "gate.post-miu",
+    "gate.required-evidence",
+    "gate.declared-scope",
+    "eval.recorded",
+    "handoff.completed"
   ]
   @empty_codex_totals %{
     input_tokens: 0,
@@ -678,25 +678,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp durable_progress_event_line_times(line, started_at) when is_binary(line) do
-    if String.contains?(line, ~s("status": "passed")) and
-         String.contains?(line, @durable_progress_event_patterns) do
-      case Jason.decode(line) do
-        {:ok, %{"ts" => ts}} ->
-          case datetime_from_iso8601(ts) do
-            %DateTime{} = datetime ->
-              if datetime_at_or_after?(datetime, started_at), do: [datetime], else: []
-
-            nil ->
-              []
-          end
-
-        _ ->
-          []
-      end
+    with true <- String.contains?(line, ~s("status": "passed")),
+         {:ok, decoded} <- Jason.decode(line),
+         true <- durable_progress_event?(decoded),
+         %DateTime{} = datetime <- decoded |> Map.get("ts") |> datetime_from_iso8601(),
+         true <- datetime_at_or_after?(datetime, started_at) do
+      [datetime]
     else
-      []
+      _ -> []
     end
   end
+
+  defp durable_progress_event?(%{"event" => event} = decoded) when is_binary(event) do
+    event in @durable_progress_event_names or
+      String.starts_with?(event, "eval.") or
+      String.starts_with?(event, "handoff.") or
+      Map.get(decoded, "phase") == "eval"
+  end
+
+  defp durable_progress_event?(_decoded), do: false
 
   defp datetime_from_iso8601(value) when is_binary(value) and value != "" do
     case DateTime.from_iso8601(value) do
@@ -1439,6 +1439,8 @@ defmodule SymphonyElixir.Orchestrator do
           "- Orocsy correction: not written; inspect the Symphony supervisor log."
       end
 
+    evidence = runtime_failure_evidence_block(correction)
+
     """
     Symphony runtime parked this issue because a worker hit a configured failure guard.
 
@@ -1448,10 +1450,59 @@ defmodule SymphonyElixir.Orchestrator do
     - Next action: `#{failure.next_action}`
     #{correction_line}
 
+    #{evidence}
+
     #{failure.summary}
     """
     |> String.trim()
   end
+
+  defp runtime_failure_evidence_block(%{"findings" => [finding | _]}) when is_binary(finding) do
+    evidence =
+      finding
+      |> redact_runtime_evidence()
+      |> truncate_runtime_evidence()
+
+    """
+    <details>
+    <summary>Runtime evidence</summary>
+
+    ```text
+    #{evidence}
+    ```
+    </details>
+    """
+    |> String.trim()
+  end
+
+  defp runtime_failure_evidence_block(_correction), do: ""
+
+  defp redact_runtime_evidence(value) when is_binary(value) do
+    value
+    |> redact_pattern(Regex.compile!(("lin" <> "_api_") <> "[A-Za-z0-9]+"), ("lin" <> "_api_") <> "[REDACTED]")
+    |> redact_pattern(Regex.compile!("gh[pousr]_[A-Za-z0-9_]+"), "gh_[REDACTED]")
+    |> redact_pattern(Regex.compile!(("sk" <> "_") <> "(live|test)_[A-Za-z0-9]+"), ("sk" <> "_") <> "\\1_[REDACTED]")
+    |> redact_assignment("OPENAI" <> "_API" <> "_KEY")
+    |> redact_assignment("LINEAR" <> "_API" <> "_KEY")
+    |> redact_assignment("GITHUB" <> "_TOKEN")
+    |> redact_assignment("GH" <> "_TOKEN")
+  end
+
+  defp redact_pattern(value, regex, replacement) do
+    Regex.replace(regex, value, replacement)
+  end
+
+  defp redact_assignment(value, name) do
+    Regex.replace(Regex.compile!("(" <> Regex.escape(name) <> ")=\\S+"), value, "\\1=[REDACTED]")
+  end
+
+  defp truncate_runtime_evidence(value, max_bytes \\ 2_000)
+
+  defp truncate_runtime_evidence(value, max_bytes) when is_binary(value) and byte_size(value) > max_bytes do
+    binary_part(value, 0, max_bytes) <> "... (truncated)"
+  end
+
+  defp truncate_runtime_evidence(value, _max_bytes), do: value
 
   defp failure_reason_text(reason) do
     reason
