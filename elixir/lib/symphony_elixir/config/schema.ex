@@ -182,10 +182,11 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
-      field(:durable_progress_timeout_ms, :integer, default: 420_000)
+      field(:durable_progress_timeout_ms, :integer, default: 180_000)
       field(:durable_progress_min_tokens, :integer, default: 250_000)
       field(:max_turn_total_tokens, :integer, default: 1_500_000)
       field(:forbidden_command_patterns, {:array, :string}, default: [])
+      field(:safe_command_approval_patterns, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -204,7 +205,8 @@ defmodule SymphonyElixir.Config.Schema do
           :durable_progress_timeout_ms,
           :durable_progress_min_tokens,
           :max_turn_total_tokens,
-          :forbidden_command_patterns
+          :forbidden_command_patterns,
+          :safe_command_approval_patterns
         ],
         empty_values: []
       )
@@ -219,12 +221,18 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp validate_command_patterns(changeset) do
-      validate_change(changeset, :forbidden_command_patterns, fn :forbidden_command_patterns, patterns ->
+      changeset
+      |> validate_regex_patterns(:forbidden_command_patterns)
+      |> validate_regex_patterns(:safe_command_approval_patterns)
+    end
+
+    defp validate_regex_patterns(changeset, field) do
+      validate_change(changeset, field, fn ^field, patterns ->
         patterns
         |> Enum.flat_map(fn pattern ->
           case Regex.compile(pattern) do
             {:ok, _regex} -> []
-            {:error, reason} -> [forbidden_command_patterns: "invalid regex #{inspect(pattern)}: #{inspect(reason)}"]
+            {:error, reason} -> [{field, "invalid regex #{inspect(pattern)}: #{inspect(reason)}"}]
           end
         end)
       end)

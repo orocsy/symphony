@@ -68,12 +68,15 @@ agent:
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   max_turn_total_tokens: 1500000
-  durable_progress_timeout_ms: 420000
+  durable_progress_timeout_ms: 180000
   durable_progress_min_tokens: 250000
   forbidden_command_patterns:
     - '(^|\s)(pnpm|next)\s+(dev|start)(\s|$)'
     - '(^|\s)(pnpm|npm|npx|yarn)\s+(dlx|exec|x)?\s*playwright\s+install(\s|$)'
     - '(^|\s)playwright\s+install(\s|$)'
+  safe_command_approval_patterns:
+    - '^/bin/zsh -lc "ps -axo pid,ppid,stat,command \| rg ''[A-Za-z0-9_./| -]+''"$'
+    - '^ps -axo pid,ppid,stat,command( \| rg ''[A-Za-z0-9_./| -]+'')?$'
   approval_policy:
     granular:
       sandbox_approval: true
@@ -218,10 +221,14 @@ Orocsy worker prelude:
     - Do not set `codex.approval_policy` to `never`. The generated start
       script refuses that mode because it can silently approve dangerous
       non-interactive worker requests.
-    - In granular mode, Symphony may auto-approve only Codex file-change
-      approvals caused by workspace edit rules being disabled. Command
-      approvals, sandbox escalations, MCP elicitations, and external mutation
-      approvals must not be auto-approved by the worker.
+    - In granular mode, Symphony may auto-approve Codex file-change approvals
+      caused by workspace edit rules being disabled and commands matching
+      `codex.safe_command_approval_patterns`. Keep those patterns read-only and
+      narrow. Current default permits only the `ps -axo ... | rg ...`
+      diagnostic used to inspect a stuck git/ssh process.
+    - Command approvals outside the safe-command patterns, sandbox
+      escalations, MCP elicitations, and external mutation approvals must not be
+      auto-approved by the worker.
     - If a command approval or MCP/tool approval prompt appears, record the
       blocker in the Orocsy ledger, update the Linear workpad, and stop for the
       workflow owner. Do not answer approval prompts by hand inside the worker.
@@ -277,9 +284,11 @@ Strict dispatch gate:
 1. Continue only if the issue is explicitly dispatch-ready.
 2. The issue must define Write Scope, Shared Files, Dependencies, MIUs,
    Validation, and Out Of Scope.
-3. Every non-trivial MIU must include code-level handoff detail: current file
-   paths, current risky code/API shape, target interface or DTO, data lifetime,
-   concurrency/provider constraints, exact test names, and validation commands.
+3. The primary visible `## MIUs` section must itself include code-level handoff
+   detail: current file paths, current risky code/API shape, target interface
+   or DTO, data lifetime, concurrency/provider constraints, exact test names,
+   and validation commands. A later appendix or cached brief is not enough for
+   dispatch readiness because humans and workers both scan the primary section.
 4. If the issue only has abstract MIU bullets such as "implement service" or
    "add tests", update the Linear workpad with `needs-code-level-miu` and stop
    before broad codebase rediscovery.

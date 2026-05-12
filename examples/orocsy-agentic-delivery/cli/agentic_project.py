@@ -658,6 +658,12 @@ if ! grep -q "forbidden_command_patterns" "$WORKFLOW_FILE" || ! grep -Eq "pnpm.*
   exit 1
 fi
 
+if ! grep -q "safe_command_approval_patterns" "$WORKFLOW_FILE" || ! grep -q "ps -axo pid,ppid,stat,command" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing narrow safe-command approval policy for read-only diagnostics." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
 linear_token_var="LINEAR""_API""_KEY"
 if [[ -z "${!linear_token_var:-}" ]]; then
   printf 'Missing %s. Add it to .env.local or export it before starting Symphony.\\n' "$linear_token_var" >&2

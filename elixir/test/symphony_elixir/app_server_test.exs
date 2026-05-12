@@ -552,6 +552,95 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server auto-approves only configured safe command approval requests" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-safe-command-auto-approve-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-94")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-safe-command-auto-approve.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE:-/tmp/codex-safe-command-auto-approve.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-94"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-94"}}}'
+            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"ps -axo pid,ppid,stat,command","cwd":"/tmp","reason":"inspect stuck process"}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: %{granular: %{sandbox_approval: true, rules: false, mcp_elicitations: true}},
+        codex_safe_command_approval_patterns: [
+          ~s(^ps -axo pid,ppid,stat,command$)
+        ]
+      )
+
+      issue = %Issue{
+        id: "issue-safe-command-auto-approve",
+        identifier: "MT-94",
+        title: "Auto approve safe command",
+        description: "Ensure narrow read-only diagnostics can continue without approving broad commands",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-94",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle safe command approval request", issue)
+
+      trace = File.read!(trace_file)
+
+      assert trace =~ ~s("id":99)
+      assert trace =~ ~s("decision":"acceptForSession")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server stops on MCP tool approval prompts under granular defaults" do
     test_root =
       Path.join(

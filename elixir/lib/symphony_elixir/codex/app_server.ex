@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           forbidden_command_patterns: [String.t()],
+          safe_command_approval_patterns: [String.t()],
           thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil
@@ -52,10 +53,11 @@ defmodule SymphonyElixir.Codex.AppServer do
            port: port,
            metadata: metadata,
            approval_policy: session_policies.approval_policy,
-           auto_approvals: auto_approvals(session_policies.approval_policy),
+           auto_approvals: auto_approvals(session_policies.approval_policy, session_policies.safe_command_approval_patterns),
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            forbidden_command_patterns: session_policies.forbidden_command_patterns,
+           safe_command_approval_patterns: session_policies.safe_command_approval_patterns,
            thread_id: thread_id,
            workspace: expanded_workspace,
            worker_host: worker_host
@@ -634,7 +636,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       is_nil(command) ->
         :ok
 
-      match = first_matching_forbidden_command_pattern(command, patterns) ->
+      match = first_matching_command_pattern(command, patterns) ->
         {:error, command, match}
 
       true ->
@@ -644,7 +646,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
 
-  defp first_matching_forbidden_command_pattern(command, patterns) when is_binary(command) do
+  defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->
       case Regex.compile(pattern) do
         {:ok, regex} -> Regex.match?(regex, command)
@@ -817,7 +819,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve?(auto_approve_requests, :command)
+      auto_approve_command?(auto_approve_requests, payload)
     )
   end
 
@@ -874,7 +876,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve?(auto_approve_requests, :command)
+      auto_approve_command?(auto_approve_requests, payload)
     )
   end
 
@@ -957,15 +959,38 @@ defmodule SymphonyElixir.Codex.AppServer do
     :unhandled
   end
 
-  defp auto_approvals("never"), do: %{all: true, file_change: true}
+  defp auto_approvals("never", safe_command_patterns),
+    do: %{all: true, file_change: true, safe_command_patterns: safe_command_patterns}
 
-  defp auto_approvals(%{"granular" => %{"rules" => false}}), do: %{all: false, file_change: true}
-  defp auto_approvals(%{granular: %{rules: false}}), do: %{all: false, file_change: true}
-  defp auto_approvals(_approval_policy), do: %{all: false, file_change: false}
+  defp auto_approvals(%{"granular" => %{"rules" => false}}, safe_command_patterns),
+    do: %{all: false, file_change: true, safe_command_patterns: safe_command_patterns}
+
+  defp auto_approvals(%{granular: %{rules: false}}, safe_command_patterns),
+    do: %{all: false, file_change: true, safe_command_patterns: safe_command_patterns}
+
+  defp auto_approvals(_approval_policy, safe_command_patterns),
+    do: %{all: false, file_change: false, safe_command_patterns: safe_command_patterns}
 
   defp auto_approve?(%{all: true}, _kind), do: true
   defp auto_approve?(%{file_change: true}, :file_change), do: true
   defp auto_approve?(_auto_approvals, _kind), do: false
+
+  defp auto_approve_command?(auto_approve_requests, payload) do
+    auto_approve?(auto_approve_requests, :command) or
+      safe_command_approval?(payload, Map.get(auto_approve_requests, :safe_command_patterns, []))
+  end
+
+  defp safe_command_approval?(payload, patterns) when is_list(patterns) do
+    case command_text(payload) do
+      command when is_binary(command) ->
+        not is_nil(first_matching_command_pattern(command, patterns))
+
+      _ ->
+        false
+    end
+  end
+
+  defp safe_command_approval?(_payload, _patterns), do: false
 
   defp normalize_dynamic_tool_result(%{"success" => success} = result) when is_boolean(success) do
     output =

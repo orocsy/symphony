@@ -861,9 +861,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
-    assert config.codex.durable_progress_timeout_ms == 420_000
+    assert config.codex.durable_progress_timeout_ms == 180_000
     assert config.codex.durable_progress_min_tokens == 250_000
     assert config.codex.max_turn_total_tokens == 1_500_000
+    assert config.codex.safe_command_approval_patterns == []
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"

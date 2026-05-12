@@ -24,7 +24,8 @@ defmodule SymphonyElixir.Config do
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
-          forbidden_command_patterns: [String.t()]
+          forbidden_command_patterns: [String.t()],
+          safe_command_approval_patterns: [String.t()]
         }
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
@@ -110,7 +111,8 @@ defmodule SymphonyElixir.Config do
            approval_policy: settings.codex.approval_policy,
            thread_sandbox: settings.codex.thread_sandbox,
            turn_sandbox_policy: turn_sandbox_policy,
-           forbidden_command_patterns: settings.codex.forbidden_command_patterns
+           forbidden_command_patterns: settings.codex.forbidden_command_patterns,
+           safe_command_approval_patterns: settings.codex.safe_command_approval_patterns
          }}
       end
     end
