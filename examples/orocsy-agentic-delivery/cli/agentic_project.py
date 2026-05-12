@@ -179,6 +179,9 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "Review completion gate",
         "Handoff git-state verification guard",
         "max_failed_worker_retries",
+        "durable_progress_min_tokens",
+        "needs-code-level-miu",
+        "issue-briefs",
         "granular:",
         "rules: false",
     ]
@@ -627,6 +630,24 @@ fi
 
 if ! grep -q "token-budget exhaustion parks immediately" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing token-budget immediate parking guard." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "durable_progress_min_tokens" "$WORKFLOW_FILE" || ! grep -q "no-durable-progress" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing durable progress watchdog guard." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "needs-code-level-miu" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing code-level MIU dispatch gate." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "issue-briefs" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing issue-brief prompt cache handoff." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi

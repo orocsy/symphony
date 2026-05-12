@@ -68,6 +68,8 @@ agent:
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   max_turn_total_tokens: 1500000
+  durable_progress_timeout_ms: 420000
+  durable_progress_min_tokens: 250000
   forbidden_command_patterns:
     - '(^|\s)(pnpm|next)\s+(dev|start)(\s|$)'
     - '(^|\s)(pnpm|npm|npx|yarn)\s+(dlx|exec|x)?\s*playwright\s+install(\s|$)'
@@ -133,29 +135,32 @@ Orocsy worker prelude:
    Use the workspace-local runtime CLI at `.codex/delivery/bin/orocsy.py`.
 4. Read the assigned Linear issue, including Write Scope, Shared Files,
    Dependencies, MIUs, Validation, and Out Of Scope.
-5. Before editing code, update `.orocsy/delivery/policy.yml` with the issue's
+5. If `.codex/agentic/issue-briefs/{{ issue.identifier }}.md` exists, treat it
+   as the cached technical handoff for current file paths and target code shape.
+   Do not rediscover broad context before using that brief.
+6. Before editing code, update `.orocsy/delivery/policy.yml` with the issue's
    declared write-scope globs if the prepare hook could not infer them.
-6. Create or update the Technical MIU trace.
-7. Confirm the `before_run` hook already recorded `run.started`,
+7. Create or update the Technical MIU trace.
+8. Confirm the `before_run` hook already recorded `run.started`,
    `gate.leaks`, `gate.secrets`, and `gate.artifacts` with this bounded command:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
    The ledger path is `.orocsy/delivery/events/events.jsonl`; do not search for
    the retired flat path `.orocsy/delivery/events.jsonl`. If the bounded gate
    command reports missing startup events, stop and report workflow setup
    failure instead of running the external `$OROCSY_CLI` path.
-8. If you need to record additional runtime evidence, use:
+9. If you need to record additional runtime evidence, use:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . <command>`
-9. Implement one MIU at a time and append command evidence after each check:
+10. Implement one MIU at a time and append command evidence after each check:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "<command>"`
-10. Before commit, run:
+11. Before commit, run:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate declared-scope --strict --record`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --record`
-11. Before push, run:
+12. Before push, run:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
-12. Before handoff, print the applicable eval rubric and record the verdict:
+13. Before handoff, print the applicable eval rubric and record the verdict:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval rubric miu-quality`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval record miu-quality --status passed --summary "<why>"`
-13. Handoff git-state verification guard:
+14. Handoff git-state verification guard:
    - After the final push and before any GitHub or Linear completion update,
      verify the actual repository state:
      `git status --short --branch`
@@ -166,12 +171,12 @@ Orocsy worker prelude:
    - If the branch is dirty, ahead of upstream, missing an upstream, or the
      remote PR head does not match local `HEAD`, stop in handoff-recovery mode,
      record the blocker, and do not move the issue to review/completion.
-14. If any gate or eval fails, create/resolve inbox items and ask for guidance:
+15. If any gate or eval fails, create/resolve inbox items and ask for guidance:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --inbox`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
-15. If guidance says `block` or `retry`, update the Linear workpad and stop
+16. If guidance says `block` or `retry`, update the Linear workpad and stop
     until the correction is handled.
-16. Generated artifact cleanup:
+17. Generated artifact cleanup:
     - Do not run raw destructive cleanup commands such as `rm -rf`,
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
@@ -185,7 +190,7 @@ Orocsy worker prelude:
       unavoidable, stop, record an Orocsy guidance/blocker, and let the
       workflow owner run or approve a bounded cleanup outside the worker. Do
       not retry the same destructive command.
-17. Symphony browser verification guard:
+18. Symphony browser verification guard:
     - Browser evidence is still required for UI-impacting work, but Symphony
       command guard denies raw dev-server and browser-install commands in
       non-interactive workers.
@@ -209,7 +214,7 @@ Orocsy worker prelude:
       `.orocsy/delivery/events/events.jsonl`, update the Linear workpad, and
       stop. Do not install dependencies/browsers ad hoc from the worker and do
       not claim product browser verification passed.
-18. Symphony permission guard:
+19. Symphony permission guard:
     - Do not set `codex.approval_policy` to `never`. The generated start
       script refuses that mode because it can silently approve dangerous
       non-interactive worker requests.
@@ -220,7 +225,7 @@ Orocsy worker prelude:
     - If a command approval or MCP/tool approval prompt appears, record the
       blocker in the Orocsy ledger, update the Linear workpad, and stop for the
       workflow owner. Do not answer approval prompts by hand inside the worker.
-19. Symphony handoff recovery guard:
+20. Symphony handoff recovery guard:
     - Before new product edits, inspect `git status --short --branch` and recent
       `.orocsy/delivery/events/events.jsonl` entries when the workspace has
       dirty changes, local commits ahead of upstream, or a previous `git push`,
@@ -242,13 +247,21 @@ Orocsy worker prelude:
     - On a later retry, resume from the same workspace and finish push/review
       handoff. Do not create duplicate commits unless a current review thread
       still requires a code change.
-20. Runtime failure parking guard:
+21. Runtime failure parking guard:
     - The Symphony runtime will stop a worker immediately when Codex requests
       command approval, sandbox approval, MCP elicitation, or interactive input
       that the non-interactive worker cannot safely answer.
     - Live Codex turn token-budget exhaustion parks immediately with next action
       `block`; it is not an automatic retry because the expensive turn already
       happened and the workspace may contain validated dirty handoff work.
+    - High token usage by itself is not a failure. Symphony parks only the
+      high-token/no-durable-progress case: after the configured progress window,
+      the worker must have dirty files, local commits/ahead status, or passed
+      MIU/gate evidence such as `tool.finished`, `gate.post-miu`,
+      `gate.required-evidence`, or `gate.declared-scope`.
+    - If the watchdog parks with `no-durable-progress`, treat the root cause as
+      a handoff-quality or hidden-blocker defect. Inspect the workspace/log, add
+      code-level MIU details, and redispatch only after the correction is clear.
     - Retryable network/provider/runtime failures may retry only up to
       `agent.max_failed_worker_retries`. After that, Symphony must create an
       Orocsy correction, try to comment on Linear, release the worker slot, and
@@ -263,10 +276,16 @@ Strict dispatch gate:
 1. Continue only if the issue is explicitly dispatch-ready.
 2. The issue must define Write Scope, Shared Files, Dependencies, MIUs,
    Validation, and Out Of Scope.
-3. If any section is missing, update the Linear workpad with `needs-scope` and
+3. Every non-trivial MIU must include code-level handoff detail: current file
+   paths, current risky code/API shape, target interface or DTO, data lifetime,
+   concurrency/provider constraints, exact test names, and validation commands.
+4. If the issue only has abstract MIU bullets such as "implement service" or
+   "add tests", update the Linear workpad with `needs-code-level-miu` and stop
+   before broad codebase rediscovery.
+5. If any required section is missing, update the Linear workpad with `needs-scope` and
    stop without editing code.
-4. If dependencies are unfinished, update the workpad with `blocked` and stop.
-5. If this issue's declared write scope overlaps another active issue, update
+6. If dependencies are unfinished, update the workpad with `blocked` and stop.
+7. If this issue's declared write scope overlaps another active issue, update
    the workpad with `blocked-overlap` and stop.
 
 CI/CD timing:

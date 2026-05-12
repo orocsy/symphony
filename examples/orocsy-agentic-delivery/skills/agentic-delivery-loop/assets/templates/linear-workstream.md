@@ -50,13 +50,22 @@ type RelevantShape = {
 
 ## MIUs
 
-1. <MIU 1 name>
-2. <MIU 2 name>
-3. <MIU 3 name>
+Use one section per MIU. Do not dispatch abstract outcome bullets.
 
-Each MIU must include technical detail: runtime problem, current/target code
-shape, data lifetime, framework/database/browser constraint, tradeoffs,
-decision rationale, tests, and validation command.
+### MIU <n> - <Name>
+
+- Runtime path:
+- Current code paths:
+- Current risky code/API shape:
+- Target code/API shape:
+- Data lifetime and scope:
+- Technology or concurrency constraint:
+- Decision and alternatives rejected:
+- Exact tests:
+- Validation command:
+
+If an issue lacks this detail, mark `needs-code-level-miu` in Linear and stop
+before broad codebase rediscovery.
 
 ## Required Tests
 

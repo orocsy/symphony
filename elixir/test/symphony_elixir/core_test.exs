@@ -855,8 +855,7 @@ defmodule SymphonyElixir.CoreTest do
 
       send(
         pid,
-        {:DOWN, ref, :process, self(),
-         {%RuntimeError{message: "Agent run failed: {:turn_token_budget_exceeded, 1_500_000}"}, []}}
+        {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed: {:turn_token_budget_exceeded, 1_500_000}"}, []}}
       )
 
       Process.sleep(50)
@@ -877,6 +876,182 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_comment, ^issue_id, body}
       assert body =~ "token-budget"
       assert body =~ "blocked"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "high-token worker without durable progress parks with correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 10,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-no-progress-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NOPROGRESS",
+        state: "In Progress",
+        title: "No durable progress",
+        description: "Worker should park after high tokens without proof of progress",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      orchestrator_name = Module.concat(__MODULE__, :NoDurableProgressParkOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: worker_pid,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+        workspace_path: workspace,
+        codex_total_tokens: 500
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, :run_poll_cycle)
+
+      Process.sleep(100)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "no-durable-progress"
+      assert body =~ "configured failure guard"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "high-token worker with durable progress is not parked" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-durable-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 10,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-durable-progress"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-PROGRESS",
+        state: "In Progress",
+        title: "Durable progress",
+        description: "Worker should not park when durable evidence exists",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "progress.txt"), "dirty work proves progress\n")
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      orchestrator_name = Module.concat(__MODULE__, :DurableProgressOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: worker_pid,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+        workspace_path: workspace,
+        codex_total_tokens: 500
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, :run_poll_cycle)
+
+      Process.sleep(100)
+      state = :sys.get_state(pid)
+
+      assert Map.has_key?(state.running, issue_id)
+      assert MapSet.member?(state.claimed, issue_id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
     end
@@ -1325,6 +1500,41 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Resume from the current workspace state"
     assert prompt =~ "handoff-recovery mode"
     assert prompt =~ "Ticket MT-201"
+  end
+
+  test "prompt builder prepends issue technical brief when present" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-brief-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
+      File.mkdir_p!(brief_dir)
+      File.write!(Path.join(brief_dir, "MT-202.md"), "Current paths: src/lib/session.ts\nTarget shape: resolveGuestSession()\n")
+
+      issue = %Issue{
+        identifier: "MT-202",
+        title: "Use issue brief",
+        description: "Prompt should include local issue brief",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-202",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Issue technical brief:")
+      assert prompt =~ "Current paths: src/lib/session.ts"
+      assert prompt =~ "Target shape: resolveGuestSession()"
+      assert prompt =~ "Ticket MT-202"
+    after
+      File.rm_rf(workspace)
+    end
   end
 
   test "prompt builder prepends dirty validated handoff checkpoint for retry workspaces" do

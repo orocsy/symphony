@@ -7,6 +7,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @render_opts [strict_variables: true, strict_filters: true]
   @recent_event_limit 80
+  @issue_brief_max_bytes 20_000
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
@@ -16,6 +17,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Workflow.current()
     |> prompt_template!()
     |> render_issue_template(issue, opts)
+    |> maybe_prepend_issue_brief(issue, workspace)
     |> maybe_prepend_retry_prelude(attempt)
     |> maybe_prepend_workspace_recovery_checkpoint(workspace)
   end
@@ -132,12 +134,48 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_prepend_retry_prelude(prompt, _attempt), do: prompt
 
+  defp maybe_prepend_issue_brief(prompt, issue, workspace) do
+    case issue_brief(issue, workspace) do
+      "" -> prompt
+      brief -> "Issue technical brief:\n\n" <> brief <> "\n\n" <> prompt
+    end
+  end
+
   defp maybe_prepend_workspace_recovery_checkpoint(prompt, workspace) do
     case workspace_recovery_checkpoint(workspace) do
       "" -> prompt
       checkpoint -> checkpoint <> "\n\n" <> prompt
     end
   end
+
+  defp issue_brief(%{identifier: identifier}, workspace) when is_binary(identifier) and is_binary(workspace) do
+    path = Path.join([workspace, ".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
+
+    with true <- File.regular?(path),
+         {:ok, content} <- File.read(path) do
+      content
+      |> trim_issue_brief()
+      |> String.trim()
+    else
+      _ -> ""
+    end
+  rescue
+    _error -> ""
+  end
+
+  defp issue_brief(_issue, _workspace), do: ""
+
+  defp safe_issue_identifier(identifier) do
+    identifier
+    |> String.trim()
+    |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+  end
+
+  defp trim_issue_brief(content) when byte_size(content) > @issue_brief_max_bytes do
+    binary_part(content, 0, @issue_brief_max_bytes) <> "\n\n[Issue brief truncated by Symphony prompt builder.]"
+  end
+
+  defp trim_issue_brief(content), do: content
 
   defp retry_prelude_present?(prompt, attempt) do
     normalized = String.downcase(prompt)

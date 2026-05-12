@@ -115,6 +115,8 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          codex_durable_progress_timeout_ms: 420_000,
+          codex_durable_progress_min_tokens: 250_000,
           codex_max_turn_total_tokens: 1_500_000,
           codex_forbidden_command_patterns: [],
           hook_after_create: nil,
@@ -155,6 +157,8 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    codex_durable_progress_timeout_ms = Keyword.get(config, :codex_durable_progress_timeout_ms)
+    codex_durable_progress_min_tokens = Keyword.get(config, :codex_durable_progress_min_tokens)
     codex_max_turn_total_tokens = Keyword.get(config, :codex_max_turn_total_tokens)
     codex_forbidden_command_patterns = Keyword.get(config, :codex_forbidden_command_patterns)
     hook_after_create = Keyword.get(config, :hook_after_create)
@@ -199,6 +203,8 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "  durable_progress_timeout_ms: #{yaml_value(codex_durable_progress_timeout_ms)}",
+        "  durable_progress_min_tokens: #{yaml_value(codex_durable_progress_min_tokens)}",
         "  max_turn_total_tokens: #{yaml_value(codex_max_turn_total_tokens)}",
         "  forbidden_command_patterns: #{yaml_value(codex_forbidden_command_patterns)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),

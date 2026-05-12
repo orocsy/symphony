@@ -14,6 +14,14 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @durable_progress_event_patterns [
+    ~s("event": "tool.finished"),
+    ~s("event": "gate.post-miu"),
+    ~s("event": "gate.required-evidence"),
+    ~s("event": "gate.declared-scope"),
+    ~s("event": "eval.recorded"),
+    ~s("event": "handoff.completed")
+  ]
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -273,7 +281,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_running_issues(%State{} = state) do
-    state = reconcile_stalled_running_issues(state)
+    state =
+      state
+      |> reconcile_no_durable_progress_running_issues()
+      |> reconcile_stalled_running_issues()
+
     running_ids = Map.keys(state.running)
 
     if running_ids == [] do
@@ -462,6 +474,110 @@ defmodule SymphonyElixir.Orchestrator do
           restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
         end)
     end
+  end
+
+  defp reconcile_no_durable_progress_running_issues(%State{} = state) do
+    codex_config = Config.settings!().codex
+    timeout_ms = codex_config.durable_progress_timeout_ms
+    min_tokens = codex_config.durable_progress_min_tokens
+
+    cond do
+      timeout_ms <= 0 or min_tokens <= 0 ->
+        state
+
+      map_size(state.running) == 0 ->
+        state
+
+      true ->
+        now = DateTime.utc_now()
+
+        Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
+          park_issue_without_durable_progress(state_acc, issue_id, running_entry, now, timeout_ms, min_tokens)
+        end)
+    end
+  end
+
+  defp park_issue_without_durable_progress(state, issue_id, running_entry, now, timeout_ms, min_tokens) do
+    elapsed_ms = runtime_elapsed_ms(running_entry, now)
+    total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+
+    if is_integer(elapsed_ms) and elapsed_ms > timeout_ms and total_tokens >= min_tokens and
+         not durable_progress_detected?(running_entry) do
+      identifier = Map.get(running_entry, :identifier, issue_id)
+      session_id = running_entry_session_id(running_entry)
+
+      Logger.warning(
+        "Issue has no durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} codex_total_tokens=#{total_tokens}; parking for workflow correction"
+      )
+
+      failure = no_durable_progress_failure(elapsed_ms, total_tokens, timeout_ms, min_tokens)
+      reason = {:no_durable_progress, elapsed_ms, total_tokens, timeout_ms, min_tokens}
+
+      park_running_issue(state, issue_id, running_entry, reason, failure)
+    else
+      state
+    end
+  end
+
+  defp runtime_elapsed_ms(%{started_at: %DateTime{} = started_at}, %DateTime{} = now) do
+    max(0, DateTime.diff(now, started_at, :millisecond))
+  end
+
+  defp runtime_elapsed_ms(_running_entry, _now), do: nil
+
+  defp durable_progress_detected?(%{worker_host: worker_host}) when is_binary(worker_host) and worker_host != "" do
+    # Remote workspaces need a remote progress probe before they can be parked safely.
+    true
+  end
+
+  defp durable_progress_detected?(%{workspace_path: workspace}) when is_binary(workspace) do
+    File.dir?(workspace) and (git_durable_progress?(workspace) or event_durable_progress?(workspace))
+  rescue
+    error ->
+      Logger.debug("Unable to inspect durable progress for workspace=#{workspace}: #{inspect(error)}")
+      false
+  end
+
+  defp durable_progress_detected?(_running_entry), do: true
+
+  defp git_durable_progress?(workspace) do
+    case System.cmd("git", ["status", "--short", "--branch"], cd: workspace, stderr_to_stdout: true) do
+      {status, 0} ->
+        lines = String.split(status, "\n", trim: true)
+        branch_line = List.first(lines) || ""
+        dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+
+        dirty_lines != [] or String.contains?(branch_line, ["ahead", "behind", "diverged"])
+
+      {_error, _exit_code} ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp event_durable_progress?(workspace) do
+    workspace
+    |> durable_progress_event_paths()
+    |> Enum.any?(&durable_progress_event_file?/1)
+  end
+
+  defp durable_progress_event_paths(workspace) do
+    [
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Path.join(workspace, ".codex/delivery/events/events.jsonl")
+    ]
+  end
+
+  defp durable_progress_event_file?(path) do
+    File.regular?(path) and Enum.any?(File.stream!(path), &durable_progress_event_line?/1)
+  rescue
+    _error -> false
+  end
+
+  defp durable_progress_event_line?(line) when is_binary(line) do
+    String.contains?(line, ~s("status": "passed")) and
+      String.contains?(line, @durable_progress_event_patterns)
   end
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
@@ -996,6 +1112,11 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.update!(:retry_attempts, &Map.delete(&1, issue_id))
   end
 
+  defp park_running_issue(%State{} = state, issue_id, running_entry, reason, failure) do
+    state = terminate_running_issue(state, issue_id, false)
+    park_failed_issue(state, issue_id, running_entry, reason, failure)
+  end
+
   defp classify_agent_failure(reason) do
     text = failure_reason_text(reason)
     normalized = String.downcase(text)
@@ -1053,6 +1174,28 @@ defmodule SymphonyElixir.Orchestrator do
           ]
         }
     end
+  end
+
+  defp no_durable_progress_failure(elapsed_ms, total_tokens, timeout_ms, min_tokens) do
+    %{
+      action: :block,
+      kind: "no-durable-progress",
+      source_status: "blocked",
+      next_action: "block",
+      summary:
+        "Symphony stopped a Codex worker because it used #{total_tokens} tokens over #{elapsed_ms}ms without durable progress evidence. High token usage is allowed when the worker has dirty files, commits, or passed MIU/gate evidence; this guard only parks the high-token/no-progress case.",
+      required_corrections: [
+        "Inspect the workspace and worker log to confirm whether the turn was rediscovering context, blocked on hidden tool state, or missing a code-level MIU handoff.",
+        "Add or refresh a Technical MIU handoff with current file paths, target code shape, data lifetime, concurrency rule, exact tests, and validation commands before redispatching.",
+        "If the worker actually produced useful local work that was not visible to the watchdog, commit or record the durable evidence before resolving the correction."
+      ],
+      guard: %{
+        elapsed_ms: elapsed_ms,
+        total_tokens: total_tokens,
+        timeout_ms: timeout_ms,
+        min_tokens: min_tokens
+      }
+    }
   end
 
   defp failure_retry_exhausted(failure, next_attempt) do
@@ -1123,7 +1266,7 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     """
-    Symphony runtime parked this issue to avoid meaningless token burn.
+    Symphony runtime parked this issue because a worker hit a configured failure guard.
 
     - Issue: `#{issue.identifier}`
     - Runtime class: `#{failure.kind}`

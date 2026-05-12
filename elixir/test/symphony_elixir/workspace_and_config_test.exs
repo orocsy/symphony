@@ -861,6 +861,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+    assert config.codex.durable_progress_timeout_ms == 420_000
+    assert config.codex.durable_progress_min_tokens == 250_000
     assert config.codex.max_turn_total_tokens == 1_500_000
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -924,6 +926,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_durable_progress_timeout_ms: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.durable_progress_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_durable_progress_min_tokens: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.durable_progress_min_tokens"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_max_turn_total_tokens: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
