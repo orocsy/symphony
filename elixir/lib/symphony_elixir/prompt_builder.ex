@@ -10,17 +10,20 @@ defmodule SymphonyElixir.PromptBuilder do
   @issue_brief_max_bytes 20_000
   @issue_brief_heading_max_bytes 4_000
   @issue_description_max_bytes 8_000
+  @workflow_prompt_inline_max_bytes 18_500
+  @compact_issue_description_max_bytes 4_000
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
     attempt = Keyword.get(opts, :attempt)
     workspace = Keyword.get(opts, :workspace)
     checkpoint = workspace_recovery_checkpoint(workspace)
+    workflow = Workflow.current()
 
     prompt =
-      Workflow.current()
+      workflow
       |> prompt_template!()
-      |> render_issue_template(issue, opts)
+      |> render_prompt_template(issue, opts)
       |> maybe_prepend_issue_brief_reference(issue, workspace)
       |> maybe_prepend_retry_prelude(attempt)
 
@@ -146,6 +149,64 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
+  defp render_prompt_template(prompt, issue, opts) when byte_size(prompt) > @workflow_prompt_inline_max_bytes do
+    compact_workflow_prompt(issue, prompt, opts)
+  end
+
+  defp render_prompt_template(prompt, issue, opts) do
+    render_issue_template(prompt, issue, opts)
+  end
+
+  defp compact_workflow_prompt(issue, workflow_prompt, opts) do
+    """
+    You are working on Linear issue `#{issue_value(issue, :identifier)}`.
+
+    Symphony compacted the workflow instructions for the first turn because the workflow body is #{byte_size(workflow_prompt)} bytes. Do not inline or summarize the full workflow before doing product work.
+
+    Workflow reference:
+    - Path: `#{Path.expand(Workflow.workflow_file_path())}`
+    - Read only the specific section needed when a concrete rule is missing.
+
+    Issue snapshot:
+    - ID: `#{issue_value(issue, :id)}`
+    - Title: #{issue_value(issue, :title)}
+    - State: #{issue_value(issue, :state)}
+    - Branch: #{issue_value(issue, :branch_name)}
+    - URL: #{issue_value(issue, :url)}
+    - Labels: #{issue_value(issue, :labels)}
+    - Attempt: #{attempt_label(Keyword.get(opts, :attempt))}
+
+    Description:
+    #{indent(compact_issue_description(issue_value(issue, :description)))}
+
+    Core workflow policy:
+    - Work only the current issue and its declared write scope. Use the Linear issue, focused issue brief, current code, and current PR review as source of truth.
+    - Start from `git status --short --branch`, the issue branch, latest `origin/main`, and the focused files named by the issue/brief. Avoid broad logs, historical tickets, unrelated docs, and unrelated GitHub/Linear data.
+    - If `.codex/agentic/issue-briefs/#{safe_issue_identifier(issue_value(issue, :identifier))}.md` exists, read that focused brief before broad rediscovery.
+    - Before optional skills, broad docs, or scanning more than eight implementation files, append durable first-turn progress:
+      `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "first-turn-miu-handoff"`
+    - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
+    - Implement one MIU at a time, run focused validation immediately, append tool/gate/eval evidence, commit, push the issue branch, create/update one PR, request Codex review, and update Linear.
+    - For Rework or an existing PR, fetch only current PR review threads/comments for this branch, classify findings, fix accepted in-scope current-code findings, validate, push, request review again, and update Linear.
+    - Never merge automatically from inside the worker.
+    """
+    |> String.trim()
+  end
+
+  defp compact_issue_description(description) when is_binary(description) do
+    description
+    |> String.trim()
+    |> case do
+      "" ->
+        "unknown"
+
+      text ->
+        trim_text(text, @compact_issue_description_max_bytes, "[Linear issue description compacted by Symphony prompt builder. Use the issue brief or Linear only if required fields are missing.]")
+    end
+  end
+
+  defp compact_issue_description(_description), do: "unknown"
+
   defp maybe_prepend_retry_prelude(prompt, attempt) when is_binary(prompt) and is_integer(attempt) and attempt > 0 do
     if retry_prelude_present?(prompt, attempt) do
       prompt
@@ -198,10 +259,17 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp trim_issue_brief(content) when byte_size(content) > @issue_brief_max_bytes do
-    binary_part(content, 0, @issue_brief_max_bytes) <> "\n\n[Issue brief truncated by Symphony prompt builder.]"
+    trim_text(content, @issue_brief_max_bytes, "[Issue brief truncated by Symphony prompt builder.]")
   end
 
   defp trim_issue_brief(content), do: content
+
+  defp trim_text(content, max_bytes, notice)
+       when is_binary(content) and is_integer(max_bytes) and max_bytes > 0 and byte_size(content) > max_bytes do
+    binary_part(content, 0, max_bytes) <> "\n\n#{notice}"
+  end
+
+  defp trim_text(content, _max_bytes, _notice), do: content
 
   defp issue_brief_heading(path) do
     with {:ok, file} <- File.open(path, [:read, :binary]) do

@@ -2233,6 +2233,43 @@ defmodule SymphonyElixir.CoreTest do
     assert byte_size(prompt) < byte_size(long_description)
   end
 
+  test "prompt builder compacts oversized workflow prompts" do
+    workflow_prompt = """
+    Ticket {{ issue.identifier }}
+    Description:
+    {{ issue.description }}
+
+    #{String.duplicate("workflow-policy-noise ", 1_200)}
+
+    FULL_WORKFLOW_TAIL_SHOULD_NOT_INLINE
+    """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      id: "issue-207",
+      identifier: "MT-207",
+      title: "Keep first turn lean",
+      description: "Current files: src/app/page.tsx\nTarget behavior: bounded prompt.",
+      state: "In Progress",
+      branch_name: "orocsy/mt-207-lean-prompt",
+      url: "https://example.org/issues/MT-207",
+      labels: ["runtime"]
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "Symphony compacted the workflow instructions"
+    assert prompt =~ "Workflow reference:"
+    assert prompt =~ "Issue snapshot:"
+    assert prompt =~ "MT-207"
+    assert prompt =~ "orocsy/mt-207-lean-prompt"
+    assert prompt =~ "first-turn-miu-handoff"
+    assert prompt =~ "Never merge automatically"
+    refute prompt =~ "FULL_WORKFLOW_TAIL_SHOULD_NOT_INLINE"
+    assert byte_size(prompt) < 8_000
+  end
+
   test "prompt builder does not duplicate issue brief already embedded in rendered issue description" do
     workflow_prompt =
       """
