@@ -227,6 +227,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:stall_timeout_ms, :integer, default: 300_000)
       field(:durable_progress_timeout_ms, :integer, default: 180_000)
       field(:durable_progress_min_tokens, :integer, default: 250_000)
+      field(:durable_progress_first_event_max_tokens, :integer, default: 120_000)
       field(:max_turn_total_tokens, :integer, default: 1_500_000)
       field(:forbidden_command_patterns, {:array, :string}, default: [])
       field(:safe_command_approval_patterns, {:array, :string}, default: [])
@@ -247,6 +248,7 @@ defmodule SymphonyElixir.Config.Schema do
           :stall_timeout_ms,
           :durable_progress_timeout_ms,
           :durable_progress_min_tokens,
+          :durable_progress_first_event_max_tokens,
           :max_turn_total_tokens,
           :forbidden_command_patterns,
           :safe_command_approval_patterns
@@ -259,6 +261,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:durable_progress_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:durable_progress_min_tokens, greater_than_or_equal_to: 0)
+      |> validate_number(:durable_progress_first_event_max_tokens, greater_than_or_equal_to: 0)
       |> validate_number(:max_turn_total_tokens, greater_than_or_equal_to: 0)
       |> validate_command_patterns()
     end

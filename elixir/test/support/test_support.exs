@@ -122,6 +122,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_stall_timeout_ms: 300_000,
           codex_durable_progress_timeout_ms: 180_000,
           codex_durable_progress_min_tokens: 250_000,
+          codex_durable_progress_first_event_max_tokens: 120_000,
           codex_max_turn_total_tokens: 1_500_000,
           codex_forbidden_command_patterns: [],
           codex_safe_command_approval_patterns: [],
@@ -170,6 +171,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     codex_durable_progress_timeout_ms = Keyword.get(config, :codex_durable_progress_timeout_ms)
     codex_durable_progress_min_tokens = Keyword.get(config, :codex_durable_progress_min_tokens)
+    codex_durable_progress_first_event_max_tokens = Keyword.get(config, :codex_durable_progress_first_event_max_tokens)
     codex_max_turn_total_tokens = Keyword.get(config, :codex_max_turn_total_tokens)
     codex_forbidden_command_patterns = Keyword.get(config, :codex_forbidden_command_patterns)
     codex_safe_command_approval_patterns = Keyword.get(config, :codex_safe_command_approval_patterns)
@@ -223,6 +225,7 @@ defmodule SymphonyElixir.TestSupport do
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         "  durable_progress_timeout_ms: #{yaml_value(codex_durable_progress_timeout_ms)}",
         "  durable_progress_min_tokens: #{yaml_value(codex_durable_progress_min_tokens)}",
+        "  durable_progress_first_event_max_tokens: #{yaml_value(codex_durable_progress_first_event_max_tokens)}",
         "  max_turn_total_tokens: #{yaml_value(codex_max_turn_total_tokens)}",
         "  forbidden_command_patterns: #{yaml_value(codex_forbidden_command_patterns)}",
         "  safe_command_approval_patterns: #{yaml_value(codex_safe_command_approval_patterns)}",

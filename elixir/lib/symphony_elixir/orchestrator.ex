@@ -493,6 +493,7 @@ defmodule SymphonyElixir.Orchestrator do
     codex_config = Config.settings!().codex
     timeout_ms = codex_config.durable_progress_timeout_ms
     min_tokens = codex_config.durable_progress_min_tokens
+    first_event_max_tokens = codex_config.durable_progress_first_event_max_tokens
 
     cond do
       timeout_ms <= 0 or min_tokens <= 0 ->
@@ -505,32 +506,66 @@ defmodule SymphonyElixir.Orchestrator do
         now = DateTime.utc_now()
 
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          park_issue_without_durable_progress(state_acc, issue_id, running_entry, now, timeout_ms, min_tokens)
+          park_issue_without_durable_progress(
+            state_acc,
+            issue_id,
+            running_entry,
+            now,
+            timeout_ms,
+            min_tokens,
+            first_event_max_tokens
+          )
         end)
     end
   end
 
-  defp park_issue_without_durable_progress(state, issue_id, running_entry, now, timeout_ms, min_tokens) do
+  defp park_issue_without_durable_progress(
+         state,
+         issue_id,
+         running_entry,
+         now,
+         timeout_ms,
+         min_tokens,
+         first_event_max_tokens
+       ) do
     elapsed_ms = runtime_elapsed_ms(running_entry, now)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
 
     quiet_ms = durable_progress_quiet_ms(running_entry, now)
 
-    if is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
-         total_tokens >= min_tokens do
-      identifier = Map.get(running_entry, :identifier, issue_id)
-      session_id = running_entry_session_id(running_entry)
+    no_first_event? = not durable_event_progress_observed?(running_entry)
 
-      Logger.warning(
-        "Issue has no recent durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms} codex_total_tokens=#{total_tokens}; parking for workflow correction"
-      )
+    cond do
+      is_integer(first_event_max_tokens) and first_event_max_tokens > 0 and
+        total_tokens >= first_event_max_tokens and no_first_event? ->
+        identifier = Map.get(running_entry, :identifier, issue_id)
+        session_id = running_entry_session_id(running_entry)
 
-      failure = no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens)
-      reason = {:no_durable_progress, elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens}
+        Logger.warning(
+          "Issue exceeded first durable event token budget: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} codex_total_tokens=#{total_tokens} first_event_max_tokens=#{first_event_max_tokens}; parking for workflow correction"
+        )
 
-      park_running_issue(state, issue_id, running_entry, reason, failure)
-    else
-      state
+        failure = missing_first_durable_event_failure(elapsed_ms, total_tokens, first_event_max_tokens)
+        reason = {:missing_first_durable_event, elapsed_ms, total_tokens, first_event_max_tokens}
+
+        park_running_issue(state, issue_id, running_entry, reason, failure)
+
+      is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
+          total_tokens >= min_tokens ->
+        identifier = Map.get(running_entry, :identifier, issue_id)
+        session_id = running_entry_session_id(running_entry)
+
+        Logger.warning(
+          "Issue has no recent durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms} codex_total_tokens=#{total_tokens}; parking for workflow correction"
+        )
+
+        failure = no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens)
+        reason = {:no_durable_progress, elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens}
+
+        park_running_issue(state, issue_id, running_entry, reason, failure)
+
+      true ->
+        state
     end
   end
 
@@ -571,6 +606,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp durable_progress_quiet_ms(_running_entry, _now), do: nil
+
+  defp durable_event_progress_observed?(%{workspace_path: workspace, started_at: %DateTime{} = started_at})
+       when is_binary(workspace) do
+    File.dir?(workspace) and event_durable_progress_times(workspace, started_at) != []
+  rescue
+    _error -> false
+  end
+
+  defp durable_event_progress_observed?(_running_entry), do: false
 
   defp durable_progress_observed_times(workspace, started_at) do
     git_durable_progress_times(workspace, started_at) ++ event_durable_progress_times(workspace, started_at)
@@ -1536,9 +1580,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     correction_result =
       if is_binary(workspace_path) do
-        Workspace.create_correction_in_workspace(
-          workspace_path,
-          issue || identifier,
+        correction_attrs =
           %{
             source: "symphony.runtime.#{failure.kind}",
             source_status: failure.source_status,
@@ -1546,7 +1588,13 @@ defmodule SymphonyElixir.Orchestrator do
             findings: [failure_reason_text(reason)],
             required_corrections: failure.required_corrections,
             next_action: failure.next_action
-          },
+          }
+          |> maybe_put_failure_guard(failure)
+
+        Workspace.create_correction_in_workspace(
+          workspace_path,
+          issue || identifier,
+          correction_attrs,
           worker_host
         )
       else
@@ -1567,6 +1615,9 @@ defmodule SymphonyElixir.Orchestrator do
     |> release_issue_claim(issue_id)
     |> Map.update!(:retry_attempts, &Map.delete(&1, issue_id))
   end
+
+  defp maybe_put_failure_guard(attrs, %{guard: guard}) when is_map(guard), do: Map.put(attrs, :guard, guard)
+  defp maybe_put_failure_guard(attrs, _failure), do: attrs
 
   defp park_running_issue(%State{} = state, issue_id, running_entry, reason, failure) do
     state = terminate_running_issue(state, issue_id, false)
@@ -1683,6 +1734,27 @@ defmodule SymphonyElixir.Orchestrator do
         total_tokens: total_tokens,
         timeout_ms: timeout_ms,
         min_tokens: min_tokens
+      }
+    }
+  end
+
+  defp missing_first_durable_event_failure(elapsed_ms, total_tokens, first_event_max_tokens) do
+    %{
+      action: :block,
+      kind: "missing-first-durable-event",
+      source_status: "blocked",
+      next_action: "block",
+      summary:
+        "Symphony stopped a Codex worker because it used #{total_tokens} tokens before recording the first durable Orocsy progress event. Creating an issue branch is only an early workspace checkpoint; workers must record a code-level MIU handoff, gate, eval, or handoff event before the first-event token budget is exhausted.",
+      required_corrections: [
+        "Inspect the worker log to confirm why it did not record `first-turn-miu-handoff` before broad context reads or implementation work.",
+        "Shrink the first-turn prompt or workflow instructions, or make the worker record a blocker event when the issue shape is unclear.",
+        "Redispatch only after the first durable event can be recorded before expensive code/doc exploration."
+      ],
+      guard: %{
+        elapsed_ms: elapsed_ms,
+        total_tokens: total_tokens,
+        first_event_max_tokens: first_event_max_tokens
       }
     }
   end

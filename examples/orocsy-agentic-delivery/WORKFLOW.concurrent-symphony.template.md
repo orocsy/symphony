@@ -77,6 +77,7 @@ codex:
   max_turn_total_tokens: 1500000
   durable_progress_timeout_ms: 60000
   durable_progress_min_tokens: 30000
+  durable_progress_first_event_max_tokens: 120000
   forbidden_command_patterns:
     - '(^|\s)(pnpm|next)\s+(dev|start)(\s|$)'
     - '(^|\s)(pnpm|npm|npx|yarn)\s+(dlx|exec|x)?\s*playwright\s+install(\s|$)'

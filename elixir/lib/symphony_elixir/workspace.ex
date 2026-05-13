@@ -590,6 +590,7 @@ defmodule SymphonyElixir.Workspace do
       "findings" => string_list(Map.get(attrs, :findings, [])),
       "required_corrections" => string_list(Map.get(attrs, :required_corrections, [])),
       "next_action" => normalize_next_action(Map.get(attrs, :next_action, "block")),
+      "guard" => Map.get(attrs, :guard, %{}),
       "issue" => issue_context.issue_identifier,
       "issue_id" => issue_context.issue_id,
       "created_at" => now,

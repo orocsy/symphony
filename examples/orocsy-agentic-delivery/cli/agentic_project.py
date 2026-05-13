@@ -182,6 +182,7 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "Handoff git-state verification guard",
         "max_failed_worker_retries",
         "durable_progress_min_tokens",
+        "durable_progress_first_event_max_tokens",
         "needs-code-level-miu",
         "issue-briefs",
         "granular:",
@@ -654,6 +655,12 @@ fi
 
 if ! grep -q "durable_progress_min_tokens" "$WORKFLOW_FILE" || ! grep -q "no-recent-durable-progress" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing recent durable progress watchdog guard." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
+if ! grep -q "durable_progress_first_event_max_tokens" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing first durable event token watchdog guard." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi

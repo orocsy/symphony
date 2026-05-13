@@ -1051,6 +1051,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.durable_progress_min_tokens"
 
+    write_workflow_file!(Workflow.workflow_file_path(), codex_durable_progress_first_event_max_tokens: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.durable_progress_first_event_max_tokens"
+
     write_workflow_file!(Workflow.workflow_file_path(), codex_max_turn_total_tokens: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.max_turn_total_tokens"
