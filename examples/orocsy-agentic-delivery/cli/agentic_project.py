@@ -658,6 +658,12 @@ if ! grep -q "durable_progress_min_tokens" "$WORKFLOW_FILE" || ! grep -q "no-rec
   exit 1
 fi
 
+if grep -q "Load the Orocsy /" "$WORKFLOW_FILE" || ! grep -q "Skill loading guard" "$WORKFLOW_FILE" || ! grep -q "first-turn-miu-handoff" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: first turn must not load broad skill bodies before durable MIU handoff." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
+  exit 1
+fi
+
 if ! grep -q "needs-code-level-miu" "$WORKFLOW_FILE"; then
   echo "Refusing to run stale Symphony workflow: missing code-level MIU dispatch gate." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2

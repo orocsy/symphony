@@ -1761,12 +1761,11 @@ def command_control_status(args: argparse.Namespace) -> int:
 def symphony_prelude(issue: str) -> list[str]:
     issue_text = issue or "<issue>"
     return [
-        "Read AGENTS.md and project design/runtime docs before editing.",
-        "Load the Orocsy / agentic-delivery-loop skill.",
-        "Read .orocsy/delivery/state/current.json and .orocsy/delivery/policy.yml.",
+        "Read AGENTS.md, .orocsy/delivery/state/current.json, and .orocsy/delivery/policy.yml before editing.",
+        "Do not load global/plugin skill bodies during the first worker turn; this workflow and the workspace-local Orocsy CLI are the runtime instructions.",
         "Use the workspace-local .codex/delivery/bin/orocsy.py CLI for runtime gates and event evidence.",
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
-        "Create or update the MIU trace before implementation.",
+        "Create or update the MIU trace and append a first-turn-miu-handoff event before optional skills, broad docs, or more than eight implementation files.",
         "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; the ledger is .orocsy/delivery/events/events.jsonl.",
         "Use `python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record` for bounded ignored generated-artifact cleanup; do not run raw cleanup shell commands.",
         "Implement one MIU at a time and append tool/test/build/browser events.",
