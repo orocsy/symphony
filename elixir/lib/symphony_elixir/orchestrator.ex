@@ -580,7 +580,8 @@ defmodule SymphonyElixir.Orchestrator do
     [
       git_dirty_observed_at(workspace),
       git_ahead_commit_observed_at(workspace),
-      git_upstream_progress_observed_at(workspace)
+      git_upstream_progress_observed_at(workspace),
+      git_issue_branch_observed_at(workspace)
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.filter(&datetime_at_or_after?(&1, started_at))
@@ -627,6 +628,29 @@ defmodule SymphonyElixir.Orchestrator do
   rescue
     _error -> nil
   end
+
+  defp git_issue_branch_observed_at(workspace) do
+    with {branch_output, 0} <- System.cmd("git", ["branch", "--show-current"], cd: workspace, stderr_to_stdout: true),
+         branch = String.trim(branch_output),
+         true <- issue_branch_name?(branch),
+         {log_path, 0} <-
+           System.cmd("git", ["rev-parse", "--git-path", "logs/refs/heads/#{branch}"],
+             cd: workspace,
+             stderr_to_stdout: true
+           ) do
+      log_path
+      |> String.trim()
+      |> Path.expand(workspace)
+      |> file_mtime_datetime()
+    else
+      _ -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp issue_branch_name?(branch) when branch in ["", "main", "master"], do: false
+  defp issue_branch_name?(_branch), do: true
 
   defp git_upstream_progress_observed_at(workspace) do
     with true <- git_ref_exists?(workspace, "@{upstream}"),
