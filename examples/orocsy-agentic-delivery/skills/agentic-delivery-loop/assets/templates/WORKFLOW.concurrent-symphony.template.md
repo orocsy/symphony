@@ -75,8 +75,8 @@ agent:
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   max_turn_total_tokens: 1500000
-  durable_progress_timeout_ms: 180000
-  durable_progress_min_tokens: 250000
+  durable_progress_timeout_ms: 60000
+  durable_progress_min_tokens: 30000
   forbidden_command_patterns:
     - '(^|\s)(pnpm|next)\s+(dev|start)(\s|$)'
     - '(^|\s)(pnpm|npm|npx|yarn)\s+(dlx|exec|x)?\s*playwright\s+install(\s|$)'
@@ -151,31 +151,44 @@ Orocsy worker prelude:
 5. If `.codex/agentic/issue-briefs/{{ issue.identifier }}.md` exists, treat it
    as the cached technical handoff for current file paths and target code shape.
    Do not rediscover broad context before using that brief.
-6. Before editing code, update `.orocsy/delivery/policy.yml` with the issue's
+6. First-turn context budget:
+   - During the first worker turn, read only `AGENTS.md`, the assigned Linear
+     issue, the matching `.codex/agentic/issue-briefs/{{ issue.identifier }}.md`,
+     `.orocsy/delivery/state/current.json`, `.orocsy/delivery/policy.yml`, and
+     the smallest directly named source/test files from the brief.
+   - Do not open full project docs, broad design docs, old ticket logs, or
+     recursive file listings unless the issue brief is missing a required file
+     path. Prefer `rg -n` and `sed -n` slices under 220 lines. Keep command
+     `max_output_tokens` at or below 12000 unless a single required file slice
+     genuinely needs more.
+   - Before reading more than eight implementation files or spending another
+     broad context pass, write or refresh the Technical MIU trace and record a
+     durable event. If the MIU shape is still unclear, record a blocker and stop.
+7. Before editing code, update `.orocsy/delivery/policy.yml` with the issue's
    declared write-scope globs if the prepare hook could not infer them.
-7. Create or update the Technical MIU trace.
-8. Confirm the `before_run` hook already recorded `run.started`,
+8. Create or update the Technical MIU trace.
+9. Confirm the `before_run` hook already recorded `run.started`,
    `gate.leaks`, `gate.secrets`, and `gate.artifacts` with this bounded command:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
    The ledger path is `.orocsy/delivery/events/events.jsonl`; do not search for
    the retired flat path `.orocsy/delivery/events.jsonl`. If the bounded gate
    command reports missing startup events, stop and report workflow setup
    failure instead of running the external `$OROCSY_CLI` path.
-9. If you need to record additional runtime evidence, use:
+10. If you need to record additional runtime evidence, use:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . <command>`
-10. Implement one MIU at a time and append command evidence after each check:
+11. Implement one MIU at a time and append command evidence after each check:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "<command>"`
-11. Before commit, run:
+12. Before commit, run:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate declared-scope --strict --record`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --record`
-12. Before push, run:
+13. Before push, run:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
-13. Before handoff, print the applicable eval rubric and record the verdict:
+14. Before handoff, print the applicable eval rubric and record the verdict:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval rubric miu-quality`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval record miu-quality --status passed --summary "<why>"`
    Dynamic `eval.*` events are durable progress. Do not invent a separate
    narrative status when the eval command can record the proof.
-14. Handoff git-state verification guard:
+15. Handoff git-state verification guard:
    - After the final push and before any GitHub or Linear completion update,
      verify the actual repository state:
      `git status --short --branch`
@@ -188,12 +201,12 @@ Orocsy worker prelude:
      record the blocker, and do not move the issue to review/completion.
    - After PR/review/Linear handoff succeeds, append a durable handoff event:
      `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.completed --status passed --tool "github-linear-handoff"`
-15. If any gate or eval fails, create/resolve inbox items and ask for guidance:
+16. If any gate or eval fails, create/resolve inbox items and ask for guidance:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --inbox`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
-16. If guidance says `block` or `retry`, update the Linear workpad and stop
+17. If guidance says `block` or `retry`, update the Linear workpad and stop
     until the correction is handled.
-17. Generated artifact cleanup:
+18. Generated artifact cleanup:
     - Do not run raw destructive cleanup commands such as `rm -rf`,
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
