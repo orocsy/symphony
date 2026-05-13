@@ -8,6 +8,8 @@ defmodule SymphonyElixir.PromptBuilder do
   @render_opts [strict_variables: true, strict_filters: true]
   @recent_event_limit 80
   @issue_brief_max_bytes 20_000
+  @issue_brief_heading_max_bytes 4_000
+  @issue_description_max_bytes 8_000
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
@@ -19,7 +21,7 @@ defmodule SymphonyElixir.PromptBuilder do
       Workflow.current()
       |> prompt_template!()
       |> render_issue_template(issue, opts)
-      |> maybe_prepend_issue_brief(issue, workspace)
+      |> maybe_prepend_issue_brief_reference(issue, workspace)
       |> maybe_prepend_retry_prelude(attempt)
 
     cond do
@@ -82,19 +84,25 @@ defmodule SymphonyElixir.PromptBuilder do
     |> IO.iodata_to_binary()
   end
 
-  defp issue_template_context(%_{} = issue), do: Map.from_struct(issue)
+  defp issue_template_context(%_{} = issue) do
+    issue
+    |> Map.from_struct()
+    |> truncate_prompt_description()
+  end
 
   defp issue_template_context(%{issue_identifier: identifier} = issue_context) do
     %{
       id: Map.get(issue_context, :issue_id),
-      identifier: identifier
+      identifier: identifier,
+      description: issue_context |> Map.get(:description) |> truncate_issue_description_for_prompt()
     }
   end
 
   defp issue_template_context(%{"issue_identifier" => identifier} = issue_context) do
     %{
       id: Map.get(issue_context, "issue_id"),
-      identifier: identifier
+      identifier: identifier,
+      description: issue_context |> Map.get("description") |> truncate_issue_description_for_prompt()
     }
   end
 
@@ -148,29 +156,32 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_prepend_retry_prelude(prompt, _attempt), do: prompt
 
-  defp maybe_prepend_issue_brief(prompt, issue, workspace) do
-    case issue_brief(issue, workspace) do
+  defp maybe_prepend_issue_brief_reference(prompt, issue, workspace) do
+    case issue_brief_reference(issue, workspace) do
       "" -> prompt
-      brief -> maybe_prepend_issue_brief_content(prompt, brief)
+      reference -> maybe_prepend_issue_brief_reference_content(prompt, reference)
     end
   end
 
-  defp maybe_prepend_issue_brief_content(prompt, brief) do
-    if prompt_already_contains_issue_brief?(prompt, brief) do
+  defp maybe_prepend_issue_brief_reference_content(prompt, reference) do
+    if prompt_already_contains_issue_brief_reference?(prompt, reference) do
       prompt
     else
-      "Issue technical brief:\n\n" <> brief <> "\n\n" <> prompt
+      issue_brief_reference_prompt(reference) <> "\n\n" <> prompt
     end
   end
 
-  defp issue_brief(%{identifier: identifier}, workspace) when is_binary(identifier) and is_binary(workspace) do
-    path = Path.join([workspace, ".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
+  defp issue_brief_reference(%{identifier: identifier}, workspace) when is_binary(identifier) and is_binary(workspace) do
+    relative_path = Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
+    path = Path.join(workspace, relative_path)
 
     with true <- File.regular?(path),
-         {:ok, content} <- File.read(path) do
-      content
-      |> trim_issue_brief()
-      |> String.trim()
+         {:ok, stat} <- File.stat(path) do
+      %{
+        bytes: stat.size,
+        heading: issue_brief_heading(path),
+        path: relative_path
+      }
     else
       _ -> ""
     end
@@ -178,7 +189,7 @@ defmodule SymphonyElixir.PromptBuilder do
     _error -> ""
   end
 
-  defp issue_brief(_issue, _workspace), do: ""
+  defp issue_brief_reference(_issue, _workspace), do: ""
 
   defp safe_issue_identifier(identifier) do
     identifier
@@ -192,13 +203,41 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp trim_issue_brief(content), do: content
 
-  defp prompt_already_contains_issue_brief?(prompt, brief) do
-    brief
-    |> markdown_heading()
-    |> case do
-      nil -> false
-      heading -> String.contains?(prompt, heading)
+  defp issue_brief_heading(path) do
+    with {:ok, file} <- File.open(path, [:read, :binary]) do
+      try do
+        case IO.binread(file, @issue_brief_heading_max_bytes) do
+          content when is_binary(content) -> markdown_heading(content)
+          _ -> nil
+        end
+      after
+        File.close(file)
+      end
+    else
+      _ -> nil
     end
+  end
+
+  defp issue_brief_reference_prompt(%{bytes: bytes, heading: heading, path: path}) do
+    heading_line =
+      case heading do
+        nil -> ""
+        "" -> ""
+        heading -> "\n- Heading: #{heading}"
+      end
+
+    """
+    Issue technical brief is available on disk. Do not inline or rediscover broad context before using it.
+
+    - Path: `#{path}`
+    - Size: #{bytes} bytes#{heading_line}
+    """
+    |> String.trim()
+  end
+
+  defp prompt_already_contains_issue_brief_reference?(prompt, %{heading: heading, path: path}) do
+    String.contains?(prompt, path) or
+      (is_binary(heading) and heading != "" and String.contains?(prompt, heading))
   end
 
   defp markdown_heading(markdown) when is_binary(markdown) do
@@ -220,6 +259,27 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp markdown_heading(_markdown), do: nil
+
+  defp truncate_prompt_description(%{description: description} = issue_context) do
+    Map.put(issue_context, :description, truncate_issue_description_for_prompt(description))
+  end
+
+  defp truncate_prompt_description(%{"description" => description} = issue_context) do
+    Map.put(issue_context, "description", truncate_issue_description_for_prompt(description))
+  end
+
+  defp truncate_prompt_description(issue_context), do: issue_context
+
+  defp truncate_issue_description_for_prompt(description) when is_binary(description) do
+    if byte_size(description) > @issue_description_max_bytes do
+      binary_part(description, 0, @issue_description_max_bytes) <>
+        "\n\n[Linear issue description truncated by Symphony prompt builder. Read the focused issue brief or query Linear only if a required field is missing.]"
+    else
+      description
+    end
+  end
+
+  defp truncate_issue_description_for_prompt(description), do: description
 
   defp retry_prelude_present?(prompt, attempt) do
     normalized = String.downcase(prompt)

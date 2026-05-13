@@ -2067,7 +2067,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-201"
   end
 
-  test "prompt builder prepends issue technical brief when present" do
+  test "prompt builder prepends issue technical brief reference when present" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
 
@@ -2093,13 +2093,43 @@ defmodule SymphonyElixir.CoreTest do
 
       prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
 
-      assert String.starts_with?(prompt, "Issue technical brief:")
-      assert prompt =~ "Current paths: src/lib/session.ts"
-      assert prompt =~ "Target shape: resolveGuestSession()"
+      assert String.starts_with?(prompt, "Issue technical brief is available on disk.")
+      assert prompt =~ ".codex/agentic/issue-briefs/MT-202.md"
+      assert prompt =~ "Size:"
+      refute prompt =~ "Current paths: src/lib/session.ts"
+      refute prompt =~ "Target shape: resolveGuestSession()"
       assert prompt =~ "Ticket MT-202"
     after
       File.rm_rf(workspace)
     end
+  end
+
+  test "prompt builder caps long Linear descriptions in rendered prompts" do
+    workflow_prompt = """
+    Ticket {{ issue.identifier }}
+    Description:
+    {{ issue.description }}
+    """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    long_description = String.duplicate("large-context ", 1_000) <> "END_OF_LONG_DESCRIPTION"
+
+    issue = %Issue{
+      identifier: "MT-205",
+      title: "Keep prompt bounded",
+      description: long_description,
+      state: "In Progress",
+      url: "https://example.org/issues/MT-205",
+      labels: []
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "Ticket MT-205"
+    assert prompt =~ "[Linear issue description truncated by Symphony prompt builder."
+    refute prompt =~ "END_OF_LONG_DESCRIPTION"
+    assert byte_size(prompt) < byte_size(long_description)
   end
 
   test "prompt builder does not duplicate issue brief already embedded in rendered issue description" do
