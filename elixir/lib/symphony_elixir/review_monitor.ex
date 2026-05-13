@@ -9,6 +9,38 @@ defmodule SymphonyElixir.ReviewMonitor do
   alias SymphonyElixir.Linear.Issue
 
   @review_feedback_states MapSet.new(["CHANGES_REQUESTED", "REQUEST_CHANGES"])
+  @review_threads_query """
+  query SymphonyPullReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        headRefOid
+        reviewThreads(first: 100, after: $after) {
+          nodes {
+            isResolved
+            isOutdated
+            comments(first: 20) {
+              nodes {
+                author {
+                  login
+                }
+                body
+                path
+                line
+                originalLine
+                outdated
+                url
+              }
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+  """
 
   @spec run_once() :: :ok
   def run_once do
@@ -51,25 +83,46 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp maybe_mark_issue_for_rework(_issue, _monitor), do: :ok
 
-  defp feedback_for_issue(%Issue{branch_name: branch}, monitor)
-       when is_binary(branch) and branch != "" do
+  @spec inspect_issue(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def inspect_issue(%Issue{branch_name: branch}, monitor)
+      when is_binary(branch) and branch != "" do
     with {:ok, repo} <- normalize_repo(monitor.repo),
          {:ok, pr} <- fetch_open_pull_request(repo, branch),
          {:ok, comments} <- fetch_pull_comments(repo, pr),
-         {:ok, reviews} <- fetch_pull_reviews(repo, pr) do
-      current_feedback =
-        current_head_comments(pr, comments) ++ current_head_reviews(pr, reviews)
-
-      case current_feedback do
-        [] -> {:ok, nil}
-        feedback -> {:ok, build_feedback(repo, pr, feedback)}
-      end
+         {:ok, reviews} <- fetch_pull_reviews(repo, pr),
+         {:ok, current_feedback, feedback_source} <- fetch_current_feedback(repo, pr, comments, reviews) do
+      {:ok,
+       %{
+         repo: repo,
+         pr: pr,
+         pr_number: pr_number(pr),
+         pr_url: pr_url(pr),
+         head_sha: head_sha(pr),
+         feedback: current_feedback,
+         feedback_source: feedback_source
+       }}
     end
   end
 
-  defp feedback_for_issue(%Issue{} = issue, _monitor) do
+  def inspect_issue(%Issue{} = issue, _monitor) do
     Logger.debug("Review monitor skipped #{issue_context(issue)} because it has no branch name")
-    {:ok, nil}
+    {:ok, %{repo: nil, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
+  end
+
+  defp feedback_for_issue(%Issue{} = issue, monitor) do
+    case inspect_issue(issue, monitor) do
+      {:ok, %{pr: nil}} ->
+        {:ok, nil}
+
+      {:ok, %{feedback: []}} ->
+        {:ok, nil}
+
+      {:ok, %{repo: repo, pr: pr, feedback: feedback}} ->
+        {:ok, build_feedback(repo, pr, feedback)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp normalize_repo(repo) when is_binary(repo) do
@@ -140,6 +193,80 @@ defmodule SymphonyElixir.ReviewMonitor do
       number -> github_api("repos/#{repo}/pulls/#{number}/reviews")
     end
   end
+
+  defp fetch_current_feedback(_repo, nil, _comments, _reviews), do: {:ok, [], :no_pr}
+
+  defp fetch_current_feedback(repo, pr, comments, reviews) do
+    if review_threads_enabled?() do
+      case fetch_pull_review_threads(repo, pr) do
+        {:ok, threads} ->
+          {:ok, active_review_thread_feedback(threads), :review_threads}
+
+        {:error, reason} ->
+          Logger.debug("Review monitor falling back to REST review feedback for #{repo}##{pr_number(pr)}: #{inspect(reason)}")
+          fetch_rest_current_feedback(pr, comments, reviews)
+      end
+    else
+      fetch_rest_current_feedback(pr, comments, reviews)
+    end
+  end
+
+  defp fetch_rest_current_feedback(pr, comments, reviews) do
+    {:ok, current_head_comments(pr, comments) ++ current_head_reviews(pr, reviews), :rest_current_head}
+  end
+
+  defp review_threads_enabled? do
+    is_function(Application.get_env(:symphony_elixir, :github_graphql_runner), 2) or
+      is_nil(Application.get_env(:symphony_elixir, :github_api_runner))
+  end
+
+  defp fetch_pull_review_threads(repo, pr) do
+    with number when not is_nil(number) <- pr_number(pr),
+         {:ok, {owner, name}} <- split_repo(repo) do
+      fetch_pull_review_threads_page(owner, name, number, nil, [])
+    else
+      nil -> {:ok, []}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_pull_review_threads_page(owner, name, number, after_cursor, acc) do
+    variables = %{
+      "owner" => owner,
+      "name" => name,
+      "number" => number,
+      "after" => after_cursor
+    }
+
+    with {:ok, response} <- github_graphql(@review_threads_query, variables),
+         %{"nodes" => nodes, "pageInfo" => page_info} <-
+           get_in(response, ["data", "repository", "pullRequest", "reviewThreads"]) do
+      acc = acc ++ nodes
+
+      if page_info["hasNextPage"] == true and is_binary(page_info["endCursor"]) do
+        fetch_pull_review_threads_page(owner, name, number, page_info["endCursor"], acc)
+      else
+        {:ok, acc}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :unexpected_review_threads_payload}
+    end
+  end
+
+  defp active_review_thread_feedback(threads) when is_list(threads) do
+    threads
+    |> Enum.filter(&active_review_thread?/1)
+    |> Enum.map(&%{type: :thread, payload: &1})
+  end
+
+  defp active_review_thread_feedback(_threads), do: []
+
+  defp active_review_thread?(thread) when is_map(thread) do
+    thread["isResolved"] != true and thread["isOutdated"] != true
+  end
+
+  defp active_review_thread?(_thread), do: false
 
   defp current_head_comments(nil, _comments), do: []
 
@@ -266,7 +393,29 @@ defmodule SymphonyElixir.ReviewMonitor do
     |> Enum.join(" - ")
   end
 
+  defp feedback_item_summary(%{type: :thread, payload: thread}) do
+    comment = thread_latest_comment(thread)
+
+    location =
+      [
+        comment["path"],
+        line_fragment(comment)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(":")
+
+    [location, first_body_line(comment["body"]), comment["url"]]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" - ")
+  end
+
   defp feedback_item_summary(_item), do: "Review feedback"
+
+  defp thread_latest_comment(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    List.last(comments) || %{}
+  end
+
+  defp thread_latest_comment(_thread), do: %{}
 
   defp first_body_line(body) when is_binary(body) do
     body
@@ -318,6 +467,54 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
+  defp github_graphql(query, variables) when is_binary(query) and is_map(variables) do
+    case github_graphql_runner().(query, variables) do
+      {:ok, decoded} ->
+        {:ok, decoded}
+
+      {output, 0} when is_binary(output) ->
+        Jason.decode(output)
+
+      {output, exit_code} ->
+        {:error, {:github_graphql_failed, exit_code, summarize_output(output)}}
+
+      other ->
+        {:error, {:github_graphql_unexpected_result, other}}
+    end
+  rescue
+    error -> {:error, {:github_graphql_exception, Exception.message(error)}}
+  end
+
+  defp github_graphql_runner do
+    case Application.get_env(:symphony_elixir, :github_graphql_runner) do
+      runner when is_function(runner, 2) ->
+        runner
+
+      _ ->
+        fn query, variables ->
+          args =
+            ["api", "graphql"]
+            |> Kernel.++(
+              variables
+              |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+              |> Enum.flat_map(fn {key, value} -> ["-F", "#{key}=#{value}"] end)
+            )
+            |> Kernel.++(["-f", "query=#{query}"])
+
+          System.cmd("gh", args, stderr_to_stdout: true)
+        end
+    end
+  end
+
+  defp split_repo(repo) when is_binary(repo) do
+    case String.split(repo, "/", parts: 2) do
+      [owner, name] when owner != "" and name != "" -> {:ok, {owner, name}}
+      _ -> {:error, {:invalid_github_repo, repo}}
+    end
+  end
+
+  defp split_repo(repo), do: {:error, {:invalid_github_repo, repo}}
+
   defp pr_number(pr) when is_map(pr) do
     case pr["number"] do
       number when is_integer(number) -> number
@@ -327,6 +524,9 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp pr_number(_pr), do: nil
+
+  defp pr_url(pr) when is_map(pr), do: pr["html_url"]
+  defp pr_url(_pr), do: nil
 
   defp head_sha(pr) when is_map(pr), do: get_in(pr, ["head", "sha"])
   defp head_sha(_pr), do: nil

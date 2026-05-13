@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, ReviewMonitor, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, PromptBuilder, ReviewMonitor, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -325,6 +325,11 @@ defmodule SymphonyElixir.Orchestrator do
     def reconcile_no_durable_progress_for_test(%State{} = state) do
       reconcile_no_durable_progress_running_issues(state)
     end
+
+    @doc false
+    def complete_pushed_handoff_for_test(%Issue{} = issue) do
+      maybe_complete_pushed_review_handoff(issue)
+    end
   end
 
   @doc false
@@ -572,7 +577,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp git_durable_progress_times(workspace, started_at) do
-    [git_dirty_observed_at(workspace), git_ahead_commit_observed_at(workspace)]
+    [
+      git_dirty_observed_at(workspace),
+      git_ahead_commit_observed_at(workspace),
+      git_upstream_progress_observed_at(workspace)
+    ]
     |> Enum.reject(&is_nil/1)
     |> Enum.filter(&datetime_at_or_after?(&1, started_at))
   end
@@ -614,6 +623,39 @@ defmodule SymphonyElixir.Orchestrator do
         {_error, _exit_code} ->
           nil
       end
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp git_upstream_progress_observed_at(workspace) do
+    with true <- git_ref_exists?(workspace, "@{upstream}"),
+         {counts, 0} <-
+           System.cmd("git", ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+             cd: workspace,
+             stderr_to_stdout: true
+           ),
+         [_ahead, behind] <- String.split(String.trim(counts), ~r/\s+/, trim: true),
+         {behind_count, ""} <- Integer.parse(behind),
+         true <- behind_count > 0,
+         {upstream_ref, 0} <-
+           System.cmd("git", ["rev-parse", "--symbolic-full-name", "@{upstream}"],
+             cd: workspace,
+             stderr_to_stdout: true
+           ),
+         ref = String.trim(upstream_ref),
+         true <- String.starts_with?(ref, "refs/remotes/"),
+         {log_path, 0} <-
+           System.cmd("git", ["rev-parse", "--git-path", "logs/#{ref}"],
+             cd: workspace,
+             stderr_to_stdout: true
+           ) do
+      log_path
+      |> String.trim()
+      |> Path.expand(workspace)
+      |> file_mtime_datetime()
+    else
+      _ -> nil
     end
   rescue
     _error -> nil
@@ -777,11 +819,260 @@ defmodule SymphonyElixir.Orchestrator do
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
       if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
+        case maybe_complete_pushed_review_handoff(issue) do
+          {:completed, _handoff} ->
+            complete_issue(state_acc, issue.id)
+
+          {:blocked, _reason} ->
+            state_acc
+
+          :not_ready ->
+            dispatch_issue(state_acc, issue)
+        end
       else
         state_acc
       end
     end)
+  end
+
+  defp maybe_complete_pushed_review_handoff(%Issue{} = issue) do
+    case pushed_review_handoff_candidate(issue) do
+      {:ok, candidate} -> complete_pushed_review_handoff(issue, candidate)
+      :not_ready -> :not_ready
+      {:error, reason} -> {:blocked, reason}
+    end
+  end
+
+  defp maybe_complete_pushed_review_handoff(_issue), do: :not_ready
+
+  defp complete_pushed_review_handoff(%Issue{} = issue, candidate) do
+    with {:ok, inspection} <- inspect_pushed_review_handoff(issue, candidate),
+         :clean <- pushed_review_feedback_status(inspection),
+         {:ok, target_state} <- handoff_review_state(),
+         :ok <- Tracker.update_issue_state(issue.id, target_state) do
+      _ = Tracker.create_comment(issue.id, direct_handoff_comment(issue, candidate, inspection, target_state))
+      record_direct_handoff_event(candidate.workspace, issue, candidate, inspection, target_state)
+
+      Logger.info(
+        "Completed pushed review handoff without Codex worker: #{issue_context(issue)} state=#{target_state} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+      )
+
+      {:completed,
+       %{
+         target_state: target_state,
+         workspace: candidate.workspace,
+         branch: candidate.branch,
+         head_sha: candidate.head_sha,
+         pr_number: inspection.pr_number,
+         pr_url: inspection.pr_url
+       }}
+    else
+      :not_ready ->
+        :not_ready
+
+      :has_review_feedback ->
+        :not_ready
+
+      {:error, {:missing_pull_request, _candidate}} ->
+        :not_ready
+
+      {:error, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+
+      {:blocked, reason} ->
+        {:blocked, reason}
+    end
+  end
+
+  defp pushed_review_handoff_candidate(%Issue{} = issue) do
+    with {:ok, workspace} <- Workspace.path_for_issue(issue),
+         true <- File.dir?(workspace),
+         checkpoint when is_binary(checkpoint) and checkpoint != "" <- PromptBuilder.workspace_recovery_checkpoint(workspace),
+         true <- String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:"),
+         {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
+         {:ok, branch} <- git_output(workspace, ["branch", "--show-current"]),
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]) do
+      {:ok,
+       %{
+         workspace: workspace,
+         checkpoint: checkpoint,
+         status: String.trim(status),
+         branch: String.trim(branch),
+         head_sha: String.trim(head_sha)
+       }}
+    else
+      false -> :not_ready
+      "" -> :not_ready
+      {:error, reason} -> {:error, reason}
+      _ -> :not_ready
+    end
+  rescue
+    error -> {:error, {:pushed_handoff_candidate_failed, Exception.message(error)}}
+  end
+
+  defp inspect_pushed_review_handoff(%Issue{} = issue, %{branch: branch, workspace: workspace} = candidate) do
+    monitor = handoff_review_monitor(workspace)
+    issue = %{issue | branch_name: first_present(issue.branch_name, branch)}
+
+    case ReviewMonitor.inspect_issue(issue, monitor) do
+      {:ok, %{pr: nil}} ->
+        {:error, {:missing_pull_request, candidate}}
+
+      {:ok, inspection} ->
+        {:ok, Map.new(inspection)}
+
+      {:error, reason} ->
+        reason = {:pushed_handoff_review_inspection_failed, reason}
+        park_pushed_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+    end
+  end
+
+  defp pushed_review_feedback_status(%{feedback: feedback}) when is_list(feedback) do
+    if feedback == [] do
+      :clean
+    else
+      :has_review_feedback
+    end
+  end
+
+  defp pushed_review_feedback_status(_inspection), do: :has_review_feedback
+
+  defp handoff_review_state do
+    Config.settings!().review_monitor.states
+    |> Enum.find_value(fn state ->
+      state = state |> to_string() |> String.trim()
+      if state == "", do: nil, else: state
+    end)
+    |> case do
+      nil -> {:error, :missing_review_state}
+      state -> {:ok, state}
+    end
+  end
+
+  defp handoff_review_monitor(workspace) do
+    monitor = Config.settings!().review_monitor
+
+    repo =
+      case monitor.repo do
+        repo when is_binary(repo) and repo != "" -> repo
+        _ -> git_remote_repo(workspace)
+      end
+
+    %{monitor | repo: repo}
+  end
+
+  defp git_remote_repo(workspace) do
+    with {:ok, remote_url} <- git_output(workspace, ["remote", "get-url", "origin"]) do
+      remote_url
+      |> String.trim()
+      |> String.replace_prefix("https://github.com/", "")
+      |> String.replace_prefix("git@github.com:", "")
+      |> String.replace_suffix(".git", "")
+    else
+      _ -> nil
+    end
+  end
+
+  defp git_output(workspace, args) when is_binary(workspace) and is_list(args) do
+    case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> {:ok, output}
+      {output, exit_code} -> {:error, {:git_failed, args, exit_code, String.trim(output)}}
+    end
+  rescue
+    error -> {:error, {:git_exception, args, Exception.message(error)}}
+  end
+
+  defp first_present(primary, fallback) when is_binary(primary) do
+    case String.trim(primary) do
+      "" -> fallback
+      value -> value
+    end
+  end
+
+  defp first_present(_primary, fallback), do: fallback
+
+  defp direct_handoff_comment(%Issue{} = issue, candidate, inspection, target_state) do
+    """
+    Symphony completed the pushed review handoff without starting a new Codex worker because the existing workspace is clean, pushed, validated, and the current PR has no active current-head feedback.
+
+    - Issue: `#{issue.identifier}`
+    - New state: `#{target_state}`
+    - Branch: `#{candidate.branch}`
+    - Commit: `#{short_sha(candidate.head_sha)}`
+    - PR: #{pr_label(inspection)}
+
+    Validation evidence:
+    #{candidate.checkpoint}
+    """
+    |> String.trim()
+  end
+
+  defp pr_label(%{pr_url: url}) when is_binary(url) and url != "", do: url
+  defp pr_label(%{pr_number: number}) when not is_nil(number), do: "##{number}"
+  defp pr_label(_inspection), do: "unknown"
+
+  defp short_sha(sha) when is_binary(sha) and byte_size(sha) >= 10, do: binary_part(sha, 0, 10)
+  defp short_sha(sha) when is_binary(sha), do: sha
+  defp short_sha(_sha), do: "unknown"
+
+  defp record_direct_handoff_event(workspace, %Issue{} = issue, candidate, inspection, target_state)
+       when is_binary(workspace) do
+    event_dir = Path.join(workspace, ".orocsy/delivery/events")
+    File.mkdir_p!(event_dir)
+
+    event = %{
+      "event" => "handoff.completed",
+      "status" => "passed",
+      "ts" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "issue" => issue.identifier,
+      "branch" => candidate.branch,
+      "head_sha" => candidate.head_sha,
+      "pr_number" => inspection.pr_number,
+      "pr_url" => inspection.pr_url,
+      "state" => target_state,
+      "mode" => "direct-pushed-review-handoff"
+    }
+
+    File.write!(Path.join(event_dir, "events.jsonl"), Jason.encode!(event) <> "\n", [:append])
+  rescue
+    error ->
+      Logger.debug("Unable to record direct handoff event for #{issue_context(issue)}: #{Exception.message(error)}")
+  end
+
+  defp park_pushed_handoff_blocker(%Issue{} = issue, candidate, reason) do
+    failure = %{
+      action: :block,
+      kind: "handoff-review",
+      source_status: "blocked",
+      next_action: "retry",
+      summary:
+        "Symphony stopped before starting a Codex worker because this issue is at a pushed validated handoff checkpoint, but the runtime could not inspect or update the PR/Linear handoff state with bounded context.",
+      required_corrections: [
+        "Retry the PR/Linear handoff inspection when GitHub and Linear are available.",
+        "Do not start a full Codex worker for this handoff-only checkpoint unless current PR feedback requires code changes."
+      ]
+    }
+
+    correction_result =
+      Workspace.create_correction_in_workspace(
+        candidate.workspace,
+        issue,
+        %{
+          source: "symphony.runtime.handoff-review",
+          source_status: failure.source_status,
+          summary: failure.summary,
+          findings: [inspect(reason)],
+          required_corrections: failure.required_corrections,
+          next_action: failure.next_action
+        }
+      )
+
+    case correction_result do
+      {:ok, correction} -> maybe_comment_runtime_failure(issue, correction, failure)
+      {:error, correction_reason} -> Logger.warning("Unable to write pushed handoff blocker for #{issue_context(issue)}: #{inspect(correction_reason)}")
+    end
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do

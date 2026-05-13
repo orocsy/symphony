@@ -413,7 +413,10 @@ defmodule SymphonyElixir.Linear.Client do
     Req.post(Config.settings!().tracker.endpoint,
       headers: headers,
       json: payload,
-      connect_options: [timeout: @connect_timeout_ms],
+      connect_options: [
+        timeout: @connect_timeout_ms,
+        transport_opts: [cacertfile: System.get_env("SSL_CERT_FILE") || "/etc/ssl/cert.pem"]
+      ],
       receive_timeout: @request_timeout_ms
     )
   end

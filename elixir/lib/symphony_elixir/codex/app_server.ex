@@ -425,6 +425,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         {:error, {:turn_cancelled, Map.get(payload, "params")}}
 
+      {:ok, %{"method" => "error"} = payload} ->
+        emit_turn_event(
+          on_message,
+          :codex_error,
+          payload,
+          payload_string,
+          port,
+          Map.get(payload, "params", payload)
+        )
+
+        {:error, {:codex_error, Map.get(payload, "params", payload)}}
+
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
         case turn_token_budget_violation(payload, Config.settings!().codex.max_turn_total_tokens) do

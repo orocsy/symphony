@@ -13,13 +13,25 @@ defmodule SymphonyElixir.PromptBuilder do
   def build_prompt(issue, opts \\ []) do
     attempt = Keyword.get(opts, :attempt)
     workspace = Keyword.get(opts, :workspace)
+    checkpoint = workspace_recovery_checkpoint(workspace)
 
-    Workflow.current()
-    |> prompt_template!()
-    |> render_issue_template(issue, opts)
-    |> maybe_prepend_issue_brief(issue, workspace)
-    |> maybe_prepend_retry_prelude(attempt)
-    |> maybe_prepend_workspace_recovery_checkpoint(workspace)
+    prompt =
+      Workflow.current()
+      |> prompt_template!()
+      |> render_issue_template(issue, opts)
+      |> maybe_prepend_issue_brief(issue, workspace)
+      |> maybe_prepend_retry_prelude(attempt)
+
+    cond do
+      pushed_validated_handoff_checkpoint?(checkpoint) ->
+        pushed_validated_handoff_prompt(issue, checkpoint, attempt)
+
+      checkpoint != "" ->
+        checkpoint <> "\n\n" <> prompt
+
+      true ->
+        prompt
+    end
   end
 
   @spec workspace_recovery_checkpoint(String.t() | nil) :: String.t()
@@ -27,7 +39,8 @@ defmodule SymphonyElixir.PromptBuilder do
     with true <- File.dir?(workspace),
          {:ok, status} <- git_status(workspace) do
       event_summary = recent_passed_event_summary(workspace)
-      local_handoff? = local_handoff_risk?(status) or local_commit_handoff_risk?(workspace)
+      pushed_handoff? = pushed_handoff_risk?(status)
+      local_handoff? = local_handoff_risk?(status) or (not pushed_handoff? and local_commit_handoff_risk?(workspace))
 
       cond do
         local_handoff? and event_summary != "" ->
@@ -36,7 +49,7 @@ defmodule SymphonyElixir.PromptBuilder do
         local_handoff? ->
           unvalidated_local_handoff_checkpoint(status)
 
-        pushed_handoff_risk?(status) and event_summary != "" ->
+        pushed_handoff? and event_summary != "" ->
           pushed_validated_handoff_checkpoint(status, event_summary)
 
         true ->
@@ -150,13 +163,6 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
-  defp maybe_prepend_workspace_recovery_checkpoint(prompt, workspace) do
-    case workspace_recovery_checkpoint(workspace) do
-      "" -> prompt
-      checkpoint -> checkpoint <> "\n\n" <> prompt
-    end
-  end
-
   defp issue_brief(%{identifier: identifier}, workspace) when is_binary(identifier) and is_binary(workspace) do
     path = Path.join([workspace, ".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
 
@@ -238,6 +244,70 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     |> String.trim()
   end
+
+  defp pushed_validated_handoff_checkpoint?(checkpoint) when is_binary(checkpoint) do
+    String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:")
+  end
+
+  defp pushed_validated_handoff_checkpoint?(_checkpoint), do: false
+
+  defp pushed_validated_handoff_prompt(issue, checkpoint, attempt) do
+    """
+    #{checkpoint}
+
+    Minimal review handoff mode:
+
+    - This is #{attempt_label(attempt)} for an already pushed review/handoff checkpoint. Keep scope to the current ticket, current workspace branch/code, and the current GitHub/Codex PR review only.
+    - Active issue: `#{issue_value(issue, :identifier)}` — #{issue_value(issue, :title)}
+    - Issue URL: #{issue_value(issue, :url)}
+    - Current state: #{issue_value(issue, :state)}
+    - Description:
+    #{indent(truncate_issue_description(issue_value(issue, :description)))}
+
+    Allowed context:
+
+    - `git status --short --branch`, current branch/head, focused diffs/commits, and exact files named by current review feedback.
+    - The existing PR for the current branch, including current Codex/GitHub review threads, comments, reviews, and head SHA.
+    - Focused tests or type/lint checks that cover changed review-fix files.
+
+    Stop rules:
+
+    - Do not read AGENTS.md, skills, broad project docs, historical delivery logs, unrelated tickets, COD-149/COD-150 history, or broad GitHub/Linear context.
+    - If the PR exists, the pushed head matches this workspace, and all current review feedback is resolved/outdated/clean, update Linear to the configured review state with branch, PR, commit, validation evidence, and stop.
+    - If current review feedback remains, classify only that feedback, edit only the referenced code paths, run focused validation, commit, push, request/update Codex review, update Linear, and stop.
+    - If GitHub, Linear, git push, or approval blocks the handoff, record a retry/blocker correction and stop instead of rediscovering the project.
+    """
+    |> String.trim()
+  end
+
+  defp attempt_label(attempt) when is_integer(attempt) and attempt > 0, do: "retry attempt ##{attempt}"
+  defp attempt_label(_attempt), do: "the first turn"
+
+  defp issue_value(%_{} = issue, key), do: issue |> Map.from_struct() |> issue_value(key)
+
+  defp issue_value(issue, key) when is_map(issue) do
+    issue
+    |> Map.get(key)
+    |> case do
+      nil -> "unknown"
+      value when is_binary(value) and value != "" -> value
+      value when is_binary(value) -> "unknown"
+      value -> to_string(value)
+    end
+  end
+
+  defp issue_value(_issue, _key), do: "unknown"
+
+  defp truncate_issue_description(description) when is_binary(description) do
+    description
+    |> String.trim()
+    |> case do
+      "" -> "unknown"
+      text -> trim_issue_brief(text)
+    end
+  end
+
+  defp truncate_issue_description(_description), do: "unknown"
 
   defp git_status(workspace) do
     case System.cmd("git", ["status", "--short", "--branch"], cd: workspace, stderr_to_stdout: true) do
