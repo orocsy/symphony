@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -47,13 +47,40 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp maybe_prepare_dispatch_preflight(_workspace, _issue, worker_host) when is_binary(worker_host) do
-    {:ok, %{"mode" => "remote_worker_preflight_skipped"}}
+  defp maybe_prepare_dispatch_preflight(_workspace, issue, worker_host) when is_binary(worker_host) do
+    case remote_worker_review_feedback?(issue) do
+      {:ok, true} ->
+        {:error, {:remote_worker_review_preflight_unsupported, worker_host}}
+
+      {:ok, false} ->
+        {:ok, %{"mode" => "remote_worker_preflight_skipped"}}
+
+      {:error, reason} ->
+        {:error, {:remote_worker_review_preflight_failed, worker_host, reason}}
+    end
   end
 
   defp maybe_prepare_dispatch_preflight(workspace, issue, nil) do
     DispatchPreflight.prepare(workspace, issue)
   end
+
+  defp remote_worker_review_feedback?(%Issue{} = issue) do
+    monitor = Config.settings!().review_monitor
+
+    cond do
+      not monitor.enabled ->
+        {:ok, false}
+
+      true ->
+        case ReviewMonitor.inspect_issue(issue, monitor) do
+          {:ok, %{feedback: feedback}} when is_list(feedback) -> {:ok, feedback != []}
+          {:ok, _inspection} -> {:ok, false}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp remote_worker_review_feedback?(_issue), do: {:ok, false}
 
   defp codex_message_handler(recipient, issue) do
     fn message ->
