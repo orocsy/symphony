@@ -1657,6 +1657,126 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "runtime progress rescue preserves unrelated open blocking corrections" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-preserve-unrelated-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-preserve-unrelated-blocker",
+        identifier: "COD-152",
+        title: "Swipe feed UI",
+        state: "In Progress",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, runtime_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      assert {:ok, unrelated_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.environment",
+                 source_status: "blocked",
+                 summary: "Dependency installation failed with missing permission.",
+                 findings: ["permission denied while preparing workspace"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Handle pointer cancel without committing a swipe.",
+                 "commit_id" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 120,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_state_update, "issue-cod-152-preserve-unrelated-blocker", "Rework"}
+
+      runtime_path = Path.join(workspace, runtime_correction["artifacts"]["json"])
+      unrelated_path = Path.join(workspace, unrelated_correction["artifacts"]["json"])
+
+      resolved = runtime_path |> File.read!() |> Jason.decode!()
+      still_blocked = unrelated_path |> File.read!() |> Jason.decode!()
+
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "review_rework_needed"
+      assert still_blocked["status"] == "open"
+      assert still_blocked["resolved_at"] == nil
+      assert still_blocked["resolution_summary"] == ""
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "no durable progress correction waits when a newer Codex review request is pending" do
     test_root =
       Path.join(
@@ -6182,6 +6302,8 @@ defmodule SymphonyElixir.CoreTest do
       {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -6200,7 +6322,7 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 3,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3",
-                 "head" => %{"sha" => "abc123current", "ref" => "orocsy/mt-205"}
+                 "head" => %{"sha" => handoff_sha, "ref" => "orocsy/mt-205"}
                }
              ]}
 
@@ -6224,7 +6346,7 @@ defmodule SymphonyElixir.CoreTest do
            "data" => %{
              "repository" => %{
                "pullRequest" => %{
-                 "headRefOid" => "abc123current",
+                 "headRefOid" => handoff_sha,
                  "reviewThreads" => %{
                    "nodes" => [
                      %{
@@ -6266,6 +6388,125 @@ defmodule SymphonyElixir.CoreTest do
       events = File.read!(Path.join(event_dir, "events.jsonl"))
       assert events =~ ~s("event":"handoff.completed")
       assert events =~ "direct-pushed-review-handoff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator blocks pushed review handoff when live PR head differs from local checkpoint" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-direct-pushed-handoff-stale-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"]
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-direct-handoff-stale-head",
+        identifier: "MT-208",
+        title: "Do not complete stale pushed handoff",
+        description: "The PR branch advanced after local validation.",
+        state: "Rework",
+        branch_name: "orocsy/mt-208",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-208"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nReady locally.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add local handoff"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-208", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-208"], cd: workspace, stderr_to_stdout: true)
+      {local_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      local_head = String.trim(local_head)
+      live_head = "remote-advanced-head"
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-12T05:00:49Z"}\n)
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 3,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3",
+                 "head" => %{"sha" => live_head, "ref" => "orocsy/mt-208"}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => live_head,
+                 "reviewThreads" => %{
+                   "nodes" => [],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert {:blocked, {:pushed_handoff_head_mismatch, ^local_head, ^live_head}} =
+               Orchestrator.complete_pushed_handoff_for_test(issue)
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-stale-head", "Human Review"}, 50
+
+      [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.handoff-review"
+      assert Enum.join(correction["findings"], " ") =~ "pushed_handoff_head_mismatch"
     after
       File.rm_rf(test_root)
     end
@@ -6316,6 +6557,8 @@ defmodule SymphonyElixir.CoreTest do
       {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-206", "HEAD"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-206"], cd: workspace, stderr_to_stdout: true)
+      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -6334,7 +6577,7 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 3,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3",
-                 "head" => %{"sha" => "abc123current", "ref" => "orocsy/mt-206"}
+                 "head" => %{"sha" => handoff_sha, "ref" => "orocsy/mt-206"}
                }
              ]}
 
@@ -6343,7 +6586,7 @@ defmodule SymphonyElixir.CoreTest do
              [
                %{
                  "body" => "Fix the review target.",
-                 "commit_id" => "abc123current",
+                 "commit_id" => handoff_sha,
                  "path" => "README.md",
                  "line" => 3,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3#discussion"
@@ -6367,7 +6610,7 @@ defmodule SymphonyElixir.CoreTest do
            "data" => %{
              "repository" => %{
                "pullRequest" => %{
-                 "headRefOid" => "abc123current",
+                 "headRefOid" => handoff_sha,
                  "reviewThreads" => %{
                    "nodes" => [
                      %{
@@ -6450,6 +6693,8 @@ defmodule SymphonyElixir.CoreTest do
       {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-207", "HEAD"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-207"], cd: workspace, stderr_to_stdout: true)
+      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -6468,7 +6713,7 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 3,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3",
-                 "head" => %{"sha" => "abc123current", "ref" => "orocsy/mt-207"}
+                 "head" => %{"sha" => handoff_sha, "ref" => "orocsy/mt-207"}
                }
              ]}
 
@@ -6477,7 +6722,7 @@ defmodule SymphonyElixir.CoreTest do
              [
                %{
                  "body" => "Old current-head feedback before the fresh review request.",
-                 "commit_id" => "abc123current",
+                 "commit_id" => handoff_sha,
                  "path" => "README.md",
                  "line" => 3,
                  "created_at" => "2026-05-15T09:20:00Z",
@@ -6492,7 +6737,7 @@ defmodule SymphonyElixir.CoreTest do
             {:ok,
              [
                %{
-                 "body" => "@codex review\n\nFresh review requested after abc123current.",
+                 "body" => "@codex review\n\nFresh review requested after #{handoff_sha}.",
                  "created_at" => "2026-05-15T09:24:37Z",
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment"
                }
@@ -6509,7 +6754,7 @@ defmodule SymphonyElixir.CoreTest do
            "data" => %{
              "repository" => %{
                "pullRequest" => %{
-                 "headRefOid" => "abc123current",
+                 "headRefOid" => handoff_sha,
                  "reviewThreads" => %{
                    "nodes" => [
                      %{
@@ -7243,15 +7488,23 @@ defmodule SymphonyElixir.CoreTest do
         review_monitor_states: ["Human Review", "Rework"]
       )
 
+      pushed_handoff_sha = fn ->
+        workspace = Path.join(workspace_root, "MT-249")
+        {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+        String.trim(head_sha)
+      end
+
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
           String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            head_sha = pushed_handoff_sha.()
+
             {:ok,
              [
                %{
                  "number" => 3,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3",
-                 "head" => %{"sha" => "abc123current", "ref" => "orocsy/mt-249"}
+                 "head" => %{"sha" => head_sha, "ref" => "orocsy/mt-249"}
                }
              ]}
 
@@ -7270,12 +7523,14 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        head_sha = pushed_handoff_sha.()
+
         {:ok,
          %{
            "data" => %{
              "repository" => %{
                "pullRequest" => %{
-                 "headRefOid" => "abc123current",
+                 "headRefOid" => head_sha,
                  "reviewThreads" => %{
                    "nodes" => [
                      %{

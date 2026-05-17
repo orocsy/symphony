@@ -52,6 +52,9 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp rescue_issue(_issue), do: []
 
   defp classify_runtime_progress_block(%Issue{} = issue, workspace, corrections) do
+    progress_corrections = runtime_progress_corrections(corrections)
+    progress_correction_ids = correction_id_list(progress_corrections)
+
     case inspect_review_if_enabled(issue) do
       {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback} = inspection} when feedback != [] ->
         cond do
@@ -61,9 +64,9 @@ defmodule SymphonyElixir.RescueSupervisor do
             summary =
               "#{classification}: fresh Codex review feedback arrived after the latest review request; prior review-rework loop evidence is stale."
 
-            :ok = Workspace.resolve_blocking_corrections_in_workspace(workspace, summary)
+            :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, progress_correction_ids, summary)
             :ok = Tracker.update_issue_state(issue.id, Config.settings!().review_monitor.rework_state)
-            _ = Tracker.create_comment(issue.id, review_rework_comment(issue, corrections, classification, pr_number, pr_url, head_sha))
+            _ = Tracker.create_comment(issue.id, review_rework_comment(issue, progress_corrections, classification, pr_number, pr_url, head_sha))
 
             Logger.info("Rescue supervisor classified #{issue.identifier} as #{classification} after fresh review feedback for PR ##{pr_number}")
 
@@ -79,8 +82,8 @@ defmodule SymphonyElixir.RescueSupervisor do
             summary =
               "#{classification}: repeated review-rework runtime progress retries did not complete the dirty handoff under #{@worker_prompt_fix_version}."
 
-            :ok = Workspace.classify_blocking_corrections_in_workspace(workspace, classification, summary)
-            _ = Tracker.create_comment(issue.id, review_retry_loop_block_comment(issue, corrections, pr_number, pr_url, head_sha))
+            :ok = Workspace.classify_blocking_corrections_by_id_in_workspace(workspace, progress_correction_ids, classification, summary)
+            _ = Tracker.create_comment(issue.id, review_retry_loop_block_comment(issue, progress_corrections, pr_number, pr_url, head_sha))
 
             Logger.warning("Rescue supervisor classified #{issue.identifier} as #{classification}; leaving review-rework correction open")
 
@@ -90,9 +93,9 @@ defmodule SymphonyElixir.RescueSupervisor do
             classification = "review_rework_needed"
             summary = "#{classification}: PR ##{pr_number} has current-head review feedback."
 
-            :ok = Workspace.resolve_blocking_corrections_in_workspace(workspace, summary)
+            :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, progress_correction_ids, summary)
             :ok = Tracker.update_issue_state(issue.id, Config.settings!().review_monitor.rework_state)
-            _ = Tracker.create_comment(issue.id, review_rework_comment(issue, corrections, classification, pr_number, pr_url, head_sha))
+            _ = Tracker.create_comment(issue.id, review_rework_comment(issue, progress_corrections, classification, pr_number, pr_url, head_sha))
 
             Logger.info("Rescue supervisor classified #{issue.identifier} as #{classification} for PR ##{pr_number}")
 
@@ -692,6 +695,16 @@ defmodule SymphonyElixir.RescueSupervisor do
         String.contains?(findings, "no-durable-progress") or
         String.contains?(findings, "missing_first_durable_event")
     end)
+  end
+
+  defp runtime_progress_corrections(corrections) when is_list(corrections) do
+    Enum.filter(corrections, &runtime_progress_correction?([&1]))
+  end
+
+  defp correction_id_list(corrections) when is_list(corrections) do
+    corrections
+    |> Enum.map(& &1["correction_id"])
+    |> Enum.filter(&is_binary/1)
   end
 
   defp runtime_dispatch_config_correction?(corrections) when is_list(corrections) do

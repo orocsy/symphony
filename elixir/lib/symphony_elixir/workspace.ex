@@ -182,6 +182,84 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec resolve_blocking_corrections_by_id_in_workspace(Path.t(), [String.t()], String.t()) ::
+          :ok | {:error, term()}
+  def resolve_blocking_corrections_by_id_in_workspace(workspace, correction_ids, resolution_summary)
+      when is_binary(workspace) and is_list(correction_ids) and is_binary(resolution_summary) do
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      selected_ids = correction_id_set(correction_ids)
+
+      workspace
+      |> local_correction_files()
+      |> Enum.each(fn path ->
+        case read_local_blocking_correction(path) do
+          [%{"correction_id" => id} = correction] ->
+            if MapSet.member?(selected_ids, id) do
+              resolved =
+                correction
+                |> Map.put("status", "resolved")
+                |> Map.put("resolved_at", now)
+                |> Map.put("resolution_summary", resolution_summary)
+
+              File.write!(path, Jason.encode!(resolved, pretty: true) <> "\n")
+            end
+
+          _ ->
+            :ok
+        end
+      end)
+
+      :ok
+    else
+      false -> {:error, {:workspace_missing, workspace}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec classify_blocking_corrections_by_id_in_workspace(Path.t(), [String.t()], String.t(), String.t()) ::
+          :ok | {:error, term()}
+  def classify_blocking_corrections_by_id_in_workspace(workspace, correction_ids, classification, summary)
+      when is_binary(workspace) and is_list(correction_ids) and is_binary(classification) and is_binary(summary) do
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      selected_ids = correction_id_set(correction_ids)
+
+      workspace
+      |> local_correction_files()
+      |> Enum.each(fn path ->
+        case read_local_blocking_correction(path) do
+          [%{"correction_id" => id} = correction] ->
+            if MapSet.member?(selected_ids, id) do
+              classified =
+                correction
+                |> Map.put("classification", classification)
+                |> Map.put("classification_summary", summary)
+                |> Map.put("classified_at", now)
+
+              File.write!(path, Jason.encode!(classified, pretty: true) <> "\n")
+            end
+
+          _ ->
+            :ok
+        end
+      end)
+
+      :ok
+    else
+      false -> {:error, {:workspace_missing, workspace}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp correction_id_set(correction_ids) do
+    correction_ids
+    |> Enum.filter(&is_binary/1)
+    |> MapSet.new()
+  end
+
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->

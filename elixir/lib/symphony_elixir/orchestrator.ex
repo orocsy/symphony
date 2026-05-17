@@ -1122,22 +1122,53 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp complete_inspected_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
-    case pushed_review_feedback_status(inspection) do
-      :clean ->
-        finish_clean_pushed_review_handoff(issue, candidate, inspection)
+    case pushed_handoff_head_status(candidate, inspection) do
+      :current ->
+        case pushed_review_feedback_status(inspection) do
+          :clean ->
+            finish_clean_pushed_review_handoff(issue, candidate, inspection)
 
-      :has_review_feedback ->
-        if codex_review_request_pending?(inspection) do
-          Logger.info(
-            "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
-          )
+          :has_review_feedback ->
+            if codex_review_request_pending?(inspection) do
+              Logger.info(
+                "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+              )
 
-          {:blocked, :review_pending}
-        else
-          :not_ready
+              {:blocked, :review_pending}
+            else
+              :not_ready
+            end
         end
+
+      {:stale, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
     end
   end
+
+  defp pushed_handoff_head_status(%{head_sha: candidate_head}, inspection) do
+    live_head = inspection_head_sha(inspection)
+
+    cond do
+      !is_binary(candidate_head) or String.trim(candidate_head) == "" ->
+        {:stale, {:pushed_handoff_missing_local_head, live_head}}
+
+      !is_binary(live_head) or String.trim(live_head) == "" ->
+        {:stale, {:pushed_handoff_missing_live_pr_head, candidate_head}}
+
+      candidate_head == live_head ->
+        :current
+
+      true ->
+        {:stale, {:pushed_handoff_head_mismatch, candidate_head, live_head}}
+    end
+  end
+
+  defp inspection_head_sha(inspection) when is_map(inspection) do
+    Map.get(inspection, :head_sha) || Map.get(inspection, "head_sha")
+  end
+
+  defp inspection_head_sha(_inspection), do: nil
 
   defp finish_clean_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
     with {:ok, target_state} <- handoff_review_state(),
