@@ -740,7 +740,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp git_substantive_progress_times(workspace, started_at) do
     [
-      git_dirty_observed_at(workspace),
+      meaningful_git_dirty_observed_at(workspace),
       git_ahead_commit_observed_at(workspace),
       git_upstream_progress_observed_at(workspace)
     ]
@@ -771,6 +771,17 @@ defmodule SymphonyElixir.Orchestrator do
       {_error, _exit_code} ->
         nil
     end
+  rescue
+    _error -> nil
+  end
+
+  defp meaningful_git_dirty_observed_at(workspace) do
+    workspace
+    |> meaningful_git_dirty_paths()
+    |> Enum.map(&Path.join(workspace, &1))
+    |> Enum.map(&file_mtime_datetime/1)
+    |> Enum.reject(&is_nil/1)
+    |> latest_datetime()
   rescue
     _error -> nil
   end
@@ -2016,7 +2027,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp local_handoff_progress_observed_at(workspace) do
     [
-      git_dirty_observed_at(workspace),
+      meaningful_git_dirty_observed_at(workspace),
       git_ahead_commit_observed_at(workspace),
       git_upstream_progress_observed_at(workspace)
     ]

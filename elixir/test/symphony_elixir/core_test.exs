@@ -3364,6 +3364,56 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight degrades to fresh implementation when review inspection fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-dispatch-preflight-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-153-preflight-review-error",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation",
+        description: """
+        ## Write Scope
+        - src/app/api/recipes/**
+
+        ### MIU 1 - Recipe Chat
+        Generate recipe chat responses from accepted swipe context.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn _endpoint ->
+        {:error, :network_unavailable}
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert get_in(preflight, ["review", "feedback_source"]) == "inspection_failed"
+      assert get_in(preflight, ["review", "feedback_count"]) == 0
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight checkpoint satisfies first durable event guard" do
     test_root =
       Path.join(
@@ -4580,6 +4630,92 @@ defmodule SymphonyElixir.CoreTest do
       assert Map.has_key?(state.running, issue_id)
       assert MapSet.member?(state.claimed, issue_id)
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "generated runtime files do not bypass first durable event token budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-generated-first-event-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-generated-first-event"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-GENERATEDFIRST",
+        state: "In Progress",
+        title: "Generated first progress",
+        description: "Generated runtime files should not count as first substantive progress",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -2, :second)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      runtime_state = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(runtime_state)
+      File.write!(Path.join(runtime_state, "dispatch-preflight.json"), "{}\n")
+
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+      end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: worker_pid,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 1_500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      [_correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
     end

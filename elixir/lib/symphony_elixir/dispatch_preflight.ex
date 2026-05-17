@@ -93,7 +93,10 @@ defmodule SymphonyElixir.DispatchPreflight do
         {:ok, %{pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :disabled}}
 
       true ->
-        ReviewMonitor.inspect_issue(issue, monitor)
+        case ReviewMonitor.inspect_issue(issue, monitor) do
+          {:ok, inspection} -> {:ok, inspection}
+          {:error, reason} -> {:ok, review_inspection_failed(reason)}
+        end
     end
   end
 
@@ -104,6 +107,18 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp inspect_review(_issue), do: {:ok, %{pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
+
+  defp review_inspection_failed(reason) do
+    %{
+      pr: nil,
+      pr_number: nil,
+      pr_url: nil,
+      head_sha: nil,
+      feedback: [],
+      feedback_source: :inspection_failed,
+      inspection_error: inspect(reason)
+    }
+  end
 
   defp review_feedback?(%{feedback: feedback}) when is_list(feedback), do: feedback != []
   defp review_feedback?(_inspection), do: false
