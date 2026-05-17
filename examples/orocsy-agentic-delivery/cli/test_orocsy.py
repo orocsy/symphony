@@ -166,6 +166,24 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("outside declared scope", output)
 
+    def test_gate_declared_scope_allows_next_dynamic_route_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            self.run_cli(["--repo", str(repo), "init"])
+            route = repo / "src/app/api/recipe-chats/[chatId]/messages/route.ts"
+            route.parent.mkdir(parents=True)
+            route.write_text("export {}\n", encoding="utf-8")
+            (repo / ".orocsy/delivery/policy.yml").write_text(
+                "declared_scope:\n  - src/app/api/recipe-chats/[chatId]/messages/route.ts\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["--repo", str(repo), "gate", "declared-scope"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("declared-scope: passed", output)
+
     def test_gate_required_evidence_checks_files_and_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

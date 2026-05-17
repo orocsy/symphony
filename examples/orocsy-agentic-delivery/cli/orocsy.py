@@ -872,8 +872,28 @@ def artifact_patterns(config: dict[str, list[str]]) -> list[str]:
     return sorted({pattern for pattern in patterns if pattern.strip()})
 
 
+def escape_glob_route_brackets(pattern: str) -> str:
+    escaped = []
+    for char in pattern:
+        if char == "[":
+            escaped.append("[[]")
+        elif char == "]":
+            escaped.append("[]]")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
 def path_matches_any(path: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+    for pattern in patterns:
+        if path == pattern or fnmatch.fnmatch(path, pattern):
+            return True
+
+        escaped_pattern = escape_glob_route_brackets(pattern)
+        if escaped_pattern != pattern and fnmatch.fnmatch(path, escaped_pattern):
+            return True
+
+    return False
 
 
 def relative_path_is_child(path: str, root: str) -> bool:
