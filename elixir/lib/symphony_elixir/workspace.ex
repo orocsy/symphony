@@ -380,9 +380,18 @@ defmodule SymphonyElixir.Workspace do
 
   defp maybe_write_issue_requirements(workspace, %{} = issue, nil) do
     case IssueRequirements.write_workspace_files(workspace, issue) do
-      {:ok, _requirements} -> :ok
-      {:error, :no_issue_requirements} -> :ok
-      {:error, reason} -> {:error, reason}
+      {:ok, _requirements} ->
+        :ok
+
+      {:error, :no_issue_requirements} ->
+        :ok
+
+      {:error, {:missing_issue_requirements, _missing} = reason} ->
+        Logger.warning("Skipping partial issue requirements for workspace=#{workspace}: #{inspect(reason)}")
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

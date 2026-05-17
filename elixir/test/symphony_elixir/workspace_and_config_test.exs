@@ -1072,7 +1072,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "workspace hydration refuses parseable issue requirements with empty declared scope" do
+  test "workspace hydration does not abort on partial issue requirements" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -1099,8 +1099,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         """
       }
 
-      assert {:error, {:missing_issue_requirements, ["write_scope"]}} =
-               Workspace.create_for_issue(issue)
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/issue-requirements.json"))
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/state/current.json"))
     after
       File.rm_rf(workspace_root)
     end
