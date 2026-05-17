@@ -510,10 +510,22 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp truncate(value, max_bytes) when is_binary(value) and byte_size(value) > max_bytes do
-    binary_part(value, 0, max_bytes) <> "..."
+    utf8_prefix(value, max_bytes) <> "..."
   end
 
   defp truncate(value, _max_bytes), do: value
+
+  defp utf8_prefix(_value, max_bytes) when max_bytes <= 0, do: ""
+
+  defp utf8_prefix(value, max_bytes) do
+    candidate = binary_part(value, 0, max_bytes)
+
+    if String.valid?(candidate) do
+      candidate
+    else
+      utf8_prefix(value, max_bytes - 1)
+    end
+  end
 
   defp blank?(value), do: value in [nil, ""]
 end

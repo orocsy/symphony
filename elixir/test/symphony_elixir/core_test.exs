@@ -3398,6 +3398,93 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight keeps truncated multibyte review feedback valid UTF-8" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-dispatch-preflight-utf8-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-152-preflight-utf8",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow",
+        description: """
+        ## Write Scope
+        - src/features/swipe/**
+
+        ### MIU 1 - UTF-8 review feedback
+        Preserve current review feedback in dispatch preflight.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      review_body = String.duplicate("a", 1_199) <> "🙂 still review feedback"
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => review_body,
+                 "commit_id" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 81,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert [feedback] = get_in(preflight, ["review", "feedback"])
+      assert String.valid?(feedback["body"])
+      assert String.ends_with?(feedback["body"], "...")
+
+      preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+      assert {:ok, decoded} = preflight_path |> File.read!() |> Jason.decode()
+      assert decoded["review"]["feedback"] |> List.first() |> Map.fetch!("body") == feedback["body"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight records fresh implementation MIU checkpoint before Codex starts" do
     test_root =
       Path.join(
