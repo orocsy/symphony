@@ -2376,6 +2376,51 @@ defmodule SymphonyElixir.CoreTest do
              )
   end
 
+  test "review monitor confirms clean Codex result only after a review request" do
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review",
+               "created_at" => "2026-05-15T09:24:37Z"
+             },
+             %{
+               "body" => "Codex Review: Didn't find any major issues. Bravo.",
+               "created_at" => "2026-05-15T09:28:00Z"
+             }
+           ]}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/5/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "Codex Review: Didn't find any major issues. Bravo.",
+               "created_at" => "2026-05-15T09:28:00Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert {:ok, true} =
+             SymphonyElixir.ReviewMonitor.clean_codex_review_after_latest_request?(
+               "acme/nutribuddy",
+               %{"number" => 4}
+             )
+
+    assert {:ok, false} =
+             SymphonyElixir.ReviewMonitor.clean_codex_review_after_latest_request?(
+               "acme/nutribuddy",
+               %{"number" => 5}
+             )
+  end
+
   test "review monitor treats clean Codex result after latest request as clearing older active threads" do
     Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
       cond do
@@ -6556,7 +6601,19 @@ defmodule SymphonyElixir.CoreTest do
             {:ok, []}
 
           String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/3/comments?") ->
-            {:ok, []}
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review\n\nFinal review requested after #{handoff_sha}.",
+                 "created_at" => "2026-05-12T05:01:00Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment-review-request"
+               },
+               %{
+                 "body" => "Codex Review: Didn't find any major issues. Bravo.",
+                 "created_at" => "2026-05-12T05:05:00Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment-clean-review"
+               }
+             ]}
 
           true ->
             {:error, {:unexpected_endpoint, endpoint}}
@@ -7011,6 +7068,118 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:blocked, :review_pending} = Orchestrator.complete_pushed_handoff_for_test(issue)
       refute_receive {:memory_tracker_state_update, "issue-direct-handoff-review-pending", "Human Review"}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator does not complete clean pushed handoff without a clean Codex review result" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-direct-pushed-handoff-clean-review-missing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"]
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-direct-clean-handoff-review-missing",
+        identifier: "MT-252",
+        title: "Require clean review",
+        description: "No Codex review request or clean result exists yet.",
+        state: "Rework",
+        branch_name: "orocsy/mt-252",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-252"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed clean handoff.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Push clean handoff"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-252", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-252"], cd: workspace, stderr_to_stdout: true)
+      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      handoff_sha = String.trim(handoff_sha)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-17T23:08:00Z"}\n)
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 18,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/18",
+                 "head" => %{"sha" => handoff_sha, "ref" => "orocsy/mt-252"}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/18/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/18/reviews" ->
+            {:ok, []}
+
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/18/comments?") ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => handoff_sha,
+                 "reviewThreads" => %{
+                   "nodes" => [],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
+      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-missing", "Human Review"}, 50
     after
       File.rm_rf(test_root)
     end

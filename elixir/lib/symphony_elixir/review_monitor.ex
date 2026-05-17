@@ -157,6 +157,16 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   def codex_review_request_pending?(_repo, _pr, _feedback), do: {:ok, false}
 
+  @spec clean_codex_review_after_latest_request?(String.t() | nil, map() | nil) ::
+          {:ok, boolean()} | {:error, term()}
+  def clean_codex_review_after_latest_request?(repo, pr) when is_binary(repo) and is_map(pr) do
+    with {:ok, comments} <- fetch_issue_comments(repo, pr) do
+      {:ok, not is_nil(latest_clean_codex_review_after_latest_request_at(comments))}
+    end
+  end
+
+  def clean_codex_review_after_latest_request?(_repo, _pr), do: {:ok, false}
+
   @spec review_feedback_after_latest_codex_request?(String.t() | nil, map() | nil, list()) ::
           {:ok, boolean()} | {:error, term()}
   def review_feedback_after_latest_codex_request?(repo, pr, feedback)
