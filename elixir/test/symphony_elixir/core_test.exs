@@ -6573,129 +6573,84 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner blocks remote review rework when dispatch preflight would be required" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-agent-runner-remote-review-preflight-#{System.unique_integer([:positive])}"
-      )
-
-    previous_path = System.get_env("PATH")
-    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
-
+  test "agent runner routes remote review rework to a local preflight-capable worker" do
     on_exit(fn ->
-      restore_env("PATH", previous_path)
-      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
       Application.delete_env(:symphony_elixir, :github_api_runner)
       Application.delete_env(:symphony_elixir, :github_graphql_runner)
     end)
 
-    try do
-      trace_file = Path.join(test_root, "ssh.trace")
-      fake_ssh = Path.join(test_root, "ssh")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "~/.symphony-remote-workspaces",
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      worker_ssh_hosts: ["worker-a"]
+    )
 
-      File.mkdir_p!(test_root)
-      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+    issue = %Issue{
+      id: "issue-remote-review-preflight",
+      identifier: "MT-REMOTE-REWORK",
+      title: "Remote review rework needs preflight",
+      description: "Current PR feedback should not run remotely without preflight context.",
+      state: "Rework",
+      branch_name: "orocsy/mt-remote-rework"
+    }
 
-      File.write!(fake_ssh, """
-      #!/bin/sh
-      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
-      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 4,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+               "head" => %{"sha" => "remote-review-head", "ref" => "orocsy/mt-remote-rework"}
+             }
+           ]}
 
-      case "$*" in
-        *"__SYMPHONY_WORKSPACE__"*)
-          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' 'remote-workspaces/MT-REMOTE-REWORK'
-          exit 0
-          ;;
-        *)
-          exit 0
-          ;;
-      esac
-      """)
+        endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+          {:ok, []}
 
-      File.chmod!(fake_ssh, 0o755)
+        endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+          {:ok, []}
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: "~/.symphony-remote-workspaces",
-        review_monitor_enabled: true,
-        review_monitor_repo: "acme/nutribuddy",
-        worker_ssh_hosts: ["worker-a"]
-      )
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
 
-      issue = %Issue{
-        id: "issue-remote-review-preflight",
-        identifier: "MT-REMOTE-REWORK",
-        title: "Remote review rework needs preflight",
-        description: "Current PR feedback should not run remotely without preflight context.",
-        state: "Rework",
-        branch_name: "orocsy/mt-remote-rework"
-      }
-
-      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
-        cond do
-          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
-            {:ok,
-             [
-               %{
-                 "number" => 4,
-                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
-                 "head" => %{"sha" => "remote-review-head", "ref" => "orocsy/mt-remote-rework"}
-               }
-             ]}
-
-          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
-            {:ok, []}
-
-          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
-            {:ok, []}
-
-          true ->
-            {:error, {:unexpected_endpoint, endpoint}}
-        end
-      end)
-
-      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
-        {:ok,
-         %{
-           "data" => %{
-             "repository" => %{
-               "pullRequest" => %{
-                 "headRefOid" => "remote-review-head",
-                 "reviewThreads" => %{
-                   "nodes" => [
-                     %{
-                       "isResolved" => false,
-                       "isOutdated" => false,
-                       "comments" => %{
-                         "nodes" => [
-                           %{
-                             "body" => "Fix this before handoff.",
-                             "path" => "README.md",
-                             "line" => 3,
-                             "url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
-                           }
-                         ]
-                       }
+    Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+      {:ok,
+       %{
+         "data" => %{
+           "repository" => %{
+             "pullRequest" => %{
+               "headRefOid" => "remote-review-head",
+               "reviewThreads" => %{
+                 "nodes" => [
+                   %{
+                     "isResolved" => false,
+                     "isOutdated" => false,
+                     "comments" => %{
+                       "nodes" => [
+                         %{
+                           "body" => "Fix this before handoff.",
+                           "path" => "README.md",
+                           "line" => 3,
+                           "url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+                         }
+                       ]
                      }
-                   ],
-                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
-                 }
+                   }
+                 ],
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
                }
              }
            }
-         }}
-      end)
+         }
+       }}
+    end)
 
-      assert_raise RuntimeError, ~r/remote_worker_review_preflight_unsupported/, fn ->
-        AgentRunner.run(issue, nil, worker_host: "worker-a")
-      end
-
-      trace = File.read!(trace_file)
-      assert trace =~ "worker-a bash -lc"
-    after
-      File.rm_rf(test_root)
-    end
+    assert AgentRunner.selected_worker_host_for_test(issue, "worker-a") == nil
   end
 
   test "agent runner degrades remote review inspection failures to no feedback" do

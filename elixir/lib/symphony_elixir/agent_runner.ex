@@ -12,7 +12,9 @@ defmodule SymphonyElixir.AgentRunner do
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    worker_host =
+      issue
+      |> selected_worker_host_for_issue(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
@@ -47,15 +49,8 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp maybe_prepare_dispatch_preflight(_workspace, issue, worker_host) when is_binary(worker_host) do
-    case remote_worker_review_feedback?(issue) do
-      {:ok, true} ->
-        {:error, {:remote_worker_review_preflight_unsupported, worker_host}}
-
-      {:ok, false} ->
-        {:ok, %{"mode" => "remote_worker_preflight_skipped"}}
-    end
-  end
+  defp maybe_prepare_dispatch_preflight(_workspace, _issue, worker_host) when is_binary(worker_host),
+    do: {:ok, %{"mode" => "remote_worker_preflight_skipped"}}
 
   defp maybe_prepare_dispatch_preflight(workspace, issue, nil) do
     DispatchPreflight.prepare(workspace, issue)
@@ -81,6 +76,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   if Mix.env() == :test do
     def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
+    def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -264,6 +260,24 @@ defmodule SymphonyElixir.AgentRunner do
       host when is_binary(host) and host != "" -> host
       _ when hosts == [] -> nil
       _ -> List.first(hosts)
+    end
+  end
+
+  defp selected_worker_host_for_issue(issue, preferred_host, configured_hosts) do
+    worker_host = selected_worker_host(preferred_host, configured_hosts)
+
+    if is_binary(worker_host) and review_feedback_requires_local_worker?(issue) do
+      Logger.info("Routing #{issue_context(issue)} to local worker because current review feedback requires dispatch preflight")
+      nil
+    else
+      worker_host
+    end
+  end
+
+  defp review_feedback_requires_local_worker?(issue) do
+    case remote_worker_review_feedback?(issue) do
+      {:ok, true} -> true
+      {:ok, false} -> false
     end
   end
 
