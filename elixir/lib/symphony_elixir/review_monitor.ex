@@ -9,6 +9,7 @@ defmodule SymphonyElixir.ReviewMonitor do
   alias SymphonyElixir.Linear.Issue
 
   @review_feedback_states MapSet.new(["CHANGES_REQUESTED", "REQUEST_CHANGES"])
+  @issue_comments_per_page 100
   @review_threads_query """
   query SymphonyPullReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
     repository(owner: $owner, name: $name) {
@@ -257,8 +258,37 @@ defmodule SymphonyElixir.ReviewMonitor do
   defp fetch_issue_comments(repo, pr) do
     case pr_number(pr) do
       nil -> {:ok, []}
-      number -> github_api("repos/#{repo}/issues/#{number}/comments")
+      number -> fetch_issue_comments_page(repo, number, 1, [])
     end
+  end
+
+  defp fetch_issue_comments_page(repo, number, page, acc) do
+    endpoint =
+      "repos/#{repo}/issues/#{number}/comments?" <>
+        URI.encode_query(%{per_page: @issue_comments_per_page, page: page})
+
+    case github_api(endpoint) do
+      {:ok, comments} when is_list(comments) ->
+        page_size = length(comments)
+        comments = normalize_issue_comments(comments)
+        acc = acc ++ comments
+
+        if page_size < @issue_comments_per_page do
+          {:ok, acc}
+        else
+          fetch_issue_comments_page(repo, number, page + 1, acc)
+        end
+
+      {:ok, payload} ->
+        {:error, {:unexpected_issue_comments_payload, payload}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp normalize_issue_comments(comments) do
+    Enum.filter(comments, &is_map/1)
   end
 
   defp fetch_current_feedback(_repo, nil, _comments, _reviews), do: {:ok, [], :no_pr}

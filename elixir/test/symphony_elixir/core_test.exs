@@ -1851,7 +1851,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/4/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") ->
             {:ok,
              [
                %{
@@ -2269,6 +2269,71 @@ defmodule SymphonyElixir.CoreTest do
     assert :ok = SymphonyElixir.ReviewMonitor.run_once()
     refute_receive {:memory_tracker_state_update, "issue-cod-152-review-monitor-dedupe", "Rework"}, 50
     refute_receive {:memory_tracker_comment, "issue-cod-152-review-monitor-dedupe", _body}, 50
+  end
+
+  test "review request pending scans issue comment pages beyond the default first page" do
+    parent = self()
+
+    old_comments =
+      for id <- 1..100 do
+        %{
+          "body" => "Earlier issue comment #{id}.",
+          "created_at" => "2026-05-15T09:00:00Z"
+        }
+      end
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      send(parent, {:github_endpoint, endpoint})
+
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") and
+            Regex.match?(~r/(^|[?&])page=1(&|$)/, endpoint) ->
+          {:ok, old_comments}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") and
+            Regex.match?(~r/(^|[?&])page=2(&|$)/, endpoint) ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review\n\nFresh review requested after the pushed fix.",
+               "created_at" => "2026-05-15T09:24:37Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    feedback = [
+      %{
+        type: :thread,
+        payload: %{
+          "comments" => %{
+            "nodes" => [
+              %{"body" => "Old current-head feedback.", "createdAt" => "2026-05-15T09:20:00Z"}
+            ]
+          }
+        }
+      }
+    ]
+
+    assert {:ok, true} =
+             SymphonyElixir.ReviewMonitor.codex_review_request_pending?(
+               "acme/nutribuddy",
+               %{"number" => 4},
+               feedback
+             )
+
+    assert_receive {:github_endpoint, page_one}
+    assert page_one =~ ~r/(^|[?&])page=1(&|$)/
+    assert page_one =~ ~r/(^|[?&])per_page=100(&|$)/
+
+    assert_receive {:github_endpoint, page_two}
+    assert page_two =~ ~r/(^|[?&])page=2(&|$)/
+    assert page_two =~ ~r/(^|[?&])per_page=100(&|$)/
   end
 
   test "no durable progress correction without PR feedback retries after requirements hydration" do
@@ -3074,7 +3139,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/4/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") ->
             {:ok,
              [
                %{
@@ -6332,7 +6397,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/3/comments?") ->
             {:ok, []}
 
           true ->
@@ -6469,7 +6534,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/3/comments?") ->
             {:ok, []}
 
           true ->
@@ -6596,7 +6661,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/3/comments?") ->
             {:ok, []}
 
           true ->
@@ -6733,7 +6798,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/3/comments?") ->
             {:ok,
              [
                %{
@@ -7514,7 +7579,7 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
-          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/3/comments?") ->
             {:ok, []}
 
           true ->
