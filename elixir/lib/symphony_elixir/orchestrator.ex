@@ -1126,6 +1126,8 @@ defmodule SymphonyElixir.Orchestrator do
       :current ->
         case pushed_review_feedback_status(inspection) do
           :clean ->
+            clean_review_status = clean_codex_review_status(inspection)
+
             cond do
               codex_review_request_pending?(inspection) ->
                 Logger.info(
@@ -1134,15 +1136,20 @@ defmodule SymphonyElixir.Orchestrator do
 
                 {:blocked, :review_pending}
 
-              !clean_codex_review_confirmed?(inspection) ->
+              clean_review_status == :missing ->
                 Logger.info(
                   "Pushed review handoff needs a clean Codex review result before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
                 )
 
                 :not_ready
 
-              true ->
+              clean_review_status == :confirmed ->
                 finish_clean_pushed_review_handoff(issue, candidate, inspection)
+
+              true ->
+                reason = {:clean_codex_review_lookup_failed, clean_review_status}
+                park_pushed_handoff_blocker(issue, candidate, reason)
+                {:blocked, reason}
             end
 
           :has_review_feedback ->
@@ -1280,18 +1287,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp codex_review_request_pending?(_inspection), do: false
 
-  defp clean_codex_review_confirmed?(%{repo: repo, pr: pr}) do
+  defp clean_codex_review_status(%{repo: repo, pr: pr}) do
     case ReviewMonitor.clean_codex_review_after_latest_request?(repo, pr) do
-      {:ok, clean?} ->
-        clean?
+      {:ok, true} ->
+        :confirmed
+
+      {:ok, false} ->
+        :missing
 
       {:error, reason} ->
         Logger.debug("Unable to inspect clean Codex review result: #{inspect(reason)}")
-        false
+        {:error, reason}
     end
   end
 
-  defp clean_codex_review_confirmed?(_inspection), do: false
+  defp clean_codex_review_status(_inspection), do: :missing
 
   defp handoff_review_state do
     Config.settings!().review_monitor.states
