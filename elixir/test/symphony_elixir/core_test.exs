@@ -1657,6 +1657,120 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "no durable progress correction waits when a newer Codex review request is pending" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-review-pending-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-review-pending-rescue",
+        identifier: "COD-152",
+        title: "Swipe feed UI",
+        state: "In Progress",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard after pushing review fixes.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Handle pointer cancel without committing a swipe.",
+                 "commit_id" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 120,
+                 "created_at" => "2026-05-15T09:20:00Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/issues/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review\n\nFresh review requested after the pushed fix.",
+                 "created_at" => "2026-05-15T09:24:37Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#issuecomment"
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      refute_receive {:memory_tracker_state_update, "issue-cod-152-review-pending-rescue", "Rework"}, 50
+      refute_receive {:memory_tracker_comment, "issue-cod-152-review-pending-rescue", _body}, 50
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "no durable progress rescue does not inspect reviews when review monitor is disabled" do
     test_root =
       Path.join(

@@ -69,6 +69,10 @@ defmodule SymphonyElixir.RescueSupervisor do
 
             [issue.id]
 
+          codex_review_request_pending?(inspection) ->
+            Logger.info("Rescue supervisor kept #{issue.identifier} parked because a fresh Codex review request is pending")
+            [issue.id]
+
           review_rework_retry_loop_exhausted_without_new_progress?(workspace) ->
             classification = "worker_prompt_defect"
 
@@ -109,6 +113,7 @@ defmodule SymphonyElixir.RescueSupervisor do
          {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback} = inspection} when feedback != [] <-
            inspect_review_if_enabled(issue),
          false <- fresh_review_feedback_after_latest_codex_request?(inspection),
+         false <- codex_review_request_pending?(inspection),
          {:ok, correction} <-
            Workspace.create_correction_in_workspace(workspace, issue, %{
              source: "symphony.runtime.review-rework-retry-loop",
@@ -369,6 +374,20 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp fresh_review_feedback_after_latest_codex_request?(_inspection), do: false
+
+  defp codex_review_request_pending?(%{repo: repo, pr: pr, feedback: feedback})
+       when feedback != [] do
+    case ReviewMonitor.codex_review_request_pending?(repo, pr, feedback) do
+      {:ok, pending?} ->
+        pending?
+
+      {:error, reason} ->
+        Logger.debug("Rescue supervisor could not compare pending review request timestamps: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp codex_review_request_pending?(_inspection), do: false
 
   defp inspect_review_if_enabled(%Issue{} = issue) do
     monitor = Config.settings!().review_monitor
