@@ -57,7 +57,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
-         :ok <- authorize_linear_graphql(query, opts),
+         :ok <- authorize_linear_graphql(query, variables, opts),
          {:ok, response} <- linear_client.(query, variables, []) do
       graphql_response(response)
     else
@@ -91,10 +91,10 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
 
-  defp authorize_linear_graphql(query, opts) when is_binary(query) do
+  defp authorize_linear_graphql(query, variables, opts) when is_binary(query) do
     workspace = Keyword.get(opts, :workspace)
 
-    if review_rework_workspace?(workspace) and linear_issue_state_mutation?(query) do
+    if review_rework_workspace?(workspace) and linear_issue_state_mutation?(query, variables) do
       {:error, :review_rework_linear_state_mutation_blocked}
     else
       :ok
@@ -112,9 +112,28 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp review_rework_workspace?(_workspace), do: false
 
-  defp linear_issue_state_mutation?(query) when is_binary(query) do
-    query =~ ~r/\bmutation\b/i and query =~ ~r/\bissueUpdate\s*\(/ and query =~ ~r/\bstateId\b/
+  defp linear_issue_state_mutation?(query, variables) when is_binary(query) do
+    linear_issue_update_mutation?(query) and
+      (query =~ ~r/\bstateId\b/ or state_id_variable?(variables))
   end
+
+  defp linear_issue_update_mutation?(query) when is_binary(query) do
+    query =~ ~r/\bmutation\b/i and query =~ ~r/\bissueUpdate\s*\(/
+  end
+
+  defp state_id_variable?(variables) when is_map(variables) do
+    Enum.any?(variables, fn {key, value} -> state_id_key?(key) or state_id_variable?(value) end)
+  end
+
+  defp state_id_variable?(variables) when is_list(variables) do
+    Enum.any?(variables, &state_id_variable?/1)
+  end
+
+  defp state_id_variable?(_variables), do: false
+
+  defp state_id_key?("stateId"), do: true
+  defp state_id_key?(:stateId), do: true
+  defp state_id_key?(_key), do: false
 
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
