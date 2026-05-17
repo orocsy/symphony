@@ -393,8 +393,13 @@ defmodule SymphonyElixir.ReviewMonitor do
   defp latest_codex_review_request_at(_comments), do: nil
 
   defp codex_review_request_comment?(%{"body" => body}) when is_binary(body) do
-    normalized = String.downcase(body)
-    String.contains?(normalized, "@codex") and String.contains?(normalized, "review")
+    body
+    |> String.split("\n")
+    |> Enum.any?(fn line ->
+      line
+      |> String.trim()
+      |> String.match?(~r/^@codex\s+review(?:\b|$)/i)
+    end)
   end
 
   defp codex_review_request_comment?(_comment), do: false

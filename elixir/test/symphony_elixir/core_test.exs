@@ -2336,6 +2336,46 @@ defmodule SymphonyElixir.CoreTest do
     assert page_two =~ ~r/(^|[?&])per_page=100(&|$)/
   end
 
+  test "review request pending ignores guidance that quotes the codex review command" do
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "Review feedback found. Please request `@codex review` again after pushing the fix.",
+               "created_at" => "2026-05-15T09:24:37Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    feedback = [
+      %{
+        type: :thread,
+        payload: %{
+          "comments" => %{
+            "nodes" => [
+              %{"body" => "Current-head feedback.", "createdAt" => "2026-05-15T09:20:00Z"}
+            ]
+          }
+        }
+      }
+    ]
+
+    assert {:ok, false} =
+             SymphonyElixir.ReviewMonitor.codex_review_request_pending?(
+               "acme/nutribuddy",
+               %{"number" => 4},
+               feedback
+             )
+  end
+
   test "no durable progress correction without PR feedback retries after requirements hydration" do
     test_root =
       Path.join(
