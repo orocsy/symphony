@@ -28,12 +28,12 @@ defmodule SymphonyElixir.IssueRequirements do
         "expected_test_state" => scalar_section(description, "Expected Test State"),
         "test_activation" => scalar_section(description, "Test Activation"),
         "project" => "",
-        "write_scope" => section_list(description, "Write Scope"),
+        "write_scope" => write_scope(description),
         "shared_files" => section_list(description, "Shared Files"),
         "dependencies" => section_list(description, "Dependencies"),
         "mius" => miu_list(description),
         "validation" => validation(description),
-        "out_of_scope" => section_list(description, "Out Of Scope"),
+        "out_of_scope" => out_of_scope(description),
         "issue_brief" => issue_brief_reference(issue.identifier, workspace)
       }
 
@@ -66,8 +66,7 @@ defmodule SymphonyElixir.IssueRequirements do
   def write_workspace_files(_workspace, _issue), do: {:error, :invalid_workspace}
 
   defp requirements_description?(description) when is_binary(description) do
-    description =~ ~r/^##\s+(Write Scope|Validation|Required Tests|Out Of Scope)\s*$/mi or
-      description =~ ~r/^###\s+MIU\b/mi
+    description =~ ~r/^##\s+(Write Scope|Scope|Validation|Validation Commands|Required Tests|Out Of Scope)\s*$/mi
   end
 
   defp requirements_description?(_description), do: false
@@ -98,7 +97,7 @@ defmodule SymphonyElixir.IssueRequirements do
 
   defp validation(description) do
     commands =
-      section_text(description, "Validation")
+      validation_text(description)
       |> code_block_lines()
       |> Enum.concat(section_text(description, "Required Tests") |> bullet_lines())
       |> Enum.filter(&String.contains?(&1, ["pnpm", "mix", "npm", "yarn", "cargo", "pytest"]))
@@ -117,6 +116,15 @@ defmodule SymphonyElixir.IssueRequirements do
     }
   end
 
+  defp validation_text(description) do
+    [
+      section_text(description, "Validation"),
+      section_text(description, "Validation Commands")
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
   defp miu_list(description) do
     Regex.scan(~r/^###\s+(.+)$/m, description, capture: :all_but_first)
     |> List.flatten()
@@ -128,6 +136,18 @@ defmodule SymphonyElixir.IssueRequirements do
     description
     |> section_text(heading)
     |> bullet_lines()
+  end
+
+  defp write_scope(description) do
+    case section_list(description, "Write Scope") do
+      [] -> scope_subsection_list(description, "In")
+      scope -> scope
+    end
+  end
+
+  defp out_of_scope(description) do
+    (section_list(description, "Out Of Scope") ++ scope_subsection_list(description, "Out"))
+    |> Enum.uniq()
   end
 
   defp scalar_section(description, heading) do
@@ -163,6 +183,40 @@ defmodule SymphonyElixir.IssueRequirements do
     end)
     |> Enum.reject(&(&1 == "" or String.starts_with?(&1, ["In:", "Out:"])))
     |> Enum.map(&strip_markdown_code/1)
+  end
+
+  defp scope_subsection_list(description, heading) do
+    description
+    |> section_text("Scope")
+    |> subsection_text(heading)
+    |> bullet_lines()
+  end
+
+  defp subsection_text(text, heading) do
+    lines = String.split(text || "", "\n")
+
+    lines
+    |> Enum.reduce({false, []}, fn line, {collecting?, acc} ->
+      trimmed = String.trim(line)
+
+      cond do
+        String.downcase(trimmed) == String.downcase("#{heading}:") ->
+          {true, acc}
+
+        collecting? and String.match?(trimmed, ~r/^[A-Za-z][A-Za-z0-9 _-]*:\s*$/) ->
+          {false, acc}
+
+        collecting? ->
+          {collecting?, [line | acc]}
+
+        true ->
+          {collecting?, acc}
+      end
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+    |> Enum.join("\n")
+    |> String.trim()
   end
 
   defp code_block_lines(text) do

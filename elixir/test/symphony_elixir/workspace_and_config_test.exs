@@ -887,6 +887,92 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace hydration parses scope and validation commands template headings" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-template-issue-requirements-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-template-scope",
+        identifier: "COD-900",
+        title: "Template shaped workstream",
+        state: "In Progress",
+        branch_name: "orocsy/cod-900-template-shaped-workstream",
+        description: """
+        ## Scope
+
+        In:
+
+        - src/app/page.tsx
+        - tests/unit/page.test.ts
+
+        Out:
+
+        - docs/**
+
+        ## MIUs
+
+        ### MIU 1 - Page state
+
+        - Runtime path: `/`
+        - Validation command: `pnpm typecheck`
+
+        ## Validation Commands
+
+        ```bash
+        pnpm typecheck
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      requirements =
+        workspace
+        |> Path.join(".orocsy/delivery/issue-requirements.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert requirements["write_scope"] == ["src/app/page.tsx", "tests/unit/page.test.ts"]
+      assert requirements["out_of_scope"] == ["docs/**"]
+      assert requirements["validation"]["commands"] == ["pnpm typecheck"]
+
+      policy =
+        workspace
+        |> Path.join(".orocsy/delivery/policy.yml")
+        |> File.read!()
+
+      assert policy =~ "src/app/page.tsx"
+      assert policy =~ "tests/unit/page.test.ts"
+      assert policy =~ "pnpm typecheck"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "issue requirements fall back for MIU-only descriptions" do
+    issue = %Issue{
+      id: "issue-miu-only",
+      identifier: "COD-901",
+      title: "MIU-only placeholder",
+      state: "In Progress",
+      description: """
+      ### MIU 1 - Placeholder
+
+      - Runtime path:
+      - Exact tests:
+      """
+    }
+
+    assert {:error, :no_issue_requirements} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+  end
+
   test "workspace hydration converts descriptive write scope to declared-scope path patterns" do
     workspace_root =
       Path.join(
