@@ -3022,6 +3022,59 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight skips review inspection when monitor is disabled even with repo configured" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-disabled-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-168-review-disabled",
+        identifier: "COD-168",
+        title: "Recipe chat create route",
+        state: "In Progress",
+        branch_name: "orocsy/cod-168-recipe-chat-miu-create-route-and-harness",
+        description: """
+        ## Write Scope
+        - src/app/api/recipe-chats/route.ts
+
+        ### MIU 1 - Create Route
+        Create the recipe chat route.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        send(parent, {:unexpected_review_inspection, endpoint})
+        {:error, {:unexpected_endpoint, endpoint}}
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["review", "feedback_source"]) == "disabled"
+      assert get_in(preflight, ["review", "feedback_count"]) == 0
+      refute_receive {:unexpected_review_inspection, _endpoint}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight records current review feedback before Codex starts" do
     test_root =
       Path.join(

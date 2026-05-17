@@ -89,7 +89,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     monitor = Config.settings!().review_monitor
 
     cond do
-      not monitor.enabled and blank?(monitor.repo) ->
+      not monitor.enabled ->
         {:ok, %{pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :disabled}}
 
       true ->
