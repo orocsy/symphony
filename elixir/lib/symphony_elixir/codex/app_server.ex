@@ -470,13 +470,18 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_path_guard_patterns_for_paths(paths) do
     allowed_paths =
       paths
-      |> Enum.map(&Regex.escape/1)
+      |> Enum.map(&review_rework_allowed_path_pattern/1)
       |> Enum.join("|")
 
     [
       "(^|\\s)sed\\s+-n\\s+\\S+\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|$))",
       "(^|\\s)(cat|head|tail|nl)\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|$))"
     ]
+  end
+
+  defp review_rework_allowed_path_pattern(path) do
+    escaped = Regex.escape(path)
+    "(?:#{escaped}|'#{escaped}'|\"#{escaped}\")"
   end
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do

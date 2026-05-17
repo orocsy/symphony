@@ -80,6 +80,9 @@ defmodule SymphonyElixir.DispatchPreflight do
       {:error, :no_issue_requirements} ->
         {:ok, fallback_requirements(issue)}
 
+      {:error, {:missing_issue_requirements, _missing}} ->
+        {:ok, fallback_requirements(issue)}
+
       {:error, reason} ->
         {:error, reason}
     end

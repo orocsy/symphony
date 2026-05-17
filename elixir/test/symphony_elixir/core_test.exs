@@ -3285,6 +3285,49 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight falls back when issue requirements are partial" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-partial-requirements-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-partial-preflight",
+        identifier: "COD-PARTIAL",
+        title: "Partially structured issue",
+        state: "In Progress",
+        branch_name: "orocsy/cod-partial-preflight",
+        description: """
+        ## Validation
+        ```bash
+        pnpm typecheck
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["requirements", "identifier"]) == "COD-PARTIAL"
+      assert get_in(preflight, ["requirements", "write_scope"]) == []
+      assert get_in(preflight, ["requirements", "mius"]) == []
+      assert get_in(preflight, ["review", "feedback_source"]) == "disabled"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight records current review feedback before Codex starts" do
     test_root =
       Path.join(
