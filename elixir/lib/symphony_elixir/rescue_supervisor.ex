@@ -10,7 +10,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   @hydrated_retry_loop_limit 2
   @review_rework_loop_limit 2
-  @worker_prompt_fix_version "runtime-review-rework-observable-validation-policy-v15"
+  @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v16"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
   def run_once(issues) when is_list(issues) do
@@ -759,7 +759,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp worker_prompt_runtime_fix_summary do
-    "worker_prompt_defect_resolved_by_runtime_fix: #{@worker_prompt_fix_version} records review classification or technical MIU checkpoint before Codex starts, uses an isolated review-rework thread profile with compact base instructions, blocks broad search/refetch/sideways file-read commands including real exec_command function-call events, injects toolchain guidance so missing corepack/PATH is visible, treats successful focused validation function-call outputs as live durable progress, writes recent worker command/outcome evidence into runtime corrections, marks dispatch-preflight state as read-only worker context, blocks review-rework Linear terminal state mutations until a fresh review scan is clean, and forces dirty review handoffs to validate the dirty diff instead of rediscovering paths with git ls-files."
+    "worker_prompt_defect_resolved_by_runtime_fix: #{@worker_prompt_fix_version} records dispatch preflight as runtime-only context, keeps review classification and technical MIU trace as worker-required checkpoints, ignores runtime preflight as durable worker progress, injects base-branch, issue-brief, dependency, toolchain, and validation guidance, blocks broad search/refetch/sideways file-read commands including real exec_command function-call events, treats successful focused validation function-call outputs as live durable progress, writes recent worker command/outcome evidence into runtime corrections, blocks review-rework Linear terminal state mutations until a fresh review scan is clean, and forces dirty review handoffs to validate the dirty diff instead of rediscovering paths with git ls-files."
   end
 
   defp stale_worker_prompt_defect_resolved_comment(issue, corrections) do
@@ -771,7 +771,7 @@ defmodule SymphonyElixir.RescueSupervisor do
     - Issue: `#{issue.identifier}`
     - Correction: `#{correction_ids}`
     - Runtime dispatch fix: `#{@worker_prompt_fix_version}`
-    - Next action: redispatch is allowed; Symphony will record review classification or technical MIU checkpoint before Codex starts.
+    - Next action: redispatch is allowed; Symphony will record runtime preflight before Codex starts, but the worker must still produce real review classification, Technical MIU, file, test, commit, or blocker progress.
     """
     |> String.trim()
   end
@@ -883,7 +883,7 @@ defmodule SymphonyElixir.RescueSupervisor do
     - Issue: `#{issue.identifier}`
     - Correction: `#{correction_ids}`
     - Branch: `#{requirements["branch"] || issue.branch_name || "unknown"}`
-    - Dispatch preflight: hydrated `technical-miu-trace` was already recorded before this runtime progress correction
+    - Dispatch preflight: runtime-only preflight had already run before this runtime progress correction
     - Workspace progress: no dirty files, no commits ahead of `origin/main`
     - Runtime dispatch fix: `#{@worker_prompt_fix_version}`
     - Next action: keep the correction blocked; update the issue/worker handoff or make scoped file, test, blocker, or commit progress before redispatching.

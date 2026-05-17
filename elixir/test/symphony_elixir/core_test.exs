@@ -2367,6 +2367,9 @@ defmodule SymphonyElixir.CoreTest do
         - src/app/api/recipes/**
         - src/features/recipe-chat/**
 
+        ## Base Branch
+        orocsy/feature-recipe-chat-integration
+
         ### MIU 1 - Recipe Chat
         Generate recipe chat responses from accepted swipe context.
 
@@ -2494,12 +2497,13 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         Jason.encode!(%{
           "branch" => issue.branch_name,
-          "event" => "tool.finished",
+          "event" => "dispatch.preflight",
           "issue" => issue.identifier,
           "mode" => "fresh_implementation",
+          "required_worker_event" => "technical-miu-trace",
           "source" => "symphony.runtime.dispatch-preflight",
           "status" => "passed",
-          "tool" => "technical-miu-trace",
+          "tool" => "dispatch-preflight",
           "ts" => preflight_ts
         }) <> "\n"
       )
@@ -2535,7 +2539,7 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-cod-157-preflight-block", body}
       assert body =~ "worker_prompt_defect"
-      assert body =~ "hydrated `technical-miu-trace` was already recorded"
+      assert body =~ "runtime-only preflight had already run"
       refute body =~ "retry_with_hydrated_requirements"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
@@ -2580,6 +2584,9 @@ defmodule SymphonyElixir.CoreTest do
         ## Write Scope
         - src/app/api/recipes/**
         - src/features/recipe-chat/**
+
+        ## Base Branch
+        orocsy/feature-recipe-chat-integration
 
         ### MIU 1 - Recipe Chat
         Generate recipe chat responses from accepted swipe context.
@@ -2669,6 +2676,9 @@ defmodule SymphonyElixir.CoreTest do
         - src/app/api/recipes/**
         - src/features/recipe-chat/**
 
+        ## Base Branch
+        orocsy/feature-recipe-chat-integration
+
         ### MIU 1 - Recipe Chat
         Generate recipe chat responses from accepted swipe context.
 
@@ -2732,14 +2742,14 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_comment, "issue-cod-153-missing-first-event-loop", body}
       assert body =~ "worker_prompt_defect"
       assert body =~ "no dirty files"
-      assert body =~ "runtime-review-rework-observable-validation-policy-v15"
+      assert body =~ "runtime-preflight-worker-progress-contract-v16"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       classified = correction_path |> File.read!() |> Jason.decode!()
       assert classified["status"] == "open"
       assert classified["classification"] == "worker_prompt_defect"
       assert classified["classification_summary"] =~ "repeated runtime progress retries"
-      assert classified["classification_summary"] =~ "runtime-review-rework-observable-validation-policy-v15"
+      assert classified["classification_summary"] =~ "runtime-preflight-worker-progress-contract-v16"
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
@@ -2808,7 +2818,7 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-cod-153-stale-worker-prompt-defect", body}
       assert body =~ "resolved stale `worker_prompt_defect`"
-      assert body =~ "runtime-review-rework-observable-validation-policy-v15"
+      assert body =~ "runtime-preflight-worker-progress-contract-v16"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
@@ -2904,7 +2914,7 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-cod-152-mixed-stale-worker-prompt-defect", body}
       assert body =~ "resolved stale `worker_prompt_defect`"
-      assert body =~ "runtime-review-rework-observable-validation-policy-v15"
+      assert body =~ "runtime-preflight-worker-progress-contract-v16"
 
       resolved_corrections =
         workspace
@@ -2917,7 +2927,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert Enum.all?(
                resolved_corrections,
-               &String.contains?(&1["resolution_summary"], "runtime-review-rework-observable-validation-policy-v15")
+               &String.contains?(&1["resolution_summary"], "runtime-preflight-worker-progress-contract-v16")
              )
 
       refute Workspace.blocking_correction_in_workspace?(workspace)
@@ -2988,7 +2998,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-review-rework-observable-validation-policy-v15."
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v16."
                )
 
       progress_ts = DateTime.add(DateTime.utc_now(), 120, :second) |> DateTime.to_iso8601()
@@ -3115,7 +3125,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-review-rework-observable-validation-policy-v15."
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v16."
                )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
@@ -3274,7 +3284,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-review-rework-observable-validation-policy-v15."
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v16."
                )
 
       dirty_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
@@ -3389,7 +3399,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated runtime progress retries produced no branch, file, or commit progress under runtime-review-rework-observable-validation-policy-v15."
+                 "worker_prompt_defect: repeated runtime progress retries produced no branch, file, or commit progress under runtime-preflight-worker-progress-contract-v16."
                )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
@@ -3606,7 +3616,9 @@ defmodule SymphonyElixir.CoreTest do
       assert feedback["body"] =~ "server accepts"
 
       events = File.read!(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
-      assert events =~ ~s("tool":"review-feedback-classified")
+      assert events =~ ~s("event":"dispatch.preflight")
+      assert events =~ ~s("required_worker_event":"review-feedback-classified")
+      refute events =~ ~s("tool":"review-feedback-classified")
       assert events =~ "symphony.runtime.dispatch-preflight"
 
       prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
@@ -3615,7 +3627,8 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "src/features/swipe/SwipeDeck.tsx:81"
       assert prompt =~ "Open the recipe flow"
       assert prompt =~ "server accepts"
-      assert prompt =~ "Durable checkpoint already recorded: `review-feedback-classified`"
+      assert prompt =~ "Worker-required checkpoint: `review-feedback-classified`"
+      assert prompt =~ "Runtime preflight is not worker progress"
       assert prompt =~ "Target feedback file(s): `src/features/swipe/SwipeDeck.tsx`"
       assert prompt =~ "Toolchain preflight:"
       assert prompt =~ "Validation command guidance:"
@@ -3713,7 +3726,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "dispatch preflight records fresh implementation MIU checkpoint before Codex starts" do
+  test "dispatch preflight keeps fresh implementation checkpoint as worker-required progress" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -3740,6 +3753,9 @@ defmodule SymphonyElixir.CoreTest do
         - src/app/api/recipes/**
         - src/features/recipe-chat/**
 
+        ## Base Branch
+        orocsy/feature-recipe-chat-integration
+
         ### MIU 1 - Recipe Chat
         Generate recipe chat responses from accepted swipe context.
 
@@ -3751,6 +3767,8 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), "# COD-153 Brief\nTarget shape and focused tests.\n")
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -3765,6 +3783,8 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert get_in(preflight, ["requirements", "base_branch"]) == "orocsy/feature-recipe-chat-integration"
+      assert get_in(preflight, ["requirements", "issue_brief", "path"]) == ".orocsy/delivery/issue-brief.md"
       assert get_in(preflight, ["toolchain", "executables", "npm", "available"]) in [true, false]
 
       assert get_in(preflight, ["requirements", "write_scope"]) == [
@@ -3773,7 +3793,9 @@ defmodule SymphonyElixir.CoreTest do
              ]
 
       events = File.read!(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
-      assert events =~ ~s("tool":"technical-miu-trace")
+      assert events =~ ~s("event":"dispatch.preflight")
+      assert events =~ ~s("required_worker_event":"technical-miu-trace")
+      refute events =~ ~s("tool":"technical-miu-trace")
       assert events =~ "symphony.runtime.dispatch-preflight"
 
       state_file = Path.join(workspace, ".orocsy/delivery/state/current.json")
@@ -3783,9 +3805,14 @@ defmodule SymphonyElixir.CoreTest do
       prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
       assert String.starts_with?(prompt, "Runtime dispatch preflight:")
       assert prompt =~ "fresh implementation"
+      assert prompt =~ "Base/PR target branch: `orocsy/feature-recipe-chat-integration`"
+      assert prompt =~ "Issue technical brief is available on disk."
+      assert prompt =~ ".orocsy/delivery/issue-brief.md"
+      assert prompt =~ "Issue brief: `.orocsy/delivery/issue-brief.md`"
       assert prompt =~ "First MIU: MIU 1 - Recipe Chat"
       assert prompt =~ "First write-scope path: src/app/api/recipes/**"
-      assert prompt =~ "Durable checkpoint already recorded: `technical-miu-trace`"
+      assert prompt =~ "Worker-required checkpoint: `technical-miu-trace`"
+      assert prompt =~ "Runtime preflight is not worker progress"
       assert prompt =~ "Toolchain preflight:"
       assert prompt =~ "Validation command guidance:"
     after
@@ -3843,7 +3870,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "dispatch preflight checkpoint satisfies first durable event guard" do
+  test "runtime dispatch preflight does not satisfy first durable event guard" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -3902,8 +3929,12 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       state = Orchestrator.reconcile_no_durable_progress_for_test(state)
-      assert Map.has_key?(state.running, issue.id)
-      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      refute Map.has_key?(state.running, issue.id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+      assert correction["source"] == "symphony.runtime.missing-first-durable-event"
+      assert correction["guard"]["first_event_max_tokens"] == 1_000
     after
       File.rm_rf(test_root)
     end

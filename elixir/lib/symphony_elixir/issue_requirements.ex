@@ -240,10 +240,16 @@ defmodule SymphonyElixir.IssueRequirements do
     relative_path = Path.join([".codex/agentic/issue-briefs", "#{safe_identifier(identifier)}.md"])
     path = Path.join(workspace, relative_path)
 
-    if File.regular?(path) do
-      %{"path" => relative_path, "bytes" => File.stat!(path).size}
-    else
-      nil
+    cond do
+      File.regular?(path) ->
+        %{"path" => relative_path, "bytes" => File.stat!(path).size}
+
+      File.regular?(Path.join(workspace, ".orocsy/delivery/issue-brief.md")) ->
+        delivery_path = ".orocsy/delivery/issue-brief.md"
+        %{"path" => delivery_path, "bytes" => File.stat!(Path.join(workspace, delivery_path)).size}
+
+      true ->
+        nil
     end
   end
 

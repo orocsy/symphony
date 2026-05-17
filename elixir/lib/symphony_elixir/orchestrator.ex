@@ -982,7 +982,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp durable_progress_guard_tokens(_running_entry, total_tokens), do: total_tokens
 
-  defp count_dispatch_preflight_progress?(running_entry), do: not review_rework_running_entry?(running_entry)
+  defp count_dispatch_preflight_progress?(_running_entry), do: false
 
   defp review_rework_running_entry?(%{workspace_path: workspace}) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do

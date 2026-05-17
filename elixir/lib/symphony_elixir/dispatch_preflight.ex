@@ -23,7 +23,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         end
 
       :ok = write_preflight(workspace, preflight)
-      :ok = append_checkpoint_event(workspace, preflight)
+      :ok = append_preflight_event(workspace, preflight)
       :ok = merge_current_state(workspace, preflight)
 
       {:ok, preflight}
@@ -181,15 +181,16 @@ defmodule SymphonyElixir.DispatchPreflight do
     :ok
   end
 
-  defp append_checkpoint_event(workspace, preflight) do
+  defp append_preflight_event(workspace, preflight) do
     event = %{
-      "event" => "tool.finished",
+      "event" => "dispatch.preflight",
       "status" => "passed",
-      "tool" => preflight["checkpoint_event"],
+      "tool" => "dispatch-preflight",
       "ts" => now_iso8601(),
       "issue" => preflight["issue"],
       "branch" => preflight["branch"],
       "mode" => preflight["mode"],
+      "required_worker_event" => preflight["checkpoint_event"],
       "step" => preflight["first_task"],
       "source" => "symphony.runtime.dispatch-preflight"
     }
@@ -229,7 +230,8 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Branch: `#{preflight["branch"] || "unknown"}`
     - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
     - Reviewed head: `#{short_sha(review["head_sha"])}`
-    - Durable checkpoint already recorded: `#{preflight["checkpoint_event"]}`
+    - Worker-required checkpoint: `#{preflight["checkpoint_event"]}` after classifying current-head feedback.
+    - Runtime preflight is not worker progress and is not proof that review classification, validation, push, or handoff is complete.
     - Preflight file is read-only runtime context; do not edit it.
     - First task: #{preflight["first_task"]}
     - Target feedback file(s): #{format_inline_items(feedback_paths(feedback))}
@@ -244,12 +246,14 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Read only directly related tests, imported local types, or the nearest caller before the first edit.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first edit unless listed above.
     - Produce a scoped edit plus focused validation, or record an explicit blocker/correction. Do not stop after analysis.
+    - Do not create/update a PR, request review, or update Linear handoff until this turn has produced real scoped code/test progress or a valid blocker.
     """
     |> String.trim()
   end
 
   defp fresh_prompt_context(preflight) do
     requirements = preflight["requirements"] || %{}
+    base_branch = requirements["base_branch"] || requirements["integration_branch"] || "unknown"
 
     """
     Runtime dispatch preflight:
@@ -257,15 +261,20 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Mode: fresh implementation
     - Preflight file: `#{@preflight_path}`
     - Branch: `#{preflight["branch"] || "unknown"}`
-    - Durable checkpoint already recorded: `#{preflight["checkpoint_event"]}`
+    - Base/PR target branch: `#{base_branch}`
+    - Worker-required checkpoint: `#{preflight["checkpoint_event"]}` after writing a real Technical MIU trace or scoped blocker.
+    - Runtime preflight is not worker progress and is not proof that implementation, validation, push, or handoff is complete.
     - First task: #{preflight["first_task"]}
     - First MIU: #{first_item(requirements["mius"])}
     - First write-scope path: #{first_item(requirements["write_scope"])}
     - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
+    - Issue brief: #{format_issue_brief(requirements["issue_brief"])}
+    - Dependencies: #{format_inline_items(requirements["dependencies"] || [])}
+    - Test activation: #{requirements["test_activation"] || "unknown"}
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
     - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
 
-    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker.
+    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. Do not create/update a PR, request review, or update Linear handoff until this turn has produced real code/test progress, run the required validation, and created a commit on the issue branch.
     """
     |> String.trim()
   end
@@ -375,7 +384,25 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp validation_script_hint(_scripts), do: ""
 
   defp compact_requirements(requirements) when is_map(requirements) do
-    Map.take(requirements, ["identifier", "title", "state", "branch", "write_scope", "dependencies", "mius", "validation", "out_of_scope", "issue_brief"])
+    Map.take(requirements, [
+      "identifier",
+      "title",
+      "state",
+      "branch",
+      "base_branch",
+      "integration_branch",
+      "feature_group",
+      "ticket_type",
+      "expected_test_state",
+      "test_activation",
+      "write_scope",
+      "shared_files",
+      "dependencies",
+      "mius",
+      "validation",
+      "out_of_scope",
+      "issue_brief"
+    ])
   end
 
   defp compact_requirements(_requirements), do: %{}
@@ -466,6 +493,12 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp format_inline_items([]), do: "unknown"
   defp format_inline_items(items), do: Enum.map_join(items, ", ", &"`#{&1}`")
+
+  defp format_issue_brief(%{"path" => path, "bytes" => bytes}) when is_binary(path) do
+    "`#{path}` (#{bytes} bytes)"
+  end
+
+  defp format_issue_brief(_issue_brief), do: "none"
 
   defp indent_multiline(text, prefix) when is_binary(text) do
     text

@@ -278,10 +278,13 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp issue_brief_reference(%{identifier: identifier}, workspace) when is_binary(identifier) and is_binary(workspace) do
-    relative_path = Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
-    path = Path.join(workspace, relative_path)
+    relative_paths = [
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"]),
+      ".orocsy/delivery/issue-brief.md"
+    ]
 
-    with true <- File.regular?(path),
+    with relative_path when is_binary(relative_path) <- Enum.find(relative_paths, &File.regular?(Path.join(workspace, &1))),
+         path = Path.join(workspace, relative_path),
          {:ok, stat} <- File.stat(path) do
       %{
         bytes: stat.size,
