@@ -1090,19 +1090,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_complete_pushed_review_handoff(_issue), do: :not_ready
 
   defp complete_pushed_review_handoff(%Issue{} = issue, candidate) do
-    case inspect_pushed_review_handoff(issue, candidate) do
-      {:ok, inspection} ->
-        complete_inspected_pushed_review_handoff(issue, candidate, inspection)
+    if Config.settings!().review_monitor.enabled do
+      case inspect_pushed_review_handoff(issue, candidate) do
+        {:ok, inspection} ->
+          complete_inspected_pushed_review_handoff(issue, candidate, inspection)
 
-      {:error, {:missing_pull_request, _candidate}} ->
-        :not_ready
+        {:error, {:missing_pull_request, _candidate}} ->
+          :not_ready
 
-      {:error, reason} ->
-        park_pushed_handoff_blocker(issue, candidate, reason)
-        {:blocked, reason}
+        {:error, reason} ->
+          park_pushed_handoff_blocker(issue, candidate, reason)
+          {:blocked, reason}
 
-      {:blocked, reason} ->
-        {:blocked, reason}
+        {:blocked, reason} ->
+          {:blocked, reason}
+      end
+    else
+      :not_ready
     end
   end
 

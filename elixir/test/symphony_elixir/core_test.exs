@@ -5673,6 +5673,89 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "orchestrator skips pushed review handoff inspection when monitor is disabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-disabled-direct-pushed-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_enabled: false,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"]
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-disabled-direct-handoff",
+        identifier: "MT-204",
+        title: "Leave disabled monitor handoff alone",
+        description: "Review monitor is disabled for this deployment.",
+        state: "Rework",
+        url: "https://linear.example/MT-204",
+        branch_name: "orocsy/mt-204",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nReady.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add ready handoff"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-204", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-12T05:00:49Z"}\n)
+      )
+
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        send(parent, {:unexpected_review_inspection, endpoint})
+        {:error, {:unexpected_endpoint, endpoint}}
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, variables ->
+        send(parent, {:unexpected_review_graphql_inspection, variables})
+        {:error, {:unexpected_graphql_variables, variables}}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
+      refute_receive {:memory_tracker_state_update, "issue-disabled-direct-handoff", "Human Review"}, 50
+      refute_receive {:memory_tracker_comment, "issue-disabled-direct-handoff", _body}, 50
+      refute_receive {:unexpected_review_inspection, _endpoint}, 50
+      refute_receive {:unexpected_review_graphql_inspection, _variables}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator completes clean pushed review handoff without starting a Codex worker" do
     test_root =
       Path.join(
@@ -5686,6 +5769,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"]
       )
@@ -5820,6 +5904,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"]
       )
@@ -5953,6 +6038,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"]
       )
