@@ -54,9 +54,6 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:ok, false} ->
         {:ok, %{"mode" => "remote_worker_preflight_skipped"}}
-
-      {:error, reason} ->
-        {:error, {:remote_worker_review_preflight_failed, worker_host, reason}}
     end
   end
 
@@ -75,12 +72,16 @@ defmodule SymphonyElixir.AgentRunner do
         case ReviewMonitor.inspect_issue(issue, monitor) do
           {:ok, %{feedback: feedback}} when is_list(feedback) -> {:ok, feedback != []}
           {:ok, _inspection} -> {:ok, false}
-          {:error, reason} -> {:error, reason}
+          {:error, _reason} -> {:ok, false}
         end
     end
   end
 
   defp remote_worker_review_feedback?(_issue), do: {:ok, false}
+
+  if Mix.env() == :test do
+    def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
+  end
 
   defp codex_message_handler(recipient, issue) do
     fn message ->

@@ -6698,6 +6698,30 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner degrades remote review inspection failures to no feedback" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy"
+    )
+
+    issue = %Issue{
+      id: "issue-remote-review-error",
+      identifier: "MT-REMOTE-REVIEW-ERROR",
+      title: "Remote review inspection error",
+      description: "Remote dispatch should not block on transient GitHub errors.",
+      state: "In Progress",
+      branch_name: "orocsy/mt-remote-review-error"
+    }
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn _endpoint ->
+      {:error, :network_unavailable}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert {:ok, false} = AgentRunner.remote_worker_review_feedback_for_test(issue)
+  end
+
   test "agent runner continues with a follow-up turn while the issue remains active" do
     test_root =
       Path.join(
