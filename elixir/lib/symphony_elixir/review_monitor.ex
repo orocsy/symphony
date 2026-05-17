@@ -401,8 +401,14 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp review_request_pending_after_feedback?(comments, feedback) do
     with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
-         %DateTime{} = feedback_at <- latest_review_feedback_at(feedback) do
-      DateTime.compare(request_at, feedback_at) == :gt
+         feedback_at <- latest_review_feedback_at(feedback) do
+      case feedback_at do
+        %DateTime{} = feedback_at ->
+          DateTime.compare(request_at, feedback_at) == :gt
+
+        nil ->
+          is_nil(latest_clean_codex_review_after_latest_request_at(comments))
+      end
     else
       _ -> false
     end

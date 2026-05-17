@@ -1126,7 +1126,15 @@ defmodule SymphonyElixir.Orchestrator do
       :current ->
         case pushed_review_feedback_status(inspection) do
           :clean ->
-            finish_clean_pushed_review_handoff(issue, candidate, inspection)
+            if codex_review_request_pending?(inspection) do
+              Logger.info(
+                "Pushed review handoff is waiting for clean Codex review before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+              )
+
+              {:blocked, :review_pending}
+            else
+              finish_clean_pushed_review_handoff(issue, candidate, inspection)
+            end
 
           :has_review_feedback ->
             if codex_review_request_pending?(inspection) do
