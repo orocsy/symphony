@@ -1244,6 +1244,96 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace creates missing Linear branch from template branch contract base" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-branch-create-from-contract-base-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      integration_branch = "orocsy/feature-recipe-chat-integration"
+      issue_branch = "orocsy/cod-202-follow-up-route"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", integration_branch], cd: source_repo, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(source_repo, "src/app/api/recipe-chats/[chatId]/messages"))
+
+      File.write!(
+        Path.join(source_repo, "src/app/api/recipe-chats/[chatId]/messages/route.ts"),
+        "export const fromIntegration = true;\n"
+      )
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "src/app/api/recipe-chats/[chatId]/messages/route.ts"], cd: source_repo)
+
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add follow-up route contract"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-202",
+        identifier: "COD-202",
+        title: "Follow-up route",
+        state: "Ready for Symphony",
+        branch_name: issue_branch,
+        description: """
+        ## Branch / PR Contract
+
+        - Branch: use Linear branch name.
+        - Base: `#{integration_branch}`
+        - PR: target the integration branch.
+        - Merge behavior: workflow owner merges after review.
+
+        ## Scope
+
+        In:
+
+        - src/app/api/recipe-chats/[chatId]/messages/route.ts
+
+        Out:
+
+        - src/app/page.tsx
+
+        ## MIUs
+
+        ### MIU 1 - Follow-Up Route
+
+        - Runtime path: POST /api/recipe-chats/[chatId]/messages
+
+        ## Validation Commands
+
+        ```bash
+        pnpm typecheck
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == issue_branch
+
+      assert File.regular?(Path.join(workspace, "src/app/api/recipe-chats/[chatId]/messages/route.ts"))
+
+      assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
+      refute String.contains?(status, "origin/main")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",

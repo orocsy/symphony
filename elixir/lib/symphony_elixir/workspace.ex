@@ -500,11 +500,11 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp issue_branch_base_names(%{description: description}) when is_binary(description) do
-    [description_scalar_section(description, "Base Branch"), description_scalar_section(description, "Integration Branch")]
+    description_branch_base_names(description)
   end
 
   defp issue_branch_base_names(%{"description" => description}) when is_binary(description) do
-    [description_scalar_section(description, "Base Branch"), description_scalar_section(description, "Integration Branch")]
+    description_branch_base_names(description)
   end
 
   defp issue_branch_base_names(%{base_branch: base_branch, integration_branch: integration_branch}) do
@@ -517,11 +517,21 @@ defmodule SymphonyElixir.Workspace do
 
   defp issue_branch_base_names(_issue_or_identifier), do: []
 
-  defp description_scalar_section(description, heading) do
-    pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
+  defp description_branch_base_names(description) do
+    [
+      description_scalar_section(description, "Base Branch"),
+      description_scalar_section(description, "Integration Branch"),
+      description_contract_field(description, ["Base", "Base Branch", "Base and PR target"]),
+      description_contract_field(description, ["Integration Branch", "Integration"])
+    ]
+  end
 
-    case Regex.run(pattern, description || "", capture: :all_but_first) do
-      [body] ->
+  defp description_scalar_section(description, heading) do
+    case description_section_body(description, heading) do
+      "" ->
+        nil
+
+      body ->
         body
         |> String.split("\n")
         |> Enum.map(fn line ->
@@ -534,9 +544,69 @@ defmodule SymphonyElixir.Workspace do
         end)
         |> Enum.reject(&(&1 == ""))
         |> List.first()
+    end
+  end
 
-      _ ->
-        nil
+  defp description_contract_field(description, labels) do
+    description
+    |> description_section_body("Branch / PR Contract")
+    |> String.split("\n")
+    |> Enum.find_value(fn line ->
+      line = clean_contract_line(line)
+      downcased = String.downcase(line)
+
+      Enum.find_value(labels, fn label ->
+        prefix = "#{String.downcase(label)}:"
+
+        if String.starts_with?(downcased, prefix) do
+          line
+          |> String.slice(String.length(prefix), String.length(line) - String.length(prefix))
+          |> clean_contract_value()
+        end
+      end)
+    end)
+  end
+
+  defp description_section_body(description, heading) do
+    pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
+
+    case Regex.run(pattern, description || "", capture: :all_but_first) do
+      [body] -> body
+      _ -> ""
+    end
+  end
+
+  defp clean_contract_line(line) do
+    line
+    |> String.trim()
+    |> String.trim_leading("*")
+    |> String.trim_leading("-")
+    |> String.trim()
+  end
+
+  defp clean_contract_value(value) do
+    value = String.trim(value || "")
+
+    value =
+      case Regex.run(~r/`([^`]+)`/, value, capture: :all_but_first) do
+        [code] -> code
+        _ -> value
+      end
+
+    branch =
+      value
+      |> String.trim()
+      |> String.split(~r/\s+/, parts: 2)
+      |> List.first()
+      |> String.trim("`")
+      |> String.trim_trailing(".")
+      |> String.trim_trailing(",")
+      |> String.trim_trailing(";")
+      |> String.trim()
+
+    case branch do
+      "" -> nil
+      branch -> branch
     end
   end
 
