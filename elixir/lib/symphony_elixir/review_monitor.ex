@@ -297,19 +297,25 @@ defmodule SymphonyElixir.ReviewMonitor do
     if review_threads_enabled?() do
       case fetch_pull_review_threads(repo, pr) do
         {:ok, threads} ->
-          {:ok, active_review_thread_feedback(threads), :review_threads}
+          repo
+          |> feedback_not_cleared_by_codex_clean_review(pr, active_review_thread_feedback(threads), :review_threads)
 
         {:error, reason} ->
           Logger.debug("Review monitor falling back to REST review feedback for #{repo}##{pr_number(pr)}: #{inspect(reason)}")
-          fetch_rest_current_feedback(pr, comments, reviews)
+          fetch_rest_current_feedback(repo, pr, comments, reviews)
       end
     else
-      fetch_rest_current_feedback(pr, comments, reviews)
+      fetch_rest_current_feedback(repo, pr, comments, reviews)
     end
   end
 
-  defp fetch_rest_current_feedback(pr, comments, reviews) do
-    {:ok, current_head_comments(pr, comments) ++ current_head_reviews(pr, reviews), :rest_current_head}
+  defp fetch_rest_current_feedback(repo, pr, comments, reviews) do
+    repo
+    |> feedback_not_cleared_by_codex_clean_review(
+      pr,
+      current_head_comments(pr, comments) ++ current_head_reviews(pr, reviews),
+      :rest_current_head
+    )
   end
 
   defp review_threads_enabled? do
@@ -365,6 +371,34 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp active_review_thread?(_thread), do: false
 
+  defp feedback_not_cleared_by_codex_clean_review(_repo, _pr, [], source), do: {:ok, [], source}
+
+  defp feedback_not_cleared_by_codex_clean_review(repo, pr, feedback, source) when is_list(feedback) do
+    comments =
+      case fetch_issue_comments(repo, pr) do
+        {:ok, comments} when is_list(comments) -> comments
+        _ -> []
+      end
+
+    feedback =
+      case latest_clean_codex_review_after_latest_request_at(comments) do
+        %DateTime{} = clean_at ->
+          Enum.filter(feedback, fn item ->
+            case review_feedback_created_at(item) do
+              %DateTime{} = feedback_at -> DateTime.compare(feedback_at, clean_at) == :gt
+              _ -> true
+            end
+          end)
+
+        _ ->
+          feedback
+      end
+
+    {:ok, feedback, source}
+  end
+
+  defp feedback_not_cleared_by_codex_clean_review(_repo, _pr, feedback, source), do: {:ok, feedback, source}
+
   defp review_request_pending_after_feedback?(comments, feedback) do
     with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
          %DateTime{} = feedback_at <- latest_review_feedback_at(feedback) do
@@ -403,6 +437,29 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp codex_review_request_comment?(_comment), do: false
+
+  defp latest_clean_codex_review_after_latest_request_at(comments) when is_list(comments) do
+    with %DateTime{} = request_at <- latest_codex_review_request_at(comments) do
+      comments
+      |> Enum.filter(&clean_codex_review_comment?/1)
+      |> Enum.map(&created_at/1)
+      |> Enum.filter(fn
+        %DateTime{} = clean_at -> DateTime.compare(clean_at, request_at) == :gt
+        _ -> false
+      end)
+      |> latest_datetime()
+    end
+  end
+
+  defp latest_clean_codex_review_after_latest_request_at(_comments), do: nil
+
+  defp clean_codex_review_comment?(%{"body" => body}) when is_binary(body) do
+    body
+    |> String.trim()
+    |> String.match?(~r/^Codex Review:\s*(Didn['’]?t|Did not) find any major issues\b/i)
+  end
+
+  defp clean_codex_review_comment?(_comment), do: false
 
   defp latest_review_feedback_at(feedback) when is_list(feedback) do
     feedback

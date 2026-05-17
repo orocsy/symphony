@@ -2376,6 +2376,93 @@ defmodule SymphonyElixir.CoreTest do
              )
   end
 
+  test "review monitor treats clean Codex result after latest request as clearing older active threads" do
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 17,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/17",
+               "head" => %{"sha" => "head-after-rework", "ref" => "orocsy/mt-clean-review"}
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/17/comments" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/pulls/17/reviews" ->
+          {:ok, []}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/17/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review",
+               "created_at" => "2026-05-17T22:42:51Z"
+             },
+             %{
+               "body" => "Codex Review: Didn't find any major issues. Bravo.",
+               "created_at" => "2026-05-17T22:46:37Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+      {:ok,
+       %{
+         "data" => %{
+           "repository" => %{
+             "pullRequest" => %{
+               "headRefOid" => "head-after-rework",
+               "reviewThreads" => %{
+                 "nodes" => [
+                   %{
+                     "isResolved" => false,
+                     "isOutdated" => false,
+                     "comments" => %{
+                       "nodes" => [
+                         %{
+                           "body" => "Classify JSON parse failures as invalid_json.",
+                           "path" => "src/lib/providers/ai-provider.ts",
+                           "line" => 107,
+                           "createdAt" => "2026-05-17T22:40:30Z",
+                           "url" => "https://github.com/acme/nutribuddy/pull/17#discussion"
+                         }
+                       ]
+                     }
+                   }
+                 ],
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+               }
+             }
+           }
+         }
+       }}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+      Application.delete_env(:symphony_elixir, :github_graphql_runner)
+    end)
+
+    issue = %Issue{
+      id: "issue-clean-review",
+      identifier: "MT-250",
+      title: "Clean review should clear old thread",
+      state: "Human Review",
+      branch_name: "orocsy/mt-clean-review"
+    }
+
+    assert {:ok, %{feedback: [], feedback_source: :review_threads}} =
+             SymphonyElixir.ReviewMonitor.inspect_issue(issue, %{repo: "acme/nutribuddy"})
+  end
+
   test "no durable progress correction without PR feedback retries after requirements hydration" do
     test_root =
       Path.join(
