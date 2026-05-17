@@ -2078,6 +2078,18 @@ defmodule SymphonyElixir.CoreTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "integration.txt"), "merged COD-159/COD-160 baseline\n")
+      {_output, 0} = System.cmd("git", ["add", "integration.txt"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Integration baseline"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
       File.mkdir_p!(event_dir)

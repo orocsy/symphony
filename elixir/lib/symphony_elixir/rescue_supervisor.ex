@@ -631,21 +631,20 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp git_ahead_of_upstream?(workspace) do
-    upstream =
-      case System.cmd("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cd: workspace, stderr_to_stdout: true) do
-        {value, 0} -> String.trim(value)
-        {_output, _exit_code} -> "origin/main"
+    with {upstream, 0} <-
+           System.cmd("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+             cd: workspace,
+             stderr_to_stdout: true
+           ),
+         upstream <- String.trim(upstream),
+         true <- upstream != "",
+         {count, 0} <- System.cmd("git", ["rev-list", "--count", "#{upstream}..HEAD"], cd: workspace, stderr_to_stdout: true) do
+      case Integer.parse(String.trim(count)) do
+        {value, _rest} -> value > 0
+        :error -> false
       end
-
-    case System.cmd("git", ["rev-list", "--count", "#{upstream}..HEAD"], cd: workspace, stderr_to_stdout: true) do
-      {count, 0} ->
-        case Integer.parse(String.trim(count)) do
-          {value, _rest} -> value > 0
-          :error -> false
-        end
-
-      {_output, _exit_code} ->
-        false
+    else
+      _ -> false
     end
   rescue
     _error -> false
