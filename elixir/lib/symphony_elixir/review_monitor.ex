@@ -62,7 +62,9 @@ defmodule SymphonyElixir.ReviewMonitor do
   defp scan_review_states(monitor) do
     case Tracker.fetch_issues_by_states(review_scan_states(monitor)) do
       {:ok, issues} ->
-        Enum.each(issues, &maybe_mark_issue_for_rework(&1, monitor))
+        issues
+        |> Enum.filter(&issue_allowed_by_tracker?/1)
+        |> Enum.each(&maybe_mark_issue_for_rework(&1, monitor))
 
       {:error, reason} ->
         Logger.warning("Review monitor could not fetch review-state issues: #{inspect(reason)}")
@@ -95,6 +97,27 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp maybe_mark_issue_for_rework(_issue, _monitor), do: :ok
+
+  defp issue_allowed_by_tracker?(%Issue{} = issue) do
+    allowlist =
+      Config.settings!().tracker.issue_allowlist
+      |> normalize_issue_allowlist()
+
+    MapSet.size(allowlist) == 0 or
+      MapSet.member?(allowlist, issue.id || "") or
+      MapSet.member?(allowlist, issue.identifier || "")
+  end
+
+  defp issue_allowed_by_tracker?(_issue), do: false
+
+  defp normalize_issue_allowlist(allowlist) when is_list(allowlist) do
+    allowlist
+    |> Enum.map(&(to_string(&1) |> String.trim()))
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
+  end
+
+  defp normalize_issue_allowlist(_allowlist), do: MapSet.new()
 
   @spec inspect_issue(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
   def inspect_issue(%Issue{branch_name: branch}, monitor)

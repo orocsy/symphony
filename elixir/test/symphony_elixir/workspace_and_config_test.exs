@@ -721,6 +721,45 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert body =~ "src/features/swipe/SwipeDeck.tsx:120"
   end
 
+  test "review monitor respects the tracker issue allowlist before inspecting PRs" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_issue_allowlist: ["COD-170"],
+      tracker_active_states: ["Todo", "In Progress"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "issue-review-outside-allowlist",
+        identifier: "COD-152",
+        title: "Outside allowlist",
+        state: "Human Review",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+    ])
+
+    test_pid = self()
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      send(test_pid, {:github_called_for_non_allowlisted_issue, endpoint})
+      {:error, {:unexpected_endpoint, endpoint}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    refute_receive {:github_called_for_non_allowlisted_issue, _endpoint}, 50
+    refute_receive {:memory_tracker_state_update, "issue-review-outside-allowlist", "Rework"}, 50
+    refute_receive {:memory_tracker_comment, "issue-review-outside-allowlist", _body}, 50
+  end
+
   test "todo issue with terminal blockers remains dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
