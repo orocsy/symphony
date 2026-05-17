@@ -32,9 +32,15 @@ defmodule SymphonyElixir.SSH do
   end
 
   defp ssh_executable do
-    case System.find_executable("ssh") do
-      nil -> {:error, :ssh_not_found}
-      executable -> {:ok, executable}
+    case System.get_env("SYMPHONY_SSH_EXECUTABLE") do
+      executable when is_binary(executable) and executable != "" ->
+        {:ok, executable}
+
+      _ ->
+        case System.find_executable("ssh") do
+          nil -> {:error, :ssh_not_found}
+          executable -> {:ok, executable}
+        end
     end
   end
 

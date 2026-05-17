@@ -27,6 +27,7 @@ defmodule SymphonyElixir.ReviewMonitor do
                 path
                 line
                 originalLine
+                createdAt
                 outdated
                 url
               }
@@ -59,7 +60,7 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp scan_review_states(monitor) do
-    case Tracker.fetch_issues_by_states(monitor.states) do
+    case Tracker.fetch_issues_by_states(review_scan_states(monitor)) do
       {:ok, issues} ->
         Enum.each(issues, &maybe_mark_issue_for_rework(&1, monitor))
 
@@ -68,16 +69,28 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
+  defp review_scan_states(monitor) do
+    (monitor.states ++ Config.settings!().tracker.active_states)
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
   defp maybe_mark_issue_for_rework(%Issue{} = issue, monitor) do
-    case feedback_for_issue(issue, monitor) do
-      {:ok, nil} ->
-        :ok
+    if issue.state == monitor.rework_state do
+      :ok
+    else
+      case feedback_for_issue(issue, monitor) do
+        {:ok, nil} ->
+          :ok
 
-      {:ok, feedback} ->
-        mark_rework(issue, monitor, feedback)
+        {:ok, feedback} ->
+          mark_rework(issue, monitor, feedback)
 
-      {:error, reason} ->
-        Logger.warning("Review monitor could not inspect #{issue_context(issue)}: #{inspect(reason)}")
+        {:error, reason} ->
+          Logger.warning("Review monitor could not inspect #{issue_context(issue)}: #{inspect(reason)}")
+      end
     end
   end
 
@@ -108,6 +121,28 @@ defmodule SymphonyElixir.ReviewMonitor do
     Logger.debug("Review monitor skipped #{issue_context(issue)} because it has no branch name")
     {:ok, %{repo: nil, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
   end
+
+  @spec codex_review_request_pending?(String.t() | nil, map() | nil, list()) ::
+          {:ok, boolean()} | {:error, term()}
+  def codex_review_request_pending?(repo, pr, feedback)
+      when is_binary(repo) and is_map(pr) and is_list(feedback) do
+    with {:ok, comments} <- fetch_issue_comments(repo, pr) do
+      {:ok, review_request_pending_after_feedback?(comments, feedback)}
+    end
+  end
+
+  def codex_review_request_pending?(_repo, _pr, _feedback), do: {:ok, false}
+
+  @spec review_feedback_after_latest_codex_request?(String.t() | nil, map() | nil, list()) ::
+          {:ok, boolean()} | {:error, term()}
+  def review_feedback_after_latest_codex_request?(repo, pr, feedback)
+      when is_binary(repo) and is_map(pr) and is_list(feedback) do
+    with {:ok, comments} <- fetch_issue_comments(repo, pr) do
+      {:ok, review_feedback_after_latest_request?(comments, feedback)}
+    end
+  end
+
+  def review_feedback_after_latest_codex_request?(_repo, _pr, _feedback), do: {:ok, false}
 
   defp feedback_for_issue(%Issue{} = issue, monitor) do
     case inspect_issue(issue, monitor) do
@@ -194,6 +229,15 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
+  defp fetch_issue_comments(_repo, nil), do: {:ok, []}
+
+  defp fetch_issue_comments(repo, pr) do
+    case pr_number(pr) do
+      nil -> {:ok, []}
+      number -> github_api("repos/#{repo}/issues/#{number}/comments")
+    end
+  end
+
   defp fetch_current_feedback(_repo, nil, _comments, _reviews), do: {:ok, [], :no_pr}
 
   defp fetch_current_feedback(repo, pr, comments, reviews) do
@@ -267,6 +311,83 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp active_review_thread?(_thread), do: false
+
+  defp review_request_pending_after_feedback?(comments, feedback) do
+    with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
+         %DateTime{} = feedback_at <- latest_review_feedback_at(feedback) do
+      DateTime.compare(request_at, feedback_at) == :gt
+    else
+      _ -> false
+    end
+  end
+
+  defp review_feedback_after_latest_request?(comments, feedback) do
+    with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
+         %DateTime{} = feedback_at <- latest_review_feedback_at(feedback) do
+      DateTime.compare(feedback_at, request_at) == :gt
+    else
+      _ -> false
+    end
+  end
+
+  defp latest_codex_review_request_at(comments) when is_list(comments) do
+    comments
+    |> Enum.filter(&codex_review_request_comment?/1)
+    |> Enum.map(&created_at/1)
+    |> latest_datetime()
+  end
+
+  defp latest_codex_review_request_at(_comments), do: nil
+
+  defp codex_review_request_comment?(%{"body" => body}) when is_binary(body) do
+    normalized = String.downcase(body)
+    String.contains?(normalized, "@codex") and String.contains?(normalized, "review")
+  end
+
+  defp codex_review_request_comment?(_comment), do: false
+
+  defp latest_review_feedback_at(feedback) when is_list(feedback) do
+    feedback
+    |> Enum.map(&review_feedback_created_at/1)
+    |> latest_datetime()
+  end
+
+  defp latest_review_feedback_at(_feedback), do: nil
+
+  defp review_feedback_created_at(%{type: :thread, payload: thread}) do
+    thread
+    |> thread_latest_comment()
+    |> created_at()
+  end
+
+  defp review_feedback_created_at(%{type: :comment, payload: comment}), do: created_at(comment)
+
+  defp review_feedback_created_at(%{type: :review, payload: review}) do
+    created_at(review) || datetime_from_iso8601(review["submitted_at"])
+  end
+
+  defp review_feedback_created_at(_feedback), do: nil
+
+  defp created_at(%{} = payload) do
+    datetime_from_iso8601(payload["createdAt"] || payload["created_at"])
+  end
+
+  defp created_at(_payload), do: nil
+
+  defp latest_datetime(datetimes) do
+    datetimes
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
+  end
+
+  defp datetime_from_iso8601(value) when is_binary(value) and value != "" do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
+
+  defp datetime_from_iso8601(_value), do: nil
 
   defp current_head_comments(nil, _comments), do: []
 

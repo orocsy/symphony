@@ -185,6 +185,8 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "durable_progress_first_event_max_tokens",
         "needs-code-level-miu",
         "issue-briefs",
+        "--issue-file",
+        "issue-requirements.json",
         "granular:",
         "rules: false",
     ]
@@ -215,9 +217,13 @@ def start_script_uses_orocsy_runtime(content: str) -> bool:
         "$HOME/src/orocsy-symphony",
         "orocsy/symphony",
         "OROCSY_CLI",
+        "PROJECT_ROOT",
+        "PROJECT_DEPENDENCY_ROOT",
         "symphony prepare-workspace",
         "Dirty validated handoff checkpoint",
         "review_monitor:",
+        "issue-requirements.json",
+        "missing structured issue requirements handoff",
         "missing failed worker retry parking guard",
         "missing review completion guard",
         "missing handoff git-state verification guard",
@@ -526,7 +532,10 @@ for env_file in "$ROOT/.env.local" "$ROOT/.env"; do
 done
 
 PROJECT_REPO="${PROJECT_REPO:-$(git -C "$ROOT" config --get remote.origin.url)}"
+PROJECT_ROOT="${PROJECT_ROOT:-$ROOT}"
 export PROJECT_REPO
+export PROJECT_ROOT
+export PROJECT_DEPENDENCY_ROOT="${PROJECT_DEPENDENCY_ROOT:-$PROJECT_ROOT}"
 
 if [[ ! -d "$SYMPHONY_REPO/elixir" ]]; then
   echo "Missing Symphony Elixir checkout at $SYMPHONY_REPO/elixir" >&2
@@ -558,6 +567,12 @@ fi
 
 if ! grep -q "OROCSY_CLI" "$WORKFLOW_FILE"; then
   echo "Refusing to run legacy Symphony workflow: missing OROCSY_CLI worker contract." >&2
+  exit 1
+fi
+
+if ! grep -q -- "--issue-file" "$WORKFLOW_FILE" || ! grep -q "issue-requirements.json" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing structured issue requirements handoff." >&2
+  echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi
 
@@ -611,8 +626,8 @@ if ! grep -q "Pushed validated handoff checkpoint" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
-if ! grep -q "review_monitor:" "$WORKFLOW_FILE"; then
-  echo "Refusing to run stale Symphony workflow: missing GitHub review monitor bridge for Human Review -> Rework." >&2
+if ! grep -q "review_monitor:" "$WORKFLOW_FILE" || ! grep -q "In Review" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing GitHub review monitor bridge for review states -> Rework." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi
@@ -665,8 +680,8 @@ if ! grep -q "durable_progress_first_event_max_tokens" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
-if grep -q "Load the Orocsy /" "$WORKFLOW_FILE" || ! grep -q "Skill loading guard" "$WORKFLOW_FILE" || ! grep -q "first-turn-miu-handoff" "$WORKFLOW_FILE"; then
-  echo "Refusing to run stale Symphony workflow: first turn must not load broad skill bodies before durable MIU handoff." >&2
+if grep -q "Load the Orocsy /" "$WORKFLOW_FILE" || ! grep -q "Skill loading guard" "$WORKFLOW_FILE" || ! grep -q "review-feedback-classified" "$WORKFLOW_FILE" || ! grep -q "technical-miu-trace" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: first turn must record substantive review, MIU, or blocker evidence before broad context." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi
@@ -710,7 +725,10 @@ if [[ -z "${PROJECT_REPO:-}" ]]; then
   exit 1
 fi
 
+PROJECT_ROOT="${PROJECT_ROOT:-$ROOT}"
 export PROJECT_REPO
+export PROJECT_ROOT
+export PROJECT_DEPENDENCY_ROOT="${PROJECT_DEPENDENCY_ROOT:-$PROJECT_ROOT}"
 export PROJECT_BASE_BRANCH="${PROJECT_BASE_BRANCH:-main}"
 export OROCSY_CLI
 export SYMPHONY_REPO

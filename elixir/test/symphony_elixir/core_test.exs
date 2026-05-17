@@ -16,6 +16,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
+    assert config.tracker.issue_allowlist == []
     assert config.agent.max_turns == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -86,6 +87,63 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+  end
+
+  test "tracker issue allowlist restricts dispatch candidates" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_issue_allowlist: ["COD-200", "issue-explicit"]
+    )
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    allowed_by_identifier = %Issue{
+      id: "issue-other",
+      identifier: "COD-200",
+      title: "Allowed by identifier",
+      state: "In Progress"
+    }
+
+    allowed_by_id = %Issue{
+      id: "issue-explicit",
+      identifier: "COD-201",
+      title: "Allowed by id",
+      state: "In Progress"
+    }
+
+    blocked = %Issue{
+      id: "issue-blocked",
+      identifier: "COD-202",
+      title: "Not allowlisted",
+      state: "In Progress"
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(allowed_by_identifier, state)
+    assert Orchestrator.should_dispatch_issue_for_test(allowed_by_id, state)
+    refute Orchestrator.should_dispatch_issue_for_test(blocked, state)
+  end
+
+  test "dependency gate blocks active issues with non-terminal blockers" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    blocked = %Issue{
+      id: "issue-blocked",
+      identifier: "COD-203",
+      title: "Blocked implementation",
+      state: "In Progress",
+      blocked_by: [%{id: "issue-contract", identifier: "COD-202", state: "In Progress"}]
+    }
+
+    unblocked = %Issue{
+      id: "issue-unblocked",
+      identifier: "COD-204",
+      title: "Unblocked implementation",
+      state: "In Progress",
+      blocked_by: [%{id: "issue-contract", identifier: "COD-202", state: "Done"}]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(blocked, state)
+    assert Orchestrator.should_dispatch_issue_for_test(unblocked, state)
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -390,6 +448,8 @@ defmodule SymphonyElixir.CoreTest do
         end
       end)
 
+      initial_state = :sys.get_state(pid)
+
       Process.sleep(50)
 
       assert {:ok, workspace} =
@@ -403,8 +463,6 @@ defmodule SymphonyElixir.CoreTest do
             :stop -> :ok
           end
         end)
-
-      initial_state = :sys.get_state(pid)
 
       running_entry = %{
         pid: agent_pid,
@@ -522,6 +580,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "normal worker exit schedules active-state continuation retry" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
@@ -550,6 +611,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -558,7 +620,90 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, sent_at_ms, 500, 1_100)
+  end
+
+  test "normal worker exit at pushed handoff checkpoint does not schedule continuation retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-handoff-stop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      origin = Path.join(test_root, "origin.git")
+      issue_id = "issue-review-handoff-stop"
+      branch = "orocsy/cod-152-review-handoff"
+
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "ready\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: workspace, stderr_to_stdout: true)
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework"}, pretty: true) <> "\n"
+      )
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :NormalHandoffStopOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: "COD-152",
+        issue: %Issue{id: issue_id, identifier: "COD-152", state: "Rework"},
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, {:DOWN, ref, :process, self(), :normal})
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert MapSet.member?(state.completed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "normal worker exit with open correction does not schedule continuation retry" do
@@ -570,7 +715,8 @@ defmodule SymphonyElixir.CoreTest do
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
-      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: workspace_root)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-568")
 
@@ -748,6 +894,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
         max_failed_worker_retries: 2
       )
@@ -1151,20 +1298,11 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       worker_pid = spawn(fn -> Process.sleep(:infinity) end)
 
-      orchestrator_name = Module.concat(__MODULE__, :NoDurableProgressParkOrchestrator)
-      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
       on_exit(fn ->
         if Process.alive?(worker_pid) do
           Process.exit(worker_pid, :kill)
         end
-
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
       end)
-
-      initial_state = :sys.get_state(pid)
 
       running_entry = %{
         pid: worker_pid,
@@ -1176,17 +1314,15 @@ defmodule SymphonyElixir.CoreTest do
         codex_total_tokens: 500
       }
 
-      :sys.replace_state(pid, fn _ ->
-        initial_state
-        |> Map.put(:running, %{issue_id => running_entry})
-        |> Map.put(:claimed, MapSet.new([issue_id]))
-        |> Map.put(:retry_attempts, %{})
-      end)
-
-      send(pid, :run_poll_cycle)
-
-      Process.sleep(100)
-      state = :sys.get_state(pid)
+      state =
+        %Orchestrator.State{
+          max_concurrent_agents: 1,
+          running: %{issue_id => running_entry},
+          claimed: MapSet.new([issue_id]),
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+          retry_attempts: %{}
+        }
+        |> Orchestrator.reconcile_no_durable_progress_for_test()
 
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
@@ -1195,7 +1331,11 @@ defmodule SymphonyElixir.CoreTest do
       [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
       correction = correction_path |> File.read!() |> Jason.decode!()
 
-      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source"] in [
+               "symphony.runtime.no-durable-progress",
+               "symphony.runtime.no-durable-progress-handoff"
+             ]
+
       assert correction["source_status"] == "blocked"
       assert correction["next_action"] == "block"
       assert Workspace.blocking_correction_in_workspace?(workspace)
@@ -1203,6 +1343,87 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_comment, ^issue_id, body}
       assert body =~ "no-durable-progress"
       assert body =~ "configured failure guard"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "no durable progress correction includes recent worker evidence" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-evidence-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 10,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-no-progress-evidence"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NOPROGRESS-EVIDENCE",
+        state: "In Progress",
+        title: "No durable progress with evidence",
+        description: "Correction should preserve the worker's last useful signals",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_entry = %{
+        pid: nil,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.add(DateTime.utc_now(), -10, :second),
+        workspace_path: workspace,
+        codex_total_tokens: 500,
+        recent_codex_events: [
+          "2026-05-15T06:56:12Z event=notification command=corepack pnpm exec tsc outcome=failed detail=zsh:1: command not found: corepack",
+          "2026-05-15T06:56:30Z event=notification command=npm run typecheck -- --pretty false outcome=passed"
+        ]
+      }
+
+      state =
+        %Orchestrator.State{
+          max_concurrent_agents: 1,
+          running: %{issue_id => running_entry},
+          claimed: MapSet.new([issue_id]),
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+          retry_attempts: %{}
+        }
+        |> Orchestrator.reconcile_no_durable_progress_for_test()
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      [evidence | _] = correction["findings"]
+      assert evidence =~ "Recent Codex worker evidence"
+      assert evidence =~ "corepack pnpm exec tsc"
+      assert evidence =~ "command not found: corepack"
+      assert evidence =~ "npm run typecheck"
+      assert evidence =~ "outcome=passed"
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "Runtime evidence"
+      assert body =~ "corepack"
+      assert body =~ "npm run typecheck"
     after
       File.rm_rf(test_root)
     end
@@ -1329,6 +1550,1961 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "no durable progress correction with current PR feedback is rescued into rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-rescue",
+        identifier: "COD-152",
+        title: "Swipe feed UI",
+        state: "In Progress",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Handle pointer cancel without committing a swipe.",
+                 "commit_id" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 120,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_state_update, "issue-cod-152-rescue", "Rework"}
+      assert_receive {:memory_tracker_comment, "issue-cod-152-rescue", body}
+      assert body =~ "review_rework_needed"
+      assert body =~ "correction"
+      assert body =~ "pull/4"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "review_rework_needed"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "repeated review rework retries with same dirty handoff progress block instead of redispatch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-stale-dirty-loop-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-stale-dirty-review-loop",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      dirty_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
+      File.mkdir_p!(Path.dirname(dirty_path))
+      File.write!(dirty_path, "baseline swipe deck\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      File.write!(dirty_path, "dirty review fix from an earlier turn\n")
+
+      stale_progress_time =
+        DateTime.utc_now()
+        |> DateTime.add(-240, :second)
+        |> DateTime.to_naive()
+        |> NaiveDateTime.to_erl()
+
+      File.touch!(dirty_path, stale_progress_time)
+
+      for attempt <- 1..2 do
+        assert {:ok, _correction} =
+                 Workspace.create_correction_in_workspace(workspace, issue, %{
+                   source: "symphony.runtime.no-durable-progress-handoff",
+                   source_status: "retryable",
+                   summary: "Retry #{attempt} for stale dirty handoff progress.",
+                   findings: ["no-durable-progress"],
+                   next_action: "retry"
+                 })
+
+        if attempt == 1 do
+          assert :ok =
+                   Workspace.resolve_blocking_corrections_in_workspace(
+                     workspace,
+                     "review_rework_needed: PR #4 has current-head review feedback."
+                   )
+        end
+      end
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "dab63020bf449fb776279c0f0905c79fc3d37ba3",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Open the recipe flow on accepted right swipes.",
+                 "commit_id" => "dab63020bf449fb776279c0f0905c79fc3d37ba3",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 81,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-152-stale-dirty-review-loop", body}
+      assert body =~ "worker_prompt_defect"
+      assert body =~ "Prior review-rework retries"
+      assert body =~ "pull/4"
+
+      classified =
+        workspace
+        |> Workspace.open_blocking_corrections_in_workspace()
+        |> Enum.find(&(&1["classification"] == "worker_prompt_defect"))
+
+      assert classified
+      assert classified["classification_summary"] =~ "repeated review-rework"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "repeated review rework retries without workspace progress synthesize a worker prompt defect block" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-loop-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-review-loop",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      for attempt <- 1..2 do
+        assert {:ok, _correction} =
+                 Workspace.create_correction_in_workspace(workspace, issue, %{
+                   source: "symphony.runtime.missing-first-durable-event",
+                   source_status: "blocked",
+                   summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                   findings: ["{:missing_first_durable_event, #{attempt}, 148037, 120000}"],
+                   next_action: "block"
+                 })
+
+        assert :ok =
+                 Workspace.resolve_blocking_corrections_in_workspace(
+                   workspace,
+                   "review_rework_needed: PR #4 has current-head review feedback."
+                 )
+      end
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "dab63020bf449fb776279c0f0905c79fc3d37ba3",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Seed the gate from loaded guest limit.",
+                 "commit_id" => "dab63020bf449fb776279c0f0905c79fc3d37ba3",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 47,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-152-review-loop", body}
+      assert body =~ "worker_prompt_defect"
+      assert body =~ "Prior review-rework retries"
+      assert body =~ "pull/4"
+
+      classified =
+        workspace
+        |> Workspace.open_blocking_corrections_in_workspace()
+        |> Enum.find(&(&1["classification"] == "worker_prompt_defect"))
+
+      assert classified
+      assert classified["source"] == "symphony.runtime.review-rework-retry-loop"
+      assert classified["classification"] == "worker_prompt_defect"
+      assert classified["classification_summary"] =~ "repeated review-rework"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review monitor does not repeat rework comments when issue is already in rework" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-cod-152-review-monitor-dedupe",
+      identifier: "COD-152",
+      title: "Swipe feed UI and mutation flow",
+      state: "Rework",
+      branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      {:error, {:unexpected_endpoint, endpoint}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+    refute_receive {:memory_tracker_state_update, "issue-cod-152-review-monitor-dedupe", "Rework"}, 50
+    refute_receive {:memory_tracker_comment, "issue-cod-152-review-monitor-dedupe", _body}, 50
+  end
+
+  test "no durable progress correction without PR feedback retries after requirements hydration" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-hydrated-retry-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-153-rescue",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation",
+        description: """
+        ## Write Scope
+        - src/app/api/recipes/**
+        - src/features/recipe-chat/**
+
+        ### MIU 1 - Recipe Chat
+        Generate recipe chat responses from accepted swipe context.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/recipe-chat.test.ts
+        ```
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") -> {:ok, []}
+          true -> {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-153-rescue", body}
+      assert body =~ "retry_with_hydrated_requirements"
+      assert body =~ "orocsy/cod-153-miu-5-recipe-chat-generation"
+      refute_receive {:memory_tracker_state_update, "issue-cod-153-rescue", "Rework"}, 50
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "retry_with_hydrated_requirements"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "no durable progress after hydrated dispatch preflight stays blocked" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-after-preflight-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-157-preflight-block",
+        identifier: "COD-157",
+        title: "Bridge contract",
+        state: "In Progress",
+        branch_name: "orocsy/cod-157-bridge-contract",
+        description: """
+        ## Write Scope
+        - docs/TECHNICAL_DESIGN.md only for the accepted-swipe to recipe-chat contract section.
+
+        ### MIU 1 - Accepted Swipe To Recipe Chat Contract
+        Define the accepted swipe handoff DTO and downstream responsibilities.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/domain-schemas.test.ts
+        ```
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      preflight_ts =
+        DateTime.utc_now()
+        |> DateTime.add(-10, :second)
+        |> DateTime.to_iso8601()
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "branch" => issue.branch_name,
+          "event" => "tool.finished",
+          "issue" => issue.identifier,
+          "mode" => "fresh_implementation",
+          "source" => "symphony.runtime.dispatch-preflight",
+          "status" => "passed",
+          "tool" => "technical-miu-trace",
+          "ts" => preflight_ts
+        }) <> "\n"
+      )
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") -> {:ok, []}
+          true -> {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-157-preflight-block", body}
+      assert body =~ "worker_prompt_defect"
+      assert body =~ "hydrated `technical-miu-trace` was already recorded"
+      refute body =~ "retry_with_hydrated_requirements"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      classified = correction_path |> File.read!() |> Jason.decode!()
+      assert classified["status"] == "open"
+      assert classified["classification"] == "worker_prompt_defect"
+      assert classified["classification_summary"] =~ "hydrated dispatch preflight"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "missing first durable event correction without PR feedback retries after requirements hydration" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-missing-first-event-hydrated-retry-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-153-missing-first-event",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation",
+        description: """
+        ## Write Scope
+        - src/app/api/recipes/**
+        - src/features/recipe-chat/**
+
+        ### MIU 1 - Recipe Chat
+        Generate recipe chat responses from accepted swipe context.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/recipe-chat.test.ts
+        ```
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.missing-first-durable-event",
+                 source_status: "blocked",
+                 summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                 findings: ["{:missing_first_durable_event, 92035, 148866, 120000}"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") -> {:ok, []}
+          true -> {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-153-missing-first-event", body}
+      assert body =~ "retry_with_hydrated_requirements"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "retry_with_hydrated_requirements"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "repeated missing first durable event retries without workspace progress are classified and blocked" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-missing-first-event-loop-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-153-missing-first-event-loop",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation",
+        description: """
+        ## Write Scope
+        - src/app/api/recipes/**
+        - src/features/recipe-chat/**
+
+        ### MIU 1 - Recipe Chat
+        Generate recipe chat responses from accepted swipe context.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/recipe-chat.test.ts
+        ```
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      for attempt <- 1..2 do
+        assert {:ok, _correction} =
+                 Workspace.create_correction_in_workspace(workspace, issue, %{
+                   source: "symphony.runtime.missing-first-durable-event",
+                   source_status: "blocked",
+                   summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                   findings: ["{:missing_first_durable_event, #{attempt}, 148866, 120000}"],
+                   next_action: "block"
+                 })
+
+        assert :ok =
+                 Workspace.resolve_blocking_corrections_in_workspace(
+                   workspace,
+                   "retry_with_hydrated_requirements: no current PR feedback found and issue requirements are parseable."
+                 )
+      end
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.missing-first-durable-event",
+                 source_status: "blocked",
+                 summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                 findings: ["{:missing_first_durable_event, 92035, 148866, 120000}"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") -> {:ok, []}
+          true -> {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-153-missing-first-event-loop", body}
+      assert body =~ "worker_prompt_defect"
+      assert body =~ "no dirty files"
+      assert body =~ "runtime-review-rework-observable-validation-policy-v15"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      classified = correction_path |> File.read!() |> Jason.decode!()
+      assert classified["status"] == "open"
+      assert classified["classification"] == "worker_prompt_defect"
+      assert classified["classification_summary"] =~ "repeated runtime progress retries"
+      assert classified["classification_summary"] =~ "runtime-review-rework-observable-validation-policy-v15"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "stale worker prompt defect correction is resolved after runtime prompt fix" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-prompt-defect-stale-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-153-stale-worker-prompt-defect",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.missing-first-durable-event",
+                 source_status: "blocked",
+                 summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                 findings: ["{:missing_first_durable_event, 92035, 148866, 120000}"],
+                 next_action: "block"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: repeated runtime progress retries produced no branch, file, or commit progress."
+               )
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-153-stale-worker-prompt-defect", body}
+      assert body =~ "resolved stale `worker_prompt_defect`"
+      assert body =~ "runtime-review-rework-observable-validation-policy-v15"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_runtime_fix"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "mixed stale worker prompt defect and runtime config/progress corrections resolve after dispatch preflight fix" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-prompt-defect-mixed-stale-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review", "In Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-mixed-stale-worker-prompt-defect",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, _classified_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.review-rework-retry-loop",
+                 source_status: "blocked",
+                 summary: "Repeated review-rework runtime progress retries produced no workspace progress.",
+                 findings: ["review_rework_needed loop exhausted without workspace progress"],
+                 next_action: "block"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under worker-prompt-v3-branch-first-bounded-turn."
+               )
+
+      assert {:ok, _unclassified_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.missing-first-durable-event",
+                 source_status: "blocked",
+                 summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                 findings: ["{:missing_first_durable_event, 58102, 223796, 120000}"],
+                 next_action: "block"
+               })
+
+      assert {:ok, _startup_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.worker",
+                 source_status: "retry-exhausted",
+                 summary: "Symphony worker exited unexpectedly and exceeded the safe retry policy.",
+                 findings: [
+                   "Agent run failed for issue_id=issue-cod-152-mixed-stale-worker-prompt-defect issue_identifier=COD-152: {:response_error, %{\"code\" => -32600, \"message\" => \"failed to load configuration: invalid transport\\nin `mcp_servers.cloudflare-api`\\n\"}}"
+                 ],
+                 next_action: "block"
+               })
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-152-mixed-stale-worker-prompt-defect", body}
+      assert body =~ "resolved stale `worker_prompt_defect`"
+      assert body =~ "runtime-review-rework-observable-validation-policy-v15"
+
+      resolved_corrections =
+        workspace
+        |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+        |> Path.wildcard()
+        |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+
+      assert length(resolved_corrections) == 3
+      assert Enum.all?(resolved_corrections, &(&1["status"] == "resolved"))
+
+      assert Enum.all?(
+               resolved_corrections,
+               &String.contains?(&1["resolution_summary"], "runtime-review-rework-observable-validation-policy-v15")
+             )
+
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "current worker prompt defect resolves when branch advanced after correction and routes review feedback to rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-prompt-defect-later-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review", "In Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-later-progress-worker-prompt-defect",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+
+      baseline_ts = DateTime.add(DateTime.utc_now(), -120, :second) |> DateTime.to_iso8601()
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 env: [{"GIT_AUTHOR_DATE", baseline_ts}, {"GIT_COMMITTER_DATE", baseline_ts}],
+                 stderr_to_stdout: true
+               )
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.review-rework-retry-loop",
+                 source_status: "blocked",
+                 summary: "Repeated review-rework runtime progress retries produced no workspace progress.",
+                 findings: ["review_rework_needed loop exhausted without workspace progress"],
+                 next_action: "block"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-review-rework-observable-validation-policy-v15."
+               )
+
+      progress_ts = DateTime.add(DateTime.utc_now(), 120, :second) |> DateTime.to_iso8601()
+      File.write!(Path.join(workspace, "src.txt"), "review fix\n")
+      assert {_output, 0} = System.cmd("git", ["add", "src.txt"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Fix review feedback"],
+                 cd: workspace,
+                 env: [{"GIT_AUTHOR_DATE", progress_ts}, {"GIT_COMMITTER_DATE", progress_ts}],
+                 stderr_to_stdout: true
+               )
+
+      assert {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+      head_sha = String.trim(head_sha)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Open the recipe flow on accepted right swipes.",
+                 "commit_id" => head_sha,
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 81,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_state_update, "issue-cod-152-later-progress-worker-prompt-defect", "Rework"}
+      assert_receive {:memory_tracker_comment, "issue-cod-152-later-progress-worker-prompt-defect", body}
+      assert body =~ "workspace progress appeared after the correction"
+      assert body =~ "pull/4"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_later_workspace_progress"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "current worker prompt defect resolves when newer Codex review feedback arrives after review request" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-prompt-defect-fresh-review-feedback-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review", "In Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-fresh-review-feedback-worker-prompt-defect",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.review-rework-retry-loop",
+                 source_status: "blocked",
+                 summary: "Repeated review-rework runtime progress retries produced no workspace progress.",
+                 findings: ["review_rework_needed loop exhausted without workspace progress"],
+                 next_action: "block"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-review-rework-observable-validation-policy-v15."
+               )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "d3c2c0052fdf0ffad3b1b7b0f1371a58b66ecabc",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/issues/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review\n\nFresh review requested after d3c2c00.",
+                 "created_at" => "2026-05-15T09:24:37Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#issuecomment"
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => "d3c2c0052fdf0ffad3b1b7b0f1371a58b66ecabc",
+                 "reviewThreads" => %{
+                   "nodes" => [
+                     %{
+                       "isResolved" => false,
+                       "isOutdated" => false,
+                       "comments" => %{
+                         "nodes" => [
+                           %{
+                             "body" => "Do not leave accepted cooks stuck.",
+                             "path" => "src/features/swipe/SwipeDeck.tsx",
+                             "line" => 86,
+                             "createdAt" => "2026-05-15T09:27:16Z",
+                             "url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+                           }
+                         ]
+                       }
+                     }
+                   ],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_state_update, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", "Rework"}
+      assert_receive {:memory_tracker_comment, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", body}
+      assert body =~ "fresh Codex review feedback arrived"
+      assert body =~ "pull/4"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_fresh_review_feedback"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "current worker prompt defect resolves when dirty workspace progress exists after correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-prompt-defect-dirty-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review", "In Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-dirty-progress-worker-prompt-defect",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "In Review",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+      head_sha = String.trim(head_sha)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.review-rework-retry-loop",
+                 source_status: "blocked",
+                 summary: "Repeated review-rework runtime progress retries produced no workspace progress.",
+                 findings: ["review_rework_needed loop exhausted without workspace progress"],
+                 next_action: "block"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-review-rework-observable-validation-policy-v15."
+               )
+
+      dirty_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
+      File.mkdir_p!(Path.dirname(dirty_path))
+      File.write!(dirty_path, "review fix is dirty but real\n")
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Open the recipe flow on accepted right swipes.",
+                 "commit_id" => head_sha,
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 81,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_state_update, "issue-cod-152-dirty-progress-worker-prompt-defect", "Rework"}
+      assert_receive {:memory_tracker_comment, "issue-cod-152-dirty-progress-worker-prompt-defect", body}
+      assert body =~ "workspace progress appeared after the correction"
+      assert body =~ "pull/4"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_later_workspace_progress"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "already classified worker prompt defect correction stays blocked without repeating comments" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-prompt-defect-dedupe-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-153-worker-prompt-defect",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, _correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.missing-first-durable-event",
+                 source_status: "blocked",
+                 summary: "Worker exceeded the first durable Orocsy progress event guard.",
+                 findings: ["{:missing_first_durable_event, 92035, 148866, 120000}"],
+                 next_action: "block"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: repeated runtime progress retries produced no branch, file, or commit progress under runtime-review-rework-observable-validation-policy-v15."
+               )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        {:error, {:unexpected_endpoint, endpoint}}
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      refute_receive {:memory_tracker_comment, "issue-cod-153-worker-prompt-defect", _body}, 50
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight records current review feedback before Codex starts" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-dispatch-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-152-preflight",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow",
+        description: """
+        ## Write Scope
+        - src/features/swipe/**
+
+        ### MIU 1 - Swipe Deck
+        Connect accepted swipes to the recipe flow.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/swipe-deck.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => """
+                 **P1** Open the recipe flow on accepted right swipes.
+
+                 When `action === "right"` and the server accepts, keep the accepted recipe/chat payload and route into the recipe flow instead of advancing the deck and losing the card.
+                 """,
+                 "commit_id" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 81,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert get_in(preflight, ["toolchain", "executables", "npm", "available"]) in [true, false]
+      assert is_list(get_in(preflight, ["toolchain", "package_scripts"]))
+      assert get_in(preflight, ["review", "feedback_count"]) == 1
+      assert [feedback] = get_in(preflight, ["review", "feedback"])
+      assert feedback["path"] == "src/features/swipe/SwipeDeck.tsx"
+      assert feedback["line"] == 81
+      assert feedback["body"] =~ "Open the recipe flow"
+      assert feedback["body"] =~ "server accepts"
+
+      events = File.read!(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
+      assert events =~ ~s("tool":"review-feedback-classified")
+      assert events =~ "symphony.runtime.dispatch-preflight"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert String.starts_with?(prompt, "Runtime dispatch preflight:")
+      assert prompt =~ "review rework"
+      assert prompt =~ "src/features/swipe/SwipeDeck.tsx:81"
+      assert prompt =~ "Open the recipe flow"
+      assert prompt =~ "server accepts"
+      assert prompt =~ "Durable checkpoint already recorded: `review-feedback-classified`"
+      assert prompt =~ "Target feedback file(s): `src/features/swipe/SwipeDeck.tsx`"
+      assert prompt =~ "Toolchain preflight:"
+      assert prompt =~ "Validation command guidance:"
+      assert prompt =~ "Review rework execution contract"
+      refute prompt =~ "You are an agent for this repository."
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight records fresh implementation MIU checkpoint before Codex starts" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-dispatch-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-153-preflight",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation",
+        description: """
+        ## Write Scope
+        - src/app/api/recipes/**
+        - src/features/recipe-chat/**
+
+        ### MIU 1 - Recipe Chat
+        Generate recipe chat responses from accepted swipe context.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/recipe-chat.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") -> {:ok, []}
+          true -> {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert get_in(preflight, ["toolchain", "executables", "npm", "available"]) in [true, false]
+
+      assert get_in(preflight, ["requirements", "write_scope"]) == [
+               "src/app/api/recipes/**",
+               "src/features/recipe-chat/**"
+             ]
+
+      events = File.read!(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
+      assert events =~ ~s("tool":"technical-miu-trace")
+      assert events =~ "symphony.runtime.dispatch-preflight"
+
+      state_file = Path.join(workspace, ".orocsy/delivery/state/current.json")
+      state = state_file |> File.read!() |> Jason.decode!()
+      assert get_in(state, ["dispatch_preflight", "mode"]) == "fresh_implementation"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert String.starts_with?(prompt, "Runtime dispatch preflight:")
+      assert prompt =~ "fresh implementation"
+      assert prompt =~ "First MIU: MIU 1 - Recipe Chat"
+      assert prompt =~ "First write-scope path: src/app/api/recipes/**"
+      assert prompt =~ "Durable checkpoint already recorded: `technical-miu-trace`"
+      assert prompt =~ "Toolchain preflight:"
+      assert prompt =~ "Validation command guidance:"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight checkpoint satisfies first durable event guard" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-preflight-first-event-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue = %Issue{
+        id: "issue-cod-153-preflight-guard",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-153-miu-5-recipe-chat-generation",
+        description: """
+        ## Write Scope
+        - src/features/recipe-chat/**
+
+        ### MIU 1 - Recipe Chat
+        Generate recipe chat responses.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/recipe-chat.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {:ok, _preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+            codex_total_tokens: 2_000
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+      assert Map.has_key?(state.running, issue.id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review rework preflight does not satisfy first edit token budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-preflight-first-edit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-152-review-first-edit",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow",
+        description: """
+        ## Write Scope
+        - src/features/swipe/**
+
+        ### MIU 1 - Swipe Deck
+        Connect accepted swipes to the recipe flow.
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 4,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+                 "head" => %{
+                   "sha" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
+                   "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Open the recipe flow on accepted right swipes.",
+                 "commit_id" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
+                 "path" => "src/features/swipe/SwipeDeck.tsx",
+                 "line" => 81,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, _preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+            codex_total_tokens: 35_000
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+      refute Map.has_key?(state.running, issue.id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.missing-first-durable-event"
+      assert correction["guard"]["first_event_max_tokens"] == 30_000
+      assert correction["guard"]["first_event_progress_tokens"] == 35_000
+      assert correction["guard"]["cached_input_tokens"] == 0
+      assert correction["summary"] =~ "first durable Orocsy progress event"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review rework first edit token budget ignores cached prompt input" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-cached-first-edit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue = %Issue{
+        id: "issue-cod-152-review-cached-first-edit",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "Rework",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+      File.mkdir_p!(Path.dirname(preflight_path))
+      File.write!(preflight_path, Jason.encode!(%{"mode" => "review_rework"}))
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+            codex_total_tokens: 52_626,
+            codex_cached_input_tokens: 30_976
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+      assert Map.has_key?(state.running, issue.id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review rework no durable progress guard ignores cached prompt input" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-cached-no-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 30_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue = %Issue{
+        id: "issue-cod-157-review-cached-no-progress",
+        identifier: "COD-157",
+        title: "Bridge contract accepted swipe to recipe chat",
+        state: "Rework",
+        branch_name: "orocsy/cod-157-bridge-contract-accepted-swipe-to-recipe-chat"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+      File.mkdir_p!(Path.dirname(preflight_path))
+      File.write!(preflight_path, Jason.encode!(%{"mode" => "review_rework"}))
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -70, :second),
+            codex_total_tokens: 110_756,
+            codex_cached_input_tokens: 87_040
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      assert Map.has_key?(state.running, issue.id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "high-token worker with durable progress is not parked" do
     test_root =
       Path.join(
@@ -1405,8 +3581,6 @@ defmodule SymphonyElixir.CoreTest do
         end
       end)
 
-      initial_state = :sys.get_state(pid)
-
       running_entry = %{
         pid: worker_pid,
         ref: nil,
@@ -1420,7 +3594,90 @@ defmodule SymphonyElixir.CoreTest do
       assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
 
       state =
-        initial_state
+        %Orchestrator.State{
+          max_concurrent_agents: 1,
+          running: %{issue_id => running_entry},
+          claimed: MapSet.new([issue_id]),
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+          retry_attempts: %{}
+        }
+        |> Orchestrator.reconcile_no_durable_progress_for_test()
+
+      assert Map.has_key?(state.running, issue_id)
+      assert MapSet.member?(state.claimed, issue_id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recent focused validation progress keeps watchdog from parking worker" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-validation-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-runtime-validation-progress"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-VALIDATION-PROGRESS",
+        state: "In Progress",
+        title: "Runtime validation progress",
+        description: "Successful focused validation should count as live progress",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      orchestrator_name = Module.concat(__MODULE__, :RuntimeValidationProgressOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+
+      running_entry = %{
+        pid: worker_pid,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: started_at,
+        workspace_path: workspace,
+        codex_total_tokens: 500,
+        last_validation_command: "npm run typecheck -- --pretty false",
+        last_validation_progress_at: DateTime.utc_now()
+      }
+
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+
+      state =
+        :sys.get_state(pid)
         |> Map.put(:running, %{issue_id => running_entry})
         |> Map.put(:claimed, MapSet.new([issue_id]))
         |> Map.put(:retry_attempts, %{})
@@ -1429,6 +3686,364 @@ defmodule SymphonyElixir.CoreTest do
       assert Map.has_key?(state.running, issue_id)
       assert MapSet.member?(state.claimed, issue_id)
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "codex function-call validation output records command evidence and progress" do
+    command_at = DateTime.add(DateTime.utc_now(), -2, :second)
+    output_at = DateTime.utc_now()
+
+    running_entry = %{
+      started_at: DateTime.add(command_at, -30, :second),
+      recent_codex_events: [],
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_cached_input_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      codex_last_reported_cached_input_tokens: 0,
+      session_id: nil,
+      turn_count: 0
+    }
+
+    function_call_update = %{
+      event: :notification,
+      timestamp: command_at,
+      payload: %{
+        payload: %{
+          "method" => "codex/event/response_item",
+          "params" => %{
+            "type" => "response_item",
+            "payload" => %{
+              "type" => "function_call",
+              "name" => "exec_command",
+              "arguments" => Jason.encode!(%{"cmd" => "pnpm typecheck"})
+            }
+          }
+        }
+      }
+    }
+
+    function_output_update = %{
+      event: :notification,
+      timestamp: output_at,
+      payload: %{
+        payload: %{
+          "method" => "codex/event/response_item",
+          "params" => %{
+            "type" => "response_item",
+            "payload" => %{
+              "type" => "function_call_output",
+              "call_id" => "call-validation",
+              "output" => "Process exited with code 0\n> nutribuddy@0.1.0 typecheck\n> tsc --noEmit\n"
+            }
+          }
+        }
+      }
+    }
+
+    {running_entry, _token_delta} =
+      Orchestrator.integrate_codex_update_for_test(running_entry, function_call_update)
+
+    assert running_entry.last_validation_command == "pnpm typecheck"
+
+    {running_entry, _token_delta} =
+      Orchestrator.integrate_codex_update_for_test(running_entry, function_output_update)
+
+    assert running_entry.last_validation_command == "pnpm typecheck"
+    assert DateTime.compare(running_entry.last_validation_progress_at, output_at) == :eq
+
+    assert Enum.any?(running_entry.recent_codex_events, fn event ->
+             event =~ "command=pnpm typecheck" and event =~ "outcome=passed"
+           end)
+  end
+
+  test "quiet high-token worker with fresh dirty progress creates handoff retry correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-handoff-retry-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      issue_id = "issue-dirty-handoff-retry"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-DIRTYHANDOFF",
+        state: "In Progress",
+        title: "Dirty handoff retry",
+        description: "Worker should recover dirty handoff progress instead of a dead-end block",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -180, :second)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      progress_path = Path.join(workspace, "progress.txt")
+      File.write!(progress_path, "dirty handoff work\n")
+
+      progress_time =
+        DateTime.utc_now()
+        |> DateTime.add(-120, :second)
+        |> DateTime.to_naive()
+        |> NaiveDateTime.to_erl()
+
+      File.touch!(progress_path, progress_time)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.no-durable-progress-handoff"
+      assert correction["source_status"] == "retryable"
+      assert correction["next_action"] == "retry"
+      assert correction["summary"] =~ "fresh local handoff progress"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "quiet high-token worker with stale local handoff checkpoint creates handoff retry correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-dirty-handoff-retry-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      issue_id = "issue-stale-dirty-handoff-retry"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-STALEDIRTYHANDOFF",
+        state: "Rework",
+        title: "Stale dirty handoff retry",
+        description: "Existing dirty handoff work should retry through handoff recovery",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      progress_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
+      File.mkdir_p!(Path.dirname(progress_path))
+      File.write!(progress_path, "baseline swipe deck\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      File.write!(progress_path, "dirty handoff work from an earlier turn\n")
+
+      stale_progress_time =
+        DateTime.utc_now()
+        |> DateTime.add(-240, :second)
+        |> DateTime.to_naive()
+        |> NaiveDateTime.to_erl()
+
+      File.touch!(progress_path, stale_progress_time)
+      started_at = DateTime.add(DateTime.utc_now(), -180, :second)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.no-durable-progress-handoff"
+      assert correction["source_status"] == "retryable"
+      assert correction["next_action"] == "retry"
+      assert correction["summary"] =~ "handoff progress"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "quiet high-token worker with already retried stale handoff checkpoint creates blocking correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-dirty-handoff-repeat-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      issue_id = "issue-stale-dirty-handoff-repeat-block"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-STALEDIRTYREPEAT",
+        state: "Rework",
+        title: "Stale dirty handoff repeat",
+        description: "Existing dirty handoff work should only get one retry without fresh progress",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      progress_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
+      File.mkdir_p!(Path.dirname(progress_path))
+      File.write!(progress_path, "baseline swipe deck\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      File.write!(progress_path, "dirty handoff work from an earlier turn\n")
+
+      stale_progress_time =
+        DateTime.utc_now()
+        |> DateTime.add(-240, :second)
+        |> DateTime.to_naive()
+        |> NaiveDateTime.to_erl()
+
+      File.touch!(progress_path, stale_progress_time)
+
+      assert {:ok, _prior_retry} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress-handoff",
+                 source_status: "retryable",
+                 summary: "Prior retry for stale local handoff progress.",
+                 findings: ["no-durable-progress"],
+                 next_action: "retry"
+               })
+
+      assert :ok =
+               Workspace.resolve_blocking_corrections_in_workspace(
+                 workspace,
+                 "review_rework_needed: PR #4 has current-head review feedback."
+               )
+
+      workspace
+      |> Path.join(".orocsy/delivery/inbox/correction_*.*")
+      |> Path.wildcard()
+      |> Enum.each(&File.touch!(&1, stale_progress_time))
+
+      [
+        ".orocsy",
+        ".orocsy/delivery",
+        ".orocsy/delivery/inbox"
+      ]
+      |> Enum.map(&Path.join(workspace, &1))
+      |> Enum.each(&File.touch!(&1, stale_progress_time))
+
+      started_at = DateTime.add(DateTime.utc_now(), -180, :second)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      open_corrections = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert [correction] = open_corrections
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      refute correction["summary"] =~ "handoff progress"
     after
       File.rm_rf(test_root)
     end
@@ -1468,7 +4083,6 @@ defmodule SymphonyElixir.CoreTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
-      started_at = DateTime.add(DateTime.utc_now(), -2, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
       assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
@@ -1484,6 +4098,7 @@ defmodule SymphonyElixir.CoreTest do
                  stderr_to_stdout: true
                )
 
+      started_at = DateTime.utc_now()
       worker_pid = spawn(fn -> Process.sleep(:infinity) end)
 
       orchestrator_name = Module.concat(__MODULE__, :BranchDurableProgressOrchestrator)
@@ -1523,6 +4138,102 @@ defmodule SymphonyElixir.CoreTest do
       assert Map.has_key?(state.running, issue_id)
       assert MapSet.member?(state.claimed, issue_id)
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "stale issue branch creation does not create no durable progress handoff retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-branch-no-handoff-retry-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100
+      )
+
+      issue_id = "issue-branch-no-handoff-retry"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-BRANCHNOHANDOFF",
+        state: "In Progress",
+        title: "Branch without handoff progress",
+        description: "Branch creation alone should park instead of retrying dirty handoff recovery",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -180, :second)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
+
+      branch_name = "orocsy/cod-157-bridge-contract"
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", branch_name],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      stale_branch_time =
+        DateTime.utc_now()
+        |> DateTime.add(-120, :second)
+        |> DateTime.to_naive()
+        |> NaiveDateTime.to_erl()
+
+      workspace
+      |> Path.join(".git/logs/refs/heads/#{branch_name}")
+      |> File.touch!(stale_branch_time)
+
+      running_entry = %{
+        pid: nil,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: started_at,
+        workspace_path: workspace,
+        codex_total_tokens: 500
+      }
+
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) >= 60_000
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{issue_id => running_entry},
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      refute correction["summary"] =~ "handoff progress"
     after
       File.rm_rf(test_root)
     end
@@ -1629,6 +4340,251 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dirty file progress bypasses first durable event token budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-first-event-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-dirty-first-event"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-DIRTYFIRST",
+        state: "In Progress",
+        title: "Dirty first progress",
+        description: "Dirty scoped work should count as first substantive progress",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -2, :second)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, "progress.txt"), "dirty work proves first progress\n")
+
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+      end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: worker_pid,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 1_500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      assert Map.has_key?(state.running, issue_id)
+      assert MapSet.member?(state.claimed, issue_id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "local handoff recovery checkpoint bypasses first durable event token budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-handoff-first-event-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue_id = "issue-dirty-handoff-first-event"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-DIRTYHANDOFFFIRST",
+        state: "Rework",
+        title: "Dirty handoff first progress",
+        description: "Existing dirty handoff work should not be killed by the first-event guard",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, "progress.txt"), "dirty handoff work from a previous turn\n")
+      started_at = DateTime.utc_now()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 1_500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      assert Map.has_key?(state.running, issue_id)
+      assert MapSet.member?(state.claimed, issue_id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "first-turn MIU handoff event does not bypass first durable event token budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-first-turn-handoff-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-first-turn-handoff-only"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-HANDOFFONLY",
+        state: "In Progress",
+        title: "First-turn handoff only",
+        description: "Worker alive event should not count as durable progress",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -2, :second)
+      event_ts = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(events_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "tool.finished",
+          "status" => "passed",
+          "tool" => "first-turn-miu-handoff",
+          "ts" => event_ts
+        }) <> "\n"
+      )
+
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+      end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: worker_pid,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 1_500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.missing-first-durable-event"
+      assert correction["summary"] =~ "first-turn-miu-handoff only proves the worker is alive"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dynamic eval events count as durable progress for high-token workers" do
     test_root =
       Path.join(
@@ -1724,6 +4680,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     issue_id = "issue-crash"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
@@ -1753,6 +4712,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -1760,7 +4720,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, sent_at_ms, 39_500, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -1792,6 +4752,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -1799,7 +4760,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, sent_at_ms, 9_000, 10_500)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -1919,11 +4880,11 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  defp assert_due_in_range(due_at_ms, sent_at_ms, min_delay_ms, max_delay_ms) do
+    now_ms = System.monotonic_time(:millisecond)
 
-    assert remaining_ms >= min_remaining_ms - 250
-    assert remaining_ms <= max_remaining_ms
+    assert due_at_ms >= sent_at_ms + min_delay_ms - 250
+    assert due_at_ms <= now_ms + max_delay_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -2265,6 +5226,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "MT-207"
     assert prompt =~ "orocsy/mt-207-lean-prompt"
     assert prompt =~ "first-turn-miu-handoff"
+    assert prompt =~ "review-feedback-classified"
+    assert prompt =~ "technical-miu-trace"
     assert prompt =~ "Never merge automatically"
     refute prompt =~ "FULL_WORKFLOW_TAIL_SHOULD_NOT_INLINE"
     assert byte_size(prompt) < 8_000
@@ -2357,7 +5320,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert String.starts_with?(prompt, "Dirty validated handoff checkpoint:")
       assert prompt =~ "guest continue regression passed"
-      assert prompt =~ "First action: inspect the focused diff, stage the intended files, commit, and push"
+      assert prompt =~ "First action: inspect the focused diff with `git diff -- <dirty-file>`"
+      assert prompt =~ "Commit and push only after focused validation passes"
+      assert prompt =~ "Do not run file-discovery commands such as `git ls-files`"
       assert prompt =~ "Do not query broad Linear/GitHub context"
       assert prompt =~ "Ticket MT-203"
     after
@@ -2405,6 +5370,79 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "run the smallest validation needed for those changed files"
       assert prompt =~ "Do not redo implementation"
       assert prompt =~ "Ticket MT-203"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder preserves local handoff checkpoint in review rework preflight prompts" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-local-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-203"], cd: workspace, stderr_to_stdout: true)
+
+      feedback_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
+      File.mkdir_p!(Path.dirname(feedback_path))
+      File.write!(feedback_path, "export const reviewFix = true;\n")
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/mt-203",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Fix current-head feedback.",
+          "issue" => "MT-203",
+          "review" => %{
+            "pr_number" => 4,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/4",
+            "head_sha" => "abcdef123456",
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeDeck.tsx",
+                "line" => 81,
+                "body" => "Open the recipe flow on accepted right swipes.",
+                "url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-203",
+        title: "Recover review rework handoff",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-203",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Local handoff recovery checkpoint:")
+      assert prompt =~ "Runtime dispatch preflight:"
+      assert prompt =~ "If a dirty/local handoff checkpoint appears above"
+      assert prompt =~ "src/features/swipe/SwipeDeck.tsx"
+      refute prompt =~ "Ticket MT-203"
     after
       File.rm_rf(workspace)
     end
@@ -2547,6 +5585,9 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
+          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+            {:ok, []}
+
           true ->
             {:error, {:unexpected_endpoint, endpoint}}
         end
@@ -2686,6 +5727,9 @@ defmodule SymphonyElixir.CoreTest do
           endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
             {:ok, []}
 
+          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+            {:ok, []}
+
           true ->
             {:error, {:unexpected_endpoint, endpoint}}
         end
@@ -2730,6 +5774,148 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
       refute_receive {:memory_tracker_state_update, "issue-direct-handoff-feedback", "Human Review"}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator pauses pushed handoff while fresh Codex review request is pending" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-direct-pushed-handoff-review-pending-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"]
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-direct-handoff-review-pending",
+        identifier: "MT-207",
+        title: "Await fresh review",
+        description: "Fresh Codex review was requested after the pushed fix.",
+        state: "Rework",
+        branch_name: "orocsy/mt-207",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-207"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed review fix.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Push review fix"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-207", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-207"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-15T09:23:00Z"}\n)
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 3,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3",
+                 "head" => %{"sha" => "abc123current", "ref" => "orocsy/mt-207"}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Old current-head feedback before the fresh review request.",
+                 "commit_id" => "abc123current",
+                 "path" => "README.md",
+                 "line" => 3,
+                 "created_at" => "2026-05-15T09:20:00Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review\n\nFresh review requested after abc123current.",
+                 "created_at" => "2026-05-15T09:24:37Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment"
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => "abc123current",
+                 "reviewThreads" => %{
+                   "nodes" => [
+                     %{
+                       "isResolved" => false,
+                       "isOutdated" => false,
+                       "comments" => %{
+                         "nodes" => [
+                           %{
+                             "body" => "Old current-head feedback before the fresh review request.",
+                             "path" => "README.md",
+                             "line" => 3,
+                             "createdAt" => "2026-05-15T09:20:00Z",
+                             "url" => "https://github.com/acme/nutribuddy/pull/3#discussion"
+                           }
+                         ]
+                       }
+                     }
+                   ],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert {:blocked, :review_pending} = Orchestrator.complete_pushed_handoff_for_test(issue)
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-review-pending", "Human Review"}, 50
     after
       File.rm_rf(test_root)
     end
@@ -3133,6 +6319,301 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.at(turn_texts, 1) =~ "do not redo product code"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops after worker creates open blocking correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-blocking-correction-stop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-blocking"}}}'
+            ;;
+          4)
+            mkdir -p .orocsy/delivery/inbox
+            cat > .orocsy/delivery/inbox/correction_worker_blocked.json <<'JSON'
+      {"correction_id":"correction_worker_blocked","status":"open","next_action":"block","resolved_at":null,"summary":"validation blocked"}
+      JSON
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-blocking-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          5)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-blocking-2"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, {:issue_state_fetch, :unexpected})
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-blocking-correction-stop",
+             identifier: "MT-248",
+             title: "Still active",
+             description: "Would continue without blocker awareness.",
+             state: "In Progress"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-blocking-correction-stop",
+        identifier: "MT-248",
+        title: "Stop after blocker",
+        description: "Worker creates an open Orocsy correction.",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-248",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      refute_receive {:issue_state_fetch, :unexpected}, 100
+
+      trace = File.read!(trace_file)
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
+
+      workspace = Path.join(workspace_root, "MT-248")
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops after review-rework pushed handoff while issue remains active" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-review-handoff-stop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      origin_repo = Path.join(test_root, "origin.git")
+      codex_binary = Path.join(test_root, "fake-codex")
+      setup_script = Path.join(test_root, "setup-workspace.sh")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+      {_output, 0} = System.cmd("git", ["init", "--bare", origin_repo], stderr_to_stdout: true)
+
+      File.write!(setup_script, """
+      #!/bin/sh
+      set -eu
+      git init -b main
+      git config user.email symphony@example.test
+      git config user.name "Symphony Test"
+      printf '# Test\\n' > README.md
+      git add README.md
+      git commit -m initial
+      git switch -c orocsy/mt-249
+      printf '# Test\\n\\nReady.\\n' > README.md
+      git add README.md
+      git commit -m 'Add review handoff'
+      git remote add origin '#{origin_repo}'
+      git push -u origin orocsy/mt-249
+      printf '.orocsy/\\n' >> .git/info/exclude
+      mkdir -p .orocsy/delivery/events
+      printf '%s\\n' '{"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-15T09:51:00Z"}' > .orocsy/delivery/events/events.jsonl
+      """)
+
+      File.chmod!(setup_script, 0o755)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$line" in
+          *'"method":"initialize"'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"method":"thread/start"'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-handoff"}}}'
+            ;;
+          *'"method":"turn/start"'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-handoff-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn ->
+        System.delete_env("SYMP_TEST_CODEx_TRACE")
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: setup_script,
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review", "Rework"]
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 3,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3",
+                 "head" => %{"sha" => "abc123current", "ref" => "orocsy/mt-249"}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/issues/3/comments" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => "abc123current",
+                 "reviewThreads" => %{
+                   "nodes" => [
+                     %{
+                       "isResolved" => false,
+                       "isOutdated" => false,
+                       "comments" => %{
+                         "nodes" => [
+                           %{
+                             "author" => %{"login" => "codex"},
+                             "body" => "Fix current review feedback.",
+                             "path" => "README.md",
+                             "line" => 3,
+                             "originalLine" => 3,
+                             "createdAt" => "2026-05-15T09:40:00Z",
+                             "outdated" => false,
+                             "url" => "https://github.com/acme/nutribuddy/pull/3#discussion"
+                           }
+                         ]
+                       }
+                     }
+                   ],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, {:issue_state_fetch, :unexpected})
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-review-handoff-stop",
+             identifier: "MT-249",
+             title: "Stop after pushed review handoff",
+             description: "Still active after a review handoff.",
+             state: "Rework",
+             branch_name: "orocsy/mt-249"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-review-handoff-stop",
+        identifier: "MT-249",
+        title: "Stop after pushed review handoff",
+        description: "Fix current review feedback.",
+        state: "Rework",
+        branch_name: "orocsy/mt-249",
+        url: "https://example.org/issues/MT-249",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      refute_receive {:issue_state_fetch, :unexpected}, 100
+
+      trace = File.read!(trace_file)
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
+      assert trace =~ "Runtime dispatch preflight:"
+      assert trace =~ "Pushed validated handoff checkpoint:"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+      Application.delete_env(:symphony_elixir, :github_graphql_runner)
       File.rm_rf(test_root)
     end
   end

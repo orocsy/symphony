@@ -7,11 +7,13 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, PromptBuilder, ReviewMonitor, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, DispatchPreflight, PromptBuilder, RescueSupervisor, ReviewMonitor, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @review_rework_first_event_max_tokens 30_000
+  @recent_codex_update_limit 8
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @durable_progress_event_names [
@@ -147,16 +149,24 @@ defmodule SymphonyElixir.Orchestrator do
                 |> complete_issue(issue_id)
                 |> release_issue_claim(issue_id)
               else
-                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+                if normal_completion_handoff_stop?(running_entry) do
+                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; pushed handoff checkpoint blocks continuation until review/Linear state changes")
 
-                state
-                |> complete_issue(issue_id)
-                |> schedule_issue_retry(issue_id, 1, %{
-                  identifier: running_entry.identifier,
-                  delay_type: :continuation,
-                  worker_host: Map.get(running_entry, :worker_host),
-                  workspace_path: Map.get(running_entry, :workspace_path)
-                })
+                  state
+                  |> complete_issue(issue_id)
+                  |> release_issue_claim(issue_id)
+                else
+                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+                  state
+                  |> complete_issue(issue_id)
+                  |> schedule_issue_retry(issue_id, 1, %{
+                    identifier: running_entry.identifier,
+                    delay_type: :continuation,
+                    worker_host: Map.get(running_entry, :worker_host),
+                    workspace_path: Map.get(running_entry, :workspace_path)
+                  })
+                end
               end
 
             _ ->
@@ -233,10 +243,13 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         :ok <- ReviewMonitor.run_once(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         :ok <- ReviewMonitor.run_once(),
+         {:ok, rescued_issue_ids} <- RescueSupervisor.run_once(issues),
          true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+      issues
+      |> Enum.reject(&MapSet.member?(rescued_issue_ids, &1.id))
+      |> choose_issues(state)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -324,6 +337,12 @@ defmodule SymphonyElixir.Orchestrator do
     @doc false
     def reconcile_no_durable_progress_for_test(%State{} = state) do
       reconcile_no_durable_progress_running_issues(state)
+    end
+
+    @doc false
+    def rescue_open_corrections_for_test(issues, %State{} = state) when is_list(issues) do
+      _ = RescueSupervisor.run_once(issues)
+      state
     end
 
     @doc false
@@ -530,37 +549,63 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     elapsed_ms = runtime_elapsed_ms(running_entry, now)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    first_event_max_tokens = effective_first_event_max_tokens(running_entry, first_event_max_tokens)
+    first_event_progress_tokens = first_event_progress_tokens(running_entry, total_tokens)
+    durable_progress_guard_tokens = durable_progress_guard_tokens(running_entry, total_tokens)
+    cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
 
     quiet_ms = durable_progress_quiet_ms(running_entry, now)
 
-    no_first_event? = not durable_event_progress_observed?(running_entry)
+    no_first_event? =
+      not substantive_first_progress_observed?(running_entry) and
+        not handoff_recovery_progress_observed?(running_entry)
 
     cond do
       is_integer(first_event_max_tokens) and first_event_max_tokens > 0 and
-        total_tokens >= first_event_max_tokens and no_first_event? ->
+        first_event_progress_tokens >= first_event_max_tokens and no_first_event? ->
         identifier = Map.get(running_entry, :identifier, issue_id)
         session_id = running_entry_session_id(running_entry)
 
         Logger.warning(
-          "Issue exceeded first durable event token budget: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} codex_total_tokens=#{total_tokens} first_event_max_tokens=#{first_event_max_tokens}; parking for workflow correction"
+          "Issue exceeded first durable event token budget: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} codex_total_tokens=#{total_tokens} first_event_progress_tokens=#{first_event_progress_tokens} first_event_max_tokens=#{first_event_max_tokens}; parking for workflow correction"
         )
 
-        failure = missing_first_durable_event_failure(elapsed_ms, total_tokens, first_event_max_tokens)
-        reason = {:missing_first_durable_event, elapsed_ms, total_tokens, first_event_max_tokens}
+        failure =
+          missing_first_durable_event_failure(
+            elapsed_ms,
+            total_tokens,
+            first_event_progress_tokens,
+            first_event_max_tokens,
+            Map.get(running_entry, :codex_cached_input_tokens, 0)
+          )
+
+        reason = {:missing_first_durable_event, elapsed_ms, first_event_progress_tokens, first_event_max_tokens}
 
         park_running_issue(state, issue_id, running_entry, reason, failure)
 
       is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
-          total_tokens >= min_tokens ->
+          durable_progress_guard_tokens >= min_tokens ->
         identifier = Map.get(running_entry, :identifier, issue_id)
         session_id = running_entry_session_id(running_entry)
 
         Logger.warning(
-          "Issue has no recent durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms} codex_total_tokens=#{total_tokens}; parking for workflow correction"
+          "Issue has no recent durable progress: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms} codex_total_tokens=#{total_tokens} durable_progress_guard_tokens=#{durable_progress_guard_tokens}; parking for workflow correction"
         )
 
-        failure = no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens)
-        reason = {:no_durable_progress, elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens}
+        failure =
+          elapsed_ms
+          |> no_durable_progress_failure(
+            quiet_ms,
+            total_tokens,
+            durable_progress_guard_tokens,
+            cached_input_tokens,
+            timeout_ms,
+            min_tokens
+          )
+          |> maybe_recover_no_durable_progress_handoff(running_entry)
+
+        reason =
+          {:no_durable_progress, elapsed_ms, quiet_ms, durable_progress_guard_tokens, timeout_ms, min_tokens}
 
         park_running_issue(state, issue_id, running_entry, reason, failure)
 
@@ -580,6 +625,11 @@ defmodule SymphonyElixir.Orchestrator do
     def durable_progress_quiet_ms_for_test(running_entry, now) do
       durable_progress_quiet_ms(running_entry, now)
     end
+
+    @doc false
+    def integrate_codex_update_for_test(running_entry, update) do
+      integrate_codex_update(running_entry, update)
+    end
   end
 
   defp durable_progress_quiet_ms(%{worker_host: worker_host}, _now)
@@ -588,12 +638,17 @@ defmodule SymphonyElixir.Orchestrator do
     nil
   end
 
-  defp durable_progress_quiet_ms(%{workspace_path: workspace, started_at: %DateTime{} = started_at}, %DateTime{} = now)
+  defp durable_progress_quiet_ms(
+         %{workspace_path: workspace, started_at: %DateTime{} = started_at} = running_entry,
+         %DateTime{} = now
+       )
        when is_binary(workspace) do
+    count_dispatch_preflight? = count_dispatch_preflight_progress?(%{workspace_path: workspace})
+
     observed_at =
       if File.dir?(workspace) do
-        workspace
-        |> durable_progress_observed_times(started_at)
+        (runtime_validation_progress_times(running_entry) ++
+           durable_progress_observed_times(workspace, started_at, count_dispatch_preflight?))
         |> latest_datetime()
       end
 
@@ -607,17 +662,69 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp durable_progress_quiet_ms(_running_entry, _now), do: nil
 
-  defp durable_event_progress_observed?(%{workspace_path: workspace, started_at: %DateTime{} = started_at})
+  defp substantive_first_progress_observed?(%{workspace_path: workspace, started_at: %DateTime{} = started_at} = running_entry)
        when is_binary(workspace) do
-    File.dir?(workspace) and event_durable_progress_times(workspace, started_at) != []
+    count_dispatch_preflight? = count_dispatch_preflight_progress?(%{workspace_path: workspace})
+
+    File.dir?(workspace) and
+      runtime_validation_progress_times(running_entry) ++
+        event_durable_progress_times(workspace, started_at, count_dispatch_preflight?) ++
+        git_substantive_progress_times(workspace, started_at) != []
   rescue
     _error -> false
   end
 
-  defp durable_event_progress_observed?(_running_entry), do: false
+  defp substantive_first_progress_observed?(_running_entry), do: false
 
-  defp durable_progress_observed_times(workspace, started_at) do
-    git_durable_progress_times(workspace, started_at) ++ event_durable_progress_times(workspace, started_at)
+  defp handoff_recovery_progress_observed?(%{workspace_path: workspace}) when is_binary(workspace) do
+    local_handoff_recovery_workspace?(workspace)
+  rescue
+    _error -> false
+  end
+
+  defp handoff_recovery_progress_observed?(_running_entry), do: false
+
+  defp local_handoff_recovery_workspace?(workspace) when is_binary(workspace) do
+    meaningful_local_handoff_progress?(workspace) and
+      case PromptBuilder.workspace_recovery_checkpoint(workspace) do
+        "Dirty validated handoff checkpoint:" <> _ -> true
+        "Local handoff recovery checkpoint:" <> _ -> true
+        _ -> false
+      end
+  end
+
+  defp meaningful_local_handoff_progress?(workspace) when is_binary(workspace) do
+    meaningful_git_dirty_paths(workspace) != [] or
+      not is_nil(git_ahead_commit_observed_at(workspace)) or
+      not is_nil(git_upstream_progress_observed_at(workspace))
+  rescue
+    _error -> false
+  end
+
+  defp meaningful_git_dirty_paths(workspace) do
+    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
+      {status, 0} ->
+        status
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&porcelain_status_paths/1)
+        |> Enum.reject(&generated_runtime_path?/1)
+
+      {_error, _exit_code} ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp generated_runtime_path?(path) when is_binary(path) do
+    String.starts_with?(path, [".orocsy/", ".codex/"])
+  end
+
+  defp generated_runtime_path?(_path), do: false
+
+  defp durable_progress_observed_times(workspace, started_at, count_dispatch_preflight?) do
+    git_durable_progress_times(workspace, started_at) ++
+      event_durable_progress_times(workspace, started_at, count_dispatch_preflight?)
   end
 
   defp git_durable_progress_times(workspace, started_at) do
@@ -630,6 +737,25 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.reject(&is_nil/1)
     |> Enum.filter(&datetime_at_or_after?(&1, started_at))
   end
+
+  defp git_substantive_progress_times(workspace, started_at) do
+    [
+      git_dirty_observed_at(workspace),
+      git_ahead_commit_observed_at(workspace),
+      git_upstream_progress_observed_at(workspace)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&datetime_at_or_after?(&1, started_at))
+  end
+
+  defp runtime_validation_progress_times(%{
+         started_at: %DateTime{} = started_at,
+         last_validation_progress_at: %DateTime{} = progress_at
+       }) do
+    if datetime_at_or_after?(progress_at, started_at), do: [progress_at], else: []
+  end
+
+  defp runtime_validation_progress_times(_running_entry), do: []
 
   defp git_dirty_observed_at(workspace) do
     case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
@@ -762,10 +888,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp event_durable_progress_times(workspace, started_at) do
+  defp event_durable_progress_times(workspace, started_at, count_dispatch_preflight?) do
     workspace
     |> durable_progress_event_paths()
-    |> Enum.flat_map(&durable_progress_event_file_times(&1, started_at))
+    |> Enum.flat_map(&durable_progress_event_file_times(&1, started_at, count_dispatch_preflight?))
   end
 
   defp durable_progress_event_paths(workspace) do
@@ -775,11 +901,11 @@ defmodule SymphonyElixir.Orchestrator do
     ]
   end
 
-  defp durable_progress_event_file_times(path, started_at) do
+  defp durable_progress_event_file_times(path, started_at, count_dispatch_preflight?) do
     if File.regular?(path) do
       path
       |> File.stream!()
-      |> Enum.flat_map(&durable_progress_event_line_times(&1, started_at))
+      |> Enum.flat_map(&durable_progress_event_line_times(&1, started_at, count_dispatch_preflight?))
     else
       []
     end
@@ -787,10 +913,10 @@ defmodule SymphonyElixir.Orchestrator do
     _error -> []
   end
 
-  defp durable_progress_event_line_times(line, started_at) when is_binary(line) do
-    with true <- String.contains?(line, ~s("status": "passed")),
-         {:ok, decoded} <- Jason.decode(line),
-         true <- durable_progress_event?(decoded),
+  defp durable_progress_event_line_times(line, started_at, count_dispatch_preflight?) when is_binary(line) do
+    with {:ok, decoded} <- Jason.decode(line),
+         true <- Map.get(decoded, "status") == "passed",
+         true <- durable_progress_event?(decoded, count_dispatch_preflight?),
          %DateTime{} = datetime <- decoded |> Map.get("ts") |> datetime_from_iso8601(),
          true <- datetime_at_or_after?(datetime, started_at) do
       [datetime]
@@ -799,14 +925,64 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp durable_progress_event?(%{"event" => event} = decoded) when is_binary(event) do
+  defp durable_progress_event?(%{"source" => "symphony.runtime.dispatch-preflight"}, false), do: false
+
+  defp durable_progress_event?(%{"event" => "tool.finished", "tool" => "first-turn-miu-handoff"}, _count_dispatch_preflight?),
+    do: false
+
+  defp durable_progress_event?(%{"event" => event} = decoded, _count_dispatch_preflight?) when is_binary(event) do
     event in @durable_progress_event_names or
       String.starts_with?(event, "eval.") or
       String.starts_with?(event, "handoff.") or
       Map.get(decoded, "phase") == "eval"
   end
 
-  defp durable_progress_event?(_decoded), do: false
+  defp durable_progress_event?(_decoded, _count_dispatch_preflight?), do: false
+
+  defp effective_first_event_max_tokens(running_entry, configured) when is_integer(configured) and configured > 0 do
+    if review_rework_running_entry?(running_entry) do
+      min(configured, @review_rework_first_event_max_tokens)
+    else
+      configured
+    end
+  end
+
+  defp effective_first_event_max_tokens(_running_entry, configured), do: configured
+
+  defp first_event_progress_tokens(running_entry, total_tokens) when is_integer(total_tokens) do
+    if review_rework_running_entry?(running_entry) do
+      cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
+      max(total_tokens - cached_input_tokens, 0)
+    else
+      total_tokens
+    end
+  end
+
+  defp first_event_progress_tokens(_running_entry, total_tokens), do: total_tokens
+
+  defp durable_progress_guard_tokens(running_entry, total_tokens) when is_integer(total_tokens) do
+    if review_rework_running_entry?(running_entry) do
+      cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
+      max(total_tokens - cached_input_tokens, 0)
+    else
+      total_tokens
+    end
+  end
+
+  defp durable_progress_guard_tokens(_running_entry, total_tokens), do: total_tokens
+
+  defp count_dispatch_preflight_progress?(running_entry), do: not review_rework_running_entry?(running_entry)
+
+  defp review_rework_running_entry?(%{workspace_path: workspace}) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_running_entry?(_running_entry), do: false
 
   defp datetime_from_iso8601(value) when is_binary(value) and value != "" do
     case DateTime.from_iso8601(value) do
@@ -914,9 +1090,42 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_complete_pushed_review_handoff(_issue), do: :not_ready
 
   defp complete_pushed_review_handoff(%Issue{} = issue, candidate) do
-    with {:ok, inspection} <- inspect_pushed_review_handoff(issue, candidate),
-         :clean <- pushed_review_feedback_status(inspection),
-         {:ok, target_state} <- handoff_review_state(),
+    case inspect_pushed_review_handoff(issue, candidate) do
+      {:ok, inspection} ->
+        complete_inspected_pushed_review_handoff(issue, candidate, inspection)
+
+      {:error, {:missing_pull_request, _candidate}} ->
+        :not_ready
+
+      {:error, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+
+      {:blocked, reason} ->
+        {:blocked, reason}
+    end
+  end
+
+  defp complete_inspected_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
+    case pushed_review_feedback_status(inspection) do
+      :clean ->
+        finish_clean_pushed_review_handoff(issue, candidate, inspection)
+
+      :has_review_feedback ->
+        if codex_review_request_pending?(inspection) do
+          Logger.info(
+            "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+          )
+
+          {:blocked, :review_pending}
+        else
+          :not_ready
+        end
+    end
+  end
+
+  defp finish_clean_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
+    with {:ok, target_state} <- handoff_review_state(),
          :ok <- Tracker.update_issue_state(issue.id, target_state) do
       _ = Tracker.create_comment(issue.id, direct_handoff_comment(issue, candidate, inspection, target_state))
       record_direct_handoff_event(candidate.workspace, issue, candidate, inspection, target_state)
@@ -935,20 +1144,8 @@ defmodule SymphonyElixir.Orchestrator do
          pr_url: inspection.pr_url
        }}
     else
-      :not_ready ->
-        :not_ready
-
-      :has_review_feedback ->
-        :not_ready
-
-      {:error, {:missing_pull_request, _candidate}} ->
-        :not_ready
-
       {:error, reason} ->
         park_pushed_handoff_blocker(issue, candidate, reason)
-        {:blocked, reason}
-
-      {:blocked, reason} ->
         {:blocked, reason}
     end
   end
@@ -1006,6 +1203,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pushed_review_feedback_status(_inspection), do: :has_review_feedback
+
+  defp codex_review_request_pending?(%{repo: repo, pr: pr, feedback: feedback}) do
+    case ReviewMonitor.codex_review_request_pending?(repo, pr, feedback) do
+      {:ok, pending?} ->
+        pending?
+
+      {:error, reason} ->
+        Logger.debug("Unable to inspect pending Codex review request: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp codex_review_request_pending?(_inspection), do: false
 
   defp handoff_review_state do
     Config.settings!().review_monitor.states
@@ -1170,7 +1380,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !issue_blocked_by_non_terminal?(issue, terminal_states) and
       !workflow_blocked_by_open_correction?(issue) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
@@ -1213,6 +1423,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
+      issue_allowed_by_tracker?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
@@ -1225,22 +1436,37 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_routable_to_worker?(_issue), do: true
 
-  defp todo_issue_blocked_by_non_terminal?(
-         %Issue{state: issue_state, blocked_by: blockers},
-         terminal_states
-       )
-       when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
-      Enum.any?(blockers, fn
-        %{state: blocker_state} when is_binary(blocker_state) ->
-          !terminal_issue_state?(blocker_state, terminal_states)
+  defp issue_allowed_by_tracker?(%Issue{} = issue) do
+    allowlist = Config.settings!().tracker.issue_allowlist || []
 
-        _ ->
-          true
-      end)
+    allowlist =
+      allowlist
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> MapSet.new()
+
+    MapSet.size(allowlist) == 0 or
+      MapSet.member?(allowlist, issue.id || "") or
+      MapSet.member?(allowlist, issue.identifier || "")
   end
 
-  defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+  defp issue_allowed_by_tracker?(_issue), do: false
+
+  defp issue_blocked_by_non_terminal?(
+         %Issue{blocked_by: blockers},
+         terminal_states
+       )
+       when is_list(blockers) do
+    Enum.any?(blockers, fn
+      %{state: blocker_state} when is_binary(blocker_state) ->
+        !terminal_issue_state?(blocker_state, terminal_states)
+
+      _ ->
+        true
+    end)
+  end
+
+  defp issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1328,9 +1554,11 @@ defmodule SymphonyElixir.Orchestrator do
             codex_input_tokens: 0,
             codex_output_tokens: 0,
             codex_total_tokens: 0,
+            codex_cached_input_tokens: 0,
             codex_last_reported_input_tokens: 0,
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
+            codex_last_reported_cached_input_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now()
@@ -1585,7 +1813,7 @@ defmodule SymphonyElixir.Orchestrator do
             source: "symphony.runtime.#{failure.kind}",
             source_status: failure.source_status,
             summary: failure.summary,
-            findings: [failure_reason_text(reason)],
+            findings: runtime_failure_findings(reason, running_entry),
             required_corrections: failure.required_corrections,
             next_action: failure.next_action
           }
@@ -1618,6 +1846,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_put_failure_guard(attrs, %{guard: guard}) when is_map(guard), do: Map.put(attrs, :guard, guard)
   defp maybe_put_failure_guard(attrs, _failure), do: attrs
+
+  defp runtime_failure_findings(reason, running_entry) do
+    guard_reason = "Guard reason: #{failure_reason_text(reason)}"
+
+    case Map.get(running_entry, :recent_codex_events, []) do
+      events when is_list(events) and events != [] ->
+        [
+          "Recent Codex worker evidence:\n" <>
+            (events
+             |> Enum.take(-@recent_codex_update_limit)
+             |> Enum.map_join("\n", &"- #{redact_runtime_evidence(&1)}")),
+          guard_reason
+        ]
+
+      _ ->
+        [guard_reason]
+    end
+  end
 
   defp park_running_issue(%State{} = state, issue_id, running_entry, reason, failure) do
     state = terminate_running_issue(state, issue_id, false)
@@ -1684,7 +1930,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_recover_token_budget_handoff(%{kind: "token-budget"} = failure, running_entry) do
-    if fresh_local_handoff_progress?(running_entry) do
+    if local_handoff_progress_for_recovery?(running_entry) do
       %{
         failure
         | action: :retry,
@@ -1706,23 +1952,119 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_recover_token_budget_handoff(failure, _running_entry), do: failure
 
+  defp maybe_recover_no_durable_progress_handoff(%{kind: "no-durable-progress"} = failure, running_entry) do
+    if local_handoff_progress_for_recovery?(running_entry) do
+      %{
+        failure
+        | action: :retry,
+          kind: "no-durable-progress-handoff",
+          source_status: "retryable",
+          next_action: "retry",
+          summary:
+            "Symphony stopped a Codex worker after a quiet high-token period, but the workspace contains fresh local handoff progress from this run. Symphony will retry through the constrained dirty-handoff prompt instead of treating the issue as unfinished product work.",
+          required_corrections: [
+            "Resume from the existing workspace and inspect only the focused local diff/local commits first.",
+            "Run focused validation for the changed files, then push the existing branch and update PR/Linear handoff before any broad rediscovery.",
+            "If the next turn hits the durable-progress guard again without new local progress, park with a blocking correction."
+          ]
+      }
+    else
+      failure
+    end
+  end
+
+  defp maybe_recover_no_durable_progress_handoff(failure, _running_entry), do: failure
+
+  defp local_handoff_progress_for_recovery?(running_entry) do
+    fresh_local_handoff_progress?(running_entry) or
+      stale_handoff_recovery_retry_available?(running_entry)
+  end
+
+  defp stale_handoff_recovery_retry_available?(%{workspace_path: workspace} = running_entry) when is_binary(workspace) do
+    handoff_recovery_progress_observed?(running_entry) and
+      not handoff_recovery_retry_attempted_after_local_progress?(workspace)
+  rescue
+    _error -> false
+  end
+
+  defp stale_handoff_recovery_retry_available?(_running_entry), do: false
+
   defp fresh_local_handoff_progress?(%{workspace_path: workspace, started_at: %DateTime{} = started_at})
        when is_binary(workspace) do
-    File.dir?(workspace) and git_durable_progress_times(workspace, started_at) != []
+    File.dir?(workspace) and git_substantive_progress_times(workspace, started_at) != []
   rescue
     _error -> false
   end
 
   defp fresh_local_handoff_progress?(_running_entry), do: false
 
-  defp no_durable_progress_failure(elapsed_ms, quiet_ms, total_tokens, timeout_ms, min_tokens) do
+  defp handoff_recovery_retry_attempted_after_local_progress?(workspace) when is_binary(workspace) do
+    with %DateTime{} = progress_at <- local_handoff_progress_observed_at(workspace) do
+      workspace
+      |> handoff_recovery_correction_created_times()
+      |> Enum.any?(&datetime_at_or_after?(&1, progress_at))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp local_handoff_progress_observed_at(workspace) do
+    [
+      git_dirty_observed_at(workspace),
+      git_ahead_commit_observed_at(workspace),
+      git_upstream_progress_observed_at(workspace)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> latest_datetime()
+  end
+
+  defp handoff_recovery_correction_created_times(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+    |> Path.wildcard()
+    |> Enum.flat_map(&handoff_recovery_correction_created_time/1)
+  end
+
+  defp handoff_recovery_correction_created_time(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, %{} = correction} <- Jason.decode(body),
+         true <- handoff_recovery_correction?(correction),
+         %DateTime{} = created_at <- correction |> Map.get("created_at") |> datetime_from_iso8601() do
+      [created_at]
+    else
+      _ -> []
+    end
+  end
+
+  defp handoff_recovery_correction?(%{} = correction) do
+    source = correction["source"] || ""
+    kind = correction["kind"] || ""
+
+    String.contains?(source, "no-durable-progress-handoff") or
+      String.contains?(source, "token-budget-handoff") or
+      String.ends_with?(kind, "-handoff")
+  end
+
+  defp handoff_recovery_correction?(_correction), do: false
+
+  defp no_durable_progress_failure(
+         elapsed_ms,
+         quiet_ms,
+         total_tokens,
+         durable_progress_guard_tokens,
+         cached_input_tokens,
+         timeout_ms,
+         min_tokens
+       ) do
     %{
       action: :block,
       kind: "no-durable-progress",
       source_status: "blocked",
       next_action: "block",
       summary:
-        "Symphony stopped a Codex worker because it used #{total_tokens} tokens over #{elapsed_ms}ms and had no recent durable progress for #{quiet_ms}ms. High token usage is allowed when the worker continues to produce dirty files, commits, or passed MIU/gate evidence; this guard only parks the high-token/no-recent-progress case.",
+        "Symphony stopped a Codex worker because it used #{durable_progress_guard_tokens} counted tokens over #{elapsed_ms}ms and had no recent durable progress for #{quiet_ms}ms. Total reported tokens were #{total_tokens}, including #{cached_input_tokens} cached input tokens. High token usage is allowed when the worker continues to produce dirty files, commits, or passed MIU/gate evidence; this guard only parks the high-token/no-recent-progress case.",
       required_corrections: [
         "Inspect the workspace and worker log to confirm whether the turn was rediscovering context, blocked on hidden tool state, or missing a code-level MIU handoff.",
         "Add or refresh a Technical MIU handoff with current file paths, target code shape, data lifetime, concurrency rule, exact tests, and validation commands before redispatching.",
@@ -1732,28 +2074,38 @@ defmodule SymphonyElixir.Orchestrator do
         elapsed_ms: elapsed_ms,
         quiet_ms: quiet_ms,
         total_tokens: total_tokens,
+        durable_progress_guard_tokens: durable_progress_guard_tokens,
+        cached_input_tokens: cached_input_tokens,
         timeout_ms: timeout_ms,
         min_tokens: min_tokens
       }
     }
   end
 
-  defp missing_first_durable_event_failure(elapsed_ms, total_tokens, first_event_max_tokens) do
+  defp missing_first_durable_event_failure(
+         elapsed_ms,
+         total_tokens,
+         first_event_progress_tokens,
+         first_event_max_tokens,
+         cached_input_tokens
+       ) do
     %{
       action: :block,
       kind: "missing-first-durable-event",
       source_status: "blocked",
       next_action: "block",
       summary:
-        "Symphony stopped a Codex worker because it used #{total_tokens} tokens before recording the first durable Orocsy progress event. Creating an issue branch is only an early workspace checkpoint; workers must record a code-level MIU handoff, gate, eval, or handoff event before the first-event token budget is exhausted.",
+        "Symphony stopped a Codex worker because it used #{first_event_progress_tokens} counted tokens before recording the first durable Orocsy progress event. Total reported tokens were #{total_tokens}, including #{cached_input_tokens} cached input tokens. Creating an issue branch or recording first-turn-miu-handoff only proves the worker is alive; workers must produce scoped file progress, a commit, a focused test/gate/eval result, review classification, or a blocker classification before the first-event token budget is exhausted.",
       required_corrections: [
-        "Inspect the worker log to confirm why it did not record `first-turn-miu-handoff` before broad context reads or implementation work.",
+        "Inspect the worker log to confirm why it did not record real durable progress before broad context reads or implementation work.",
         "Shrink the first-turn prompt or workflow instructions, or make the worker record a blocker event when the issue shape is unclear.",
         "Redispatch only after the first durable event can be recorded before expensive code/doc exploration."
       ],
       guard: %{
         elapsed_ms: elapsed_ms,
         total_tokens: total_tokens,
+        first_event_progress_tokens: first_event_progress_tokens,
+        cached_input_tokens: cached_input_tokens,
         first_event_max_tokens: first_event_max_tokens
       }
     }
@@ -2094,6 +2446,7 @@ defmodule SymphonyElixir.Orchestrator do
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
+          codex_cached_input_tokens: Map.get(metadata, :codex_cached_input_tokens, 0),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -2151,11 +2504,32 @@ defmodule SymphonyElixir.Orchestrator do
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
     codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    codex_cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
     codex_app_server_pid = Map.get(running_entry, :codex_app_server_pid)
     last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
+    last_reported_cached_input = Map.get(running_entry, :codex_last_reported_cached_input_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+
+    previous_validation_command = Map.get(running_entry, :last_validation_command)
+    detected_command = command_from_codex_update(update)
+
+    validation_command =
+      cond do
+        validation_command?(detected_command) -> detected_command
+        is_binary(detected_command) -> nil
+        true -> previous_validation_command
+      end
+
+    validation_progress_at =
+      validation_progress_timestamp(update, validation_command) ||
+        Map.get(running_entry, :last_validation_progress_at)
+
+    recent_codex_events =
+      running_entry
+      |> Map.get(:recent_codex_events, [])
+      |> append_recent_codex_event(update, previous_validation_command)
 
     {last_codex_timestamp, last_codex_message, last_codex_event} =
       if display_codex_update?(update) do
@@ -2174,18 +2548,266 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_message: last_codex_message,
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: last_codex_event,
+        last_validation_command: validation_command,
+        last_validation_progress_at: validation_progress_at,
+        recent_codex_events: recent_codex_events,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
+        codex_cached_input_tokens: codex_cached_input_tokens + token_delta.cached_input_tokens,
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        codex_last_reported_cached_input_tokens: max(last_reported_cached_input, token_delta.cached_input_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
       }),
       token_delta
     }
   end
+
+  defp append_recent_codex_event(events, update, previous_validation_command) when is_list(events) do
+    case recent_codex_event_summary(update, previous_validation_command) do
+      nil -> events
+      summary -> Enum.take(events ++ [summary], -@recent_codex_update_limit)
+    end
+  end
+
+  defp append_recent_codex_event(_events, update, previous_validation_command) do
+    append_recent_codex_event([], update, previous_validation_command)
+  end
+
+  defp recent_codex_event_summary(update, previous_validation_command) when is_map(update) do
+    command = command_from_codex_update(update) || previous_validation_command
+    text = compact_codex_update_text(update)
+    event = update[:event] || Map.get(update, "event")
+    timestamp = update[:timestamp] || Map.get(update, "timestamp")
+    outcome = codex_update_outcome(text)
+
+    cond do
+      is_nil(command) and is_nil(outcome) and not errorish_text?(text) ->
+        nil
+
+      true ->
+        [
+          timestamp_to_text(timestamp),
+          "event=#{event || "unknown"}",
+          if(command, do: "command=#{command}", else: nil),
+          outcome,
+          if(errorish_text?(text), do: "detail=#{truncate_runtime_evidence(text, 320)}", else: nil)
+        ]
+        |> Enum.reject(&blank_recent_part?/1)
+        |> Enum.join(" ")
+    end
+  end
+
+  defp recent_codex_event_summary(_update, _previous_validation_command), do: nil
+
+  defp validation_progress_timestamp(%{timestamp: %DateTime{} = timestamp} = update, command) when is_binary(command) do
+    if validation_command?(command) and codex_update_success?(compact_codex_update_text(update)) do
+      timestamp
+    end
+  end
+
+  defp validation_progress_timestamp(update, command) when is_binary(command) do
+    if validation_command?(command) and codex_update_success?(compact_codex_update_text(update)) do
+      DateTime.utc_now()
+    end
+  end
+
+  defp validation_progress_timestamp(_update, _command), do: nil
+
+  defp validation_command?(command) when is_binary(command) do
+    normalized = String.downcase(command)
+
+    String.match?(
+      normalized,
+      ~r/(^|\s)(pnpm|npm|yarn|bun|mix|npx|corepack)\b.*\b(test|typecheck|type-check|check|lint|eslint|tsc|vitest|jest|playwright|credo|dialyzer)\b/
+    ) or
+      String.match?(normalized, ~r/\b(tsc|eslint|vitest|jest|playwright|mix test)\b/)
+  end
+
+  defp validation_command?(_command), do: false
+
+  defp codex_update_success?(text) when is_binary(text) do
+    String.match?(text, ~r/(exit[_ ]?(code|status)|status)[\"':\s]+0\b/i) or
+      String.match?(text, ~r/process exited with code 0/i) or
+      (String.match?(text, ~r/\b(success|passed|completed)\b/i) and not errorish_text?(text))
+  end
+
+  defp codex_update_success?(_text), do: false
+
+  defp codex_update_outcome(text) when is_binary(text) do
+    cond do
+      codex_update_success?(text) -> "outcome=passed"
+      String.match?(text, ~r/(exit[_ ]?(code|status)|status)[\"':\s]+(1|2|126|127|128)\b/i) -> "outcome=failed"
+      errorish_text?(text) -> "outcome=error"
+      true -> nil
+    end
+  end
+
+  defp codex_update_outcome(_text), do: nil
+
+  defp command_from_codex_update(update) when is_map(update) do
+    update
+    |> codex_update_payload_candidates()
+    |> Enum.find_value(fn payload ->
+      [
+        map_path(payload, ["params", "msg", "command"]),
+        map_path(payload, ["params", "command"]),
+        map_path(payload, ["params", "parsedCmd"]),
+        map_path(payload, ["params", "cmd"]),
+        map_path(payload, ["params", "item", "command"]),
+        map_path(payload, ["params", "item", "parsedCmd"]),
+        payload |> map_path(["params", "payload"]) |> function_call_command_text(),
+        payload |> map_path(["params", "item", "payload"]) |> function_call_command_text(),
+        payload |> map_path(["params", "msg", "payload"]) |> function_call_command_text(),
+        function_call_command_text(payload)
+      ]
+      |> Enum.find_value(&normalize_runtime_command/1)
+    end)
+  end
+
+  defp command_from_codex_update(_update), do: nil
+
+  defp codex_update_payload_candidates(update) when is_map(update) do
+    update
+    |> do_codex_update_payload_candidates([])
+    |> Enum.reverse()
+    |> Enum.uniq()
+  end
+
+  defp do_codex_update_payload_candidates(%{} = payload, seen) do
+    if Enum.any?(seen, &(&1 === payload)) do
+      seen
+    else
+      nested_payloads =
+        [
+          map_path(payload, ["payload"]),
+          map_path(payload, ["details"]),
+          map_path(payload, ["params"]),
+          map_path(payload, ["params", "payload"]),
+          map_path(payload, ["params", "msg"]),
+          map_path(payload, ["params", "msg", "payload"]),
+          map_path(payload, ["params", "item"]),
+          map_path(payload, ["params", "item", "payload"])
+        ]
+        |> Enum.filter(&is_map/1)
+
+      Enum.reduce(nested_payloads, [payload | seen], &do_codex_update_payload_candidates/2)
+    end
+  end
+
+  defp do_codex_update_payload_candidates(_payload, seen), do: seen
+
+  defp function_call_command_text(%{"type" => "function_call", "name" => name} = item) when is_binary(name) do
+    if name == "exec_command" or String.ends_with?(name, ".exec_command") do
+      item
+      |> Map.get("arguments")
+      |> decode_function_arguments()
+      |> command_from_function_arguments()
+    end
+  end
+
+  defp function_call_command_text(_item), do: nil
+
+  defp decode_function_arguments(arguments) when is_binary(arguments) do
+    case Jason.decode(arguments) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> %{"cmd" => arguments}
+    end
+  end
+
+  defp decode_function_arguments(%{} = arguments), do: arguments
+  defp decode_function_arguments(_arguments), do: nil
+
+  defp command_from_function_arguments(%{} = arguments), do: map_value(arguments, ["cmd", "command", "parsedCmd"])
+  defp command_from_function_arguments(_arguments), do: nil
+
+  defp normalize_runtime_command(%{} = command) do
+    binary_command = map_value(command, ["parsedCmd", "command", "cmd"])
+    args = map_value(command, ["args", "argv"])
+
+    cond do
+      is_binary(binary_command) and is_list(args) -> normalize_runtime_command([binary_command | args])
+      is_binary(binary_command) -> normalize_runtime_command(binary_command)
+      is_list(args) -> normalize_runtime_command(args)
+      true -> nil
+    end
+  end
+
+  defp normalize_runtime_command(command) when is_binary(command) do
+    command
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_runtime_command(command) when is_list(command) do
+    if Enum.all?(command, &is_binary/1) do
+      command
+      |> Enum.join(" ")
+      |> normalize_runtime_command()
+    end
+  end
+
+  defp normalize_runtime_command(_command), do: nil
+
+  defp compact_codex_update_text(update) do
+    update
+    |> inspect(limit: 80, printable_limit: 1_600)
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
+
+  defp errorish_text?(text) when is_binary(text) do
+    String.match?(text, ~r/\b(error|failed|failure|fatal|panic|exception|unauthorized|forbidden|permission denied|command not found|not found|timed out|timeout)\b/i)
+  end
+
+  defp errorish_text?(_text), do: false
+
+  defp timestamp_to_text(%DateTime{} = timestamp), do: DateTime.to_iso8601(timestamp)
+  defp timestamp_to_text(timestamp) when is_binary(timestamp), do: timestamp
+  defp timestamp_to_text(_timestamp), do: "unknown-time"
+
+  defp blank_recent_part?(part), do: is_nil(part) or part == ""
+
+  defp map_path(value, []), do: value
+
+  defp map_path(%{} = map, [key | rest]) when is_binary(key) do
+    case fetch_map_key(map, key) do
+      {:ok, value} -> map_path(value, rest)
+      :error -> nil
+    end
+  end
+
+  defp map_path(_value, _path), do: nil
+
+  defp map_value(%{} = map, keys) when is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case fetch_map_key(map, key) do
+        {:ok, value} -> value
+        :error -> nil
+      end
+    end)
+  end
+
+  defp map_value(_map, _keys), do: nil
+
+  defp fetch_map_key(%{} = map, key) when is_binary(key) do
+    case Map.fetch(map, key) do
+      {:ok, value} ->
+        {:ok, value}
+
+      :error ->
+        Map.fetch(map, String.to_atom(key))
+    end
+  end
+
+  defp fetch_map_key(%{} = map, key), do: Map.fetch(map, key)
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
@@ -2333,8 +2955,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      !issue_blocked_by_non_terminal?(issue, terminal_states)
   end
+
+  defp normal_completion_handoff_stop?(%{workspace_path: workspace}) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check"] ->
+        workspace
+        |> PromptBuilder.workspace_recovery_checkpoint()
+        |> String.starts_with?("Pushed validated handoff checkpoint:")
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp normal_completion_handoff_stop?(_running_entry), do: false
 
   defp workflow_blocked_by_open_correction?(issue_or_running_entry, metadata \\ %{})
 
@@ -2476,17 +3114,25 @@ defmodule SymphonyElixir.Orchestrator do
         :total,
         usage,
         :codex_last_reported_total_tokens
+      ),
+      compute_token_delta(
+        running_entry,
+        :cached_input,
+        usage,
+        :codex_last_reported_cached_input_tokens
       )
     }
     |> Tuple.to_list()
-    |> then(fn [input, output, total] ->
+    |> then(fn [input, output, total, cached_input] ->
       %{
         input_tokens: input.delta,
         output_tokens: output.delta,
         total_tokens: total.delta,
+        cached_input_tokens: cached_input.delta,
         input_reported: input.reported,
         output_reported: output.reported,
-        total_reported: total.reported
+        total_reported: total.reported,
+        cached_input_reported: cached_input.reported
       }
     end)
   end
@@ -2723,6 +3369,15 @@ defmodule SymphonyElixir.Orchestrator do
         :total,
         "totalTokens",
         :totalTokens
+      ])
+
+  defp get_token_usage(usage, :cached_input),
+    do:
+      payload_get(usage, [
+        "cached_input_tokens",
+        :cached_input_tokens,
+        "cachedInputTokens",
+        :cachedInputTokens
       ])
 
   defp payload_get(payload, fields) when is_list(fields) do

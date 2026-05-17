@@ -734,7 +734,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                    "total_token_usage" => %{
                      "input_tokens" => 200,
                      "output_tokens" => 100,
-                     "total_tokens" => 300
+                     "total_tokens" => 300,
+                     "cached_input_tokens" => 160
                    }
                  }
                }
@@ -750,6 +751,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_input_tokens == 200
     assert snapshot_entry.codex_output_tokens == 100
     assert snapshot_entry.codex_total_tokens == 300
+    assert snapshot_entry.codex_cached_input_tokens == 160
   end
 
   test "orchestrator token accounting accumulates monotonic thread token usage totals" do

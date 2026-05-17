@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{DispatchPreflight, Linear.Client}
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -57,6 +57,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
+         :ok <- authorize_linear_graphql(query, opts),
          {:ok, response} <- linear_client.(query, variables, []) do
       graphql_response(response)
     else
@@ -89,6 +90,31 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
+
+  defp authorize_linear_graphql(query, opts) when is_binary(query) do
+    workspace = Keyword.get(opts, :workspace)
+
+    if review_rework_workspace?(workspace) and linear_issue_state_mutation?(query) do
+      {:error, :review_rework_linear_state_mutation_blocked}
+    else
+      :ok
+    end
+  end
+
+  defp review_rework_workspace?(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_workspace?(_workspace), do: false
+
+  defp linear_issue_state_mutation?(query) when is_binary(query) do
+    query =~ ~r/\bmutation\b/i and query =~ ~r/\bissueUpdate\s*\(/ and query =~ ~r/\bstateId\b/
+  end
 
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
@@ -164,6 +190,14 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:review_rework_linear_state_mutation_blocked) do
+    %{
+      "error" => %{
+        "message" => "Review-rework workers cannot mutate Linear issue state. Push the branch, request fresh review, and leave review/rework state transitions to Symphony's review monitor."
       }
     }
   end

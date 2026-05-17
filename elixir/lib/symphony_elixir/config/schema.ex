@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:api_key, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
+      field(:issue_allowlist, {:array, :string}, default: [])
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
     end
@@ -59,7 +60,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :assignee, :issue_allowlist, :active_states, :terminal_states],
         empty_values: []
       )
     end
@@ -110,7 +111,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:enabled, :boolean, default: false)
       field(:provider, :string, default: "github")
       field(:repo, :string)
-      field(:states, {:array, :string}, default: ["Human Review"])
+      field(:states, {:array, :string}, default: ["Human Review", "In Review"])
       field(:rework_state, :string, default: "Rework")
     end
 

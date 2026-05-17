@@ -65,6 +65,47 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["contentItems"] == [%{"type" => "inputText", "text" => response["output"]}]
   end
 
+  test "linear_graphql blocks issue state mutations in review rework workspaces" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-dynamic-review-rework-#{System.unique_integer([:positive])}")
+    workspace = Path.join(test_root, "COD-152")
+    preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+
+    try do
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework", "issue" => "COD-152"})
+      )
+
+      response =
+        DynamicTool.execute(
+          "linear_graphql",
+          %{
+            "query" => """
+            mutation MoveIssue($id: String!, $stateId: String!) {
+              issueUpdate(id: $id, input: {stateId: $stateId}) {
+                success
+              }
+            }
+            """,
+            "variables" => %{"id" => "issue-1", "stateId" => "done-state"}
+          },
+          workspace: workspace,
+          linear_client: fn _query, _variables, _opts ->
+            flunk("review rework issue state mutations should be blocked before Linear is called")
+          end
+        )
+
+      assert response["success"] == false
+
+      assert get_in(Jason.decode!(response["output"]), ["error", "message"]) =~
+               "Review-rework workers cannot mutate Linear issue state"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "linear_graphql accepts a raw GraphQL query string" do
     test_pid = self()
 

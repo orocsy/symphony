@@ -510,6 +510,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
                         "identifier": "COD-201",
                         "title": "Add sample provider setup",
                         "state": "In Progress",
+                        "branch": "orocsy/cod-201-provider-setup",
                         "project_slug": "dummy-agentic-runtime",
                         "write_scope": ["src/**", ".codex/delivery/**"],
                         "shared_files": ["package.json"],
@@ -533,6 +534,7 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(output)
             self.assertEqual(payload["state"]["issue"], "COD-201")
+            self.assertEqual(payload["state"]["issue_requirements"]["branch"], "orocsy/cod-201-provider-setup")
             self.assertEqual(payload["state"]["issue_requirements"]["project"], "dummy-agentic-runtime")
             self.assertIn(".orocsy/delivery/**", payload["state"]["issue_requirements"]["write_scope"])
             self.assertIn(

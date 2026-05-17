@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, PromptBuilder, SSH}
+  alias SymphonyElixir.{Config, IssueRequirements, PathSafety, PromptBuilder, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -21,7 +21,9 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host),
+           :ok <- maybe_reconcile_issue_branch(workspace, issue_or_identifier, worker_host),
+           :ok <- maybe_write_issue_requirements(workspace, issue_or_identifier, worker_host) do
         {:ok, workspace}
       end
     rescue
@@ -102,6 +104,82 @@ defmodule SymphonyElixir.Workspace do
   def create_correction_in_workspace(workspace, _issue_or_identifier, _attrs, worker_host)
       when is_binary(workspace) and is_binary(worker_host) do
     {:error, {:remote_correction_write_not_supported, worker_host, workspace}}
+  end
+
+  @spec open_blocking_corrections_in_workspace(Path.t()) :: [map()]
+  def open_blocking_corrections_in_workspace(workspace) when is_binary(workspace) do
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      workspace
+      |> local_correction_files()
+      |> Enum.flat_map(&read_local_blocking_correction/1)
+    else
+      _ -> []
+    end
+  end
+
+  @spec resolve_blocking_corrections_in_workspace(Path.t(), String.t()) :: :ok | {:error, term()}
+  def resolve_blocking_corrections_in_workspace(workspace, resolution_summary)
+      when is_binary(workspace) and is_binary(resolution_summary) do
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+      workspace
+      |> local_correction_files()
+      |> Enum.each(fn path ->
+        case read_local_blocking_correction(path) do
+          [%{"correction_id" => _id} = correction] ->
+            resolved =
+              correction
+              |> Map.put("status", "resolved")
+              |> Map.put("resolved_at", now)
+              |> Map.put("resolution_summary", resolution_summary)
+
+            File.write!(path, Jason.encode!(resolved, pretty: true) <> "\n")
+
+          _ ->
+            :ok
+        end
+      end)
+
+      :ok
+    else
+      false -> {:error, {:workspace_missing, workspace}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec classify_blocking_corrections_in_workspace(Path.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def classify_blocking_corrections_in_workspace(workspace, classification, summary)
+      when is_binary(workspace) and is_binary(classification) and is_binary(summary) do
+    with :ok <- validate_workspace_path(workspace, nil),
+         true <- File.dir?(workspace) do
+      now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+      workspace
+      |> local_correction_files()
+      |> Enum.each(fn path ->
+        case read_local_blocking_correction(path) do
+          [%{"correction_id" => _id} = correction] ->
+            classified =
+              correction
+              |> Map.put("classification", classification)
+              |> Map.put("classification_summary", summary)
+              |> Map.put("classified_at", now)
+
+            File.write!(path, Jason.encode!(classified, pretty: true) <> "\n")
+
+          _ ->
+            :ok
+        end
+      end)
+
+      :ok
+    else
+      false -> {:error, {:workspace_missing, workspace}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp ensure_workspace(workspace, nil) do
@@ -295,6 +373,247 @@ defmodule SymphonyElixir.Workspace do
 
       false ->
         :ok
+    end
+  end
+
+  defp maybe_write_issue_requirements(_workspace, _issue, worker_host) when is_binary(worker_host), do: :ok
+
+  defp maybe_write_issue_requirements(workspace, %{} = issue, nil) do
+    case IssueRequirements.write_workspace_files(workspace, issue) do
+      {:ok, _requirements} -> :ok
+      {:error, :no_issue_requirements} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_write_issue_requirements(_workspace, _issue, _worker_host), do: :ok
+
+  defp maybe_reconcile_issue_branch(_workspace, _issue, worker_host) when is_binary(worker_host), do: :ok
+
+  defp maybe_reconcile_issue_branch(workspace, issue_or_identifier, nil) do
+    branch = issue_branch_name(issue_or_identifier)
+
+    cond do
+      branch == "" ->
+        :ok
+
+      not File.dir?(Path.join(workspace, ".git")) ->
+        :ok
+
+      git_dirty?(workspace) ->
+        Logger.info("Skipping issue branch reconciliation for dirty workspace=#{workspace} branch=#{branch}")
+        :ok
+
+      true ->
+        reconcile_local_issue_branch(workspace, branch, issue_or_identifier)
+    end
+  end
+
+  defp reconcile_local_issue_branch(workspace, branch, issue_or_identifier) do
+    remote_ref = "refs/remotes/origin/#{branch}"
+
+    case git_command(workspace, ["fetch", "origin", "+refs/heads/#{branch}:#{remote_ref}"]) do
+      {_output, 0} ->
+        switch_to_reconciled_branch(workspace, branch)
+
+      {output, status} ->
+        Logger.debug("Issue branch fetch skipped workspace=#{workspace} branch=#{branch} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}")
+        switch_to_new_or_existing_issue_branch(workspace, branch, issue_or_identifier)
+    end
+  rescue
+    error ->
+      Logger.debug("Issue branch reconciliation skipped workspace=#{workspace} branch=#{branch} error=#{inspect(error)}")
+      :ok
+  end
+
+  defp switch_to_reconciled_branch(workspace, branch) do
+    result =
+      if git_local_branch_exists?(workspace, branch) do
+        git_command(workspace, ["switch", branch])
+      else
+        git_command(workspace, ["switch", "--track", "-c", branch, "origin/#{branch}"])
+      end
+
+    case result do
+      {_output, 0} ->
+        _ = git_command(workspace, ["branch", "--set-upstream-to", "origin/#{branch}", branch])
+        fast_forward_reconciled_branch(workspace, branch)
+
+      {output, status} ->
+        {:error, {:issue_branch_switch_failed, branch, status, output}}
+    end
+  end
+
+  defp fast_forward_reconciled_branch(workspace, branch) do
+    case git_command(workspace, ["merge", "--ff-only", "origin/#{branch}"]) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, {:issue_branch_fast_forward_failed, branch, status, output}}
+    end
+  end
+
+  defp switch_to_new_or_existing_issue_branch(workspace, branch, issue_or_identifier) do
+    cond do
+      git_local_branch_exists?(workspace, branch) ->
+        case git_command(workspace, ["switch", branch]) do
+          {_output, 0} -> maybe_unset_main_upstream(workspace, branch)
+          {output, status} -> {:error, {:issue_branch_switch_failed, branch, status, output}}
+        end
+
+      start_ref = issue_branch_start_ref(workspace, issue_or_identifier) ->
+        case git_command(workspace, ["switch", "--no-track", "-c", branch, start_ref]) do
+          {_output, 0} -> maybe_unset_main_upstream(workspace, branch)
+          {output, status} -> {:error, {:issue_branch_create_failed, branch, start_ref, status, output}}
+        end
+
+      true ->
+        :ok
+    end
+  end
+
+  defp issue_branch_start_ref(workspace, issue_or_identifier) do
+    base_candidates = issue_branch_base_candidates(issue_or_identifier)
+
+    Enum.each(base_candidates, &fetch_branch_ref(workspace, &1))
+
+    base_candidates
+    |> Enum.flat_map(&["origin/#{&1}", &1])
+    |> Enum.concat(["origin/main", "main", "origin/master", "master"])
+    |> Enum.find(&git_ref_exists?(workspace, &1))
+  end
+
+  defp fetch_branch_ref(_workspace, ""), do: :ok
+
+  defp fetch_branch_ref(workspace, branch) when is_binary(branch) do
+    _ = git_command(workspace, ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"])
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp issue_branch_base_candidates(issue_or_identifier) do
+    issue_or_identifier
+    |> issue_branch_base_names()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&clean_branch_name/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp issue_branch_base_names(%{description: description}) when is_binary(description) do
+    [description_scalar_section(description, "Base Branch"), description_scalar_section(description, "Integration Branch")]
+  end
+
+  defp issue_branch_base_names(%{"description" => description}) when is_binary(description) do
+    [description_scalar_section(description, "Base Branch"), description_scalar_section(description, "Integration Branch")]
+  end
+
+  defp issue_branch_base_names(%{base_branch: base_branch, integration_branch: integration_branch}) do
+    [base_branch, integration_branch]
+  end
+
+  defp issue_branch_base_names(%{"base_branch" => base_branch, "integration_branch" => integration_branch}) do
+    [base_branch, integration_branch]
+  end
+
+  defp issue_branch_base_names(_issue_or_identifier), do: []
+
+  defp description_scalar_section(description, heading) do
+    pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
+
+    case Regex.run(pattern, description || "", capture: :all_but_first) do
+      [body] ->
+        body
+        |> String.split("\n")
+        |> Enum.map(fn line ->
+          line
+          |> String.trim()
+          |> String.trim_leading("*")
+          |> String.trim_leading("-")
+          |> String.trim()
+          |> String.trim("`")
+        end)
+        |> Enum.reject(&(&1 == ""))
+        |> List.first()
+
+      _ ->
+        nil
+    end
+  end
+
+  defp maybe_unset_main_upstream(workspace, branch) do
+    case git_command(workspace, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]) do
+      {upstream, 0} ->
+        upstream = String.trim(upstream)
+
+        if upstream in ["origin/main", "origin/master", "main", "master"] do
+          _ = git_command(workspace, ["branch", "--unset-upstream", branch])
+        end
+
+        :ok
+
+      {_output, _status} ->
+        :ok
+    end
+  end
+
+  defp git_dirty?(workspace) do
+    case git_command(workspace, ["status", "--porcelain=v1"]) do
+      {"", 0} -> false
+      {_status, 0} -> true
+      {_output, _status} -> true
+    end
+  rescue
+    _error -> true
+  end
+
+  defp git_local_branch_exists?(workspace, branch) do
+    case git_command(workspace, ["rev-parse", "--verify", "--quiet", "refs/heads/#{branch}"]) do
+      {_output, 0} -> true
+      {_output, _status} -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_ref_exists?(workspace, ref) do
+    case git_command(workspace, ["rev-parse", "--verify", "--quiet", ref]) do
+      {_output, 0} -> true
+      {_output, _status} -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp issue_branch_name(%{branch_name: branch}) when is_binary(branch), do: clean_branch_name(branch)
+  defp issue_branch_name(%{"branch_name" => branch}) when is_binary(branch), do: clean_branch_name(branch)
+  defp issue_branch_name(%{"branch" => branch}) when is_binary(branch), do: clean_branch_name(branch)
+  defp issue_branch_name(_issue), do: ""
+
+  defp git_command(workspace, args) when is_binary(workspace) and is_list(args) do
+    timeout_ms = Config.settings!().hooks.timeout_ms
+
+    task =
+      Task.async(fn ->
+        System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, result} ->
+        result
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+        {"git command timed out after #{timeout_ms}ms", 124}
+    end
+  end
+
+  defp clean_branch_name(branch) do
+    branch = String.trim(branch)
+
+    if String.contains?(branch, ["\n", "\r", <<0>>]) do
+      ""
+    else
+      branch
     end
   end
 
@@ -519,6 +838,16 @@ defmodule SymphonyElixir.Workspace do
       open_blocking_correction?(correction)
     else
       _ -> false
+    end
+  end
+
+  defp read_local_blocking_correction(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, %{} = correction} <- Jason.decode(body),
+         true <- open_blocking_correction?(correction) do
+      [Map.put(correction, "path", path)]
+    else
+      _ -> []
     end
   end
 

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, DispatchPreflight, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -12,7 +12,48 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
-
+  @review_rework_disabled_skill_names [
+    "agentic-delivery-loop",
+    "build-web-apps:frontend-app-builder",
+    "build-web-apps:frontend-testing-debugging",
+    "build-web-apps:react-best-practices",
+    "github:gh-address-comments",
+    "github:gh-fix-ci",
+    "github:github",
+    "linear:linear",
+    "playwright",
+    "playwright-interactive",
+    "requesting-code-review",
+    "typescript-best-practices",
+    "vercel:react-best-practices"
+  ]
+  @review_rework_disabled_plugins [
+    "browser@openai-bundled",
+    "build-web-apps@openai-curated",
+    "chrome@openai-bundled",
+    "cloudflare@openai-curated",
+    "computer-use@openai-bundled",
+    "documents@openai-primary-runtime",
+    "figma@openai-curated",
+    "github@openai-curated",
+    "google-drive@openai-curated",
+    "linear@openai-curated",
+    "notion@openai-curated",
+    "presentations@openai-primary-runtime",
+    "spreadsheets@openai-primary-runtime",
+    "stripe@openai-curated",
+    "supabase@openai-curated",
+    "vercel@openai-curated"
+  ]
+  @review_rework_forbidden_command_patterns [
+    "(^|\\s)rg(\\s|$)",
+    "(^|\\s)grep(\\s|$)",
+    "(^|\\s)gh\\s+api(\\s|$)",
+    "(^|\\s)find(\\s|$)",
+    "(^|\\s)git\\s+ls-files(\\s|$)",
+    "(^|\\s)ls(\\s|$)",
+    "\\s(&&|\\|\\||;|\\|)\\s"
+  ]
   @type session :: %{
           port: port(),
           metadata: map(),
@@ -87,10 +128,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    forbidden_command_patterns = effective_forbidden_command_patterns(workspace, forbidden_command_patterns)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments)
+        DynamicTool.execute(tool, arguments, workspace: workspace)
       end)
 
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
@@ -283,15 +325,19 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
+    params =
+      %{
         "approvalPolicy" => approval_policy,
         "sandbox" => thread_sandbox,
         "cwd" => workspace,
         "dynamicTools" => DynamicTool.tool_specs()
       }
+      |> maybe_put_review_rework_thread_overrides(workspace)
+
+    send_message(port, %{
+      "method" => "thread/start",
+      "id" => @thread_start_id,
+      "params" => params
     })
 
     case await_response(port, @thread_start_id) do
@@ -304,6 +350,133 @@ defmodule SymphonyElixir.Codex.AppServer do
       other ->
         other
     end
+  end
+
+  defp maybe_put_review_rework_thread_overrides(params, workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} ->
+        params
+        |> Map.put("baseInstructions", review_rework_base_instructions())
+        |> Map.put("developerInstructions", review_rework_developer_instructions())
+        |> Map.put("config", review_rework_thread_config())
+
+      _ ->
+        params
+    end
+  end
+
+  defp maybe_put_review_rework_thread_overrides(params, _workspace), do: params
+
+  defp review_rework_thread_config do
+    %{
+      "skills" => %{
+        "disabled_skill_names" => @review_rework_disabled_skill_names
+      },
+      "features" => %{
+        "apps" => false,
+        "plugins" => false,
+        "tool_search" => false
+      },
+      "apps" => %{
+        "_default" => %{
+          "enabled" => false,
+          "open_world_enabled" => false,
+          "destructive_enabled" => false
+        }
+      },
+      "plugins" => disabled_named_config(@review_rework_disabled_plugins)
+    }
+  end
+
+  defp disabled_named_config(names) do
+    Map.new(names, fn name -> {name, %{"enabled" => false}} end)
+  end
+
+  defp review_rework_base_instructions do
+    """
+    You are a Symphony review-rework worker for one existing pull request.
+    Use only the current prompt, current branch, referenced review feedback, and local files needed for the fix.
+    Make a scoped code/test edit or record an explicit Orocsy blocker. Do not perform broad project discovery.
+    """
+    |> String.trim()
+  end
+
+  defp review_rework_developer_instructions do
+    """
+    Symphony review-rework micro-worker.
+
+    This thread exists only to resolve current-head PR review feedback already named in the user prompt.
+    Do not load Codex skills, plugins, apps, MCP tools, broad project docs, prior session JSONL, or unrelated issue history.
+    Do not refetch GitHub or Linear review text when the prompt already includes the current-head feedback body.
+    Do not run rg, grep, find, ls, git ls-files, gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
+    If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff, run focused validation, commit, push, request fresh review, and leave Linear state transitions to Symphony's review monitor.
+    Start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
+    Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
+    Before spending broad analysis tokens, either edit a scoped code/test file or write an explicit Orocsy blocker/correction.
+    If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
+    In the first turn, complete the scoped fix, focused validation, commit, push, and fresh review request, or stop with a concrete blocker.
+    Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review.
+    Never merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
+    if review_rework_workspace?(workspace) do
+      Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
+    else
+      patterns
+    end
+  end
+
+  defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
+
+  defp review_rework_workspace?(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_path_guard_patterns(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"} = preflight} ->
+        preflight
+        |> review_rework_feedback_paths()
+        |> review_rework_path_guard_patterns_for_paths()
+
+      _ ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp review_rework_feedback_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
+    feedback
+    |> Enum.flat_map(fn
+      %{"path" => path} when is_binary(path) and path != "" -> [path]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp review_rework_feedback_paths(_preflight), do: []
+
+  defp review_rework_path_guard_patterns_for_paths([]), do: []
+
+  defp review_rework_path_guard_patterns_for_paths(paths) do
+    allowed_paths =
+      paths
+      |> Enum.map(&Regex.escape/1)
+      |> Enum.join("|")
+
+    [
+      "(^|\\s)sed\\s+-n\\s+\\S+\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|$))",
+      "(^|\\s)(cat|head|tail|nl)\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|$))"
+    ]
   end
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
@@ -667,19 +840,72 @@ defmodule SymphonyElixir.Codex.AppServer do
     end)
   end
 
-  defp command_text(%{"method" => "codex/event/exec_command_begin"} = payload) do
+  defp command_text(%{} = payload) do
     payload
     |> command_candidate()
     |> normalize_command()
-  end
-
-  defp command_text(%{"method" => "item/commandExecution/requestApproval"} = payload) do
-    payload
-    |> command_candidate()
-    |> normalize_command()
+    |> case do
+      nil -> function_call_command_text(payload)
+      command -> command
+    end
   end
 
   defp command_text(_payload), do: nil
+
+  defp function_call_command_text(%{} = payload) do
+    payload
+    |> function_call_candidates()
+    |> Enum.find_value(&exec_command_function_call_text/1)
+  end
+
+  defp function_call_command_text(_payload), do: nil
+
+  defp function_call_candidates(%{} = payload) do
+    [
+      payload,
+      map_path(payload, ["payload"]),
+      map_path(payload, ["params"]),
+      map_path(payload, ["params", "payload"]),
+      map_path(payload, ["params", "msg"]),
+      map_path(payload, ["params", "msg", "payload"]),
+      map_path(payload, ["params", "item"]),
+      map_path(payload, ["params", "item", "payload"])
+    ]
+    |> Enum.filter(&is_map/1)
+  end
+
+  defp exec_command_function_call_text(%{"type" => "function_call", "name" => name} = item)
+       when is_binary(name) do
+    if exec_command_function_name?(name) do
+      item
+      |> Map.get("arguments")
+      |> decode_function_call_arguments()
+      |> command_from_function_call_arguments()
+      |> normalize_command()
+    end
+  end
+
+  defp exec_command_function_call_text(_item), do: nil
+
+  defp exec_command_function_name?(name) when is_binary(name) do
+    name == "exec_command" or String.ends_with?(name, ".exec_command")
+  end
+
+  defp decode_function_call_arguments(arguments) when is_binary(arguments) do
+    case Jason.decode(arguments) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> %{"cmd" => arguments}
+    end
+  end
+
+  defp decode_function_call_arguments(%{} = arguments), do: arguments
+  defp decode_function_call_arguments(_arguments), do: nil
+
+  defp command_from_function_call_arguments(%{} = arguments) do
+    map_value(arguments, ["cmd", "command", "parsedCmd"])
+  end
+
+  defp command_from_function_call_arguments(_arguments), do: nil
 
   defp command_candidate(payload) do
     map_path(payload, ["params", "msg", "command"]) ||
