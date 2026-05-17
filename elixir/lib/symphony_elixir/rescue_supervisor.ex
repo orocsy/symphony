@@ -52,7 +52,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp rescue_issue(_issue), do: []
 
   defp classify_runtime_progress_block(%Issue{} = issue, workspace, corrections) do
-    case ReviewMonitor.inspect_issue(issue, Config.settings!().review_monitor) do
+    case inspect_review_if_enabled(issue) do
       {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback} = inspection} when feedback != [] ->
         cond do
           fresh_review_feedback_after_latest_codex_request?(inspection) ->
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp classify_resolved_review_rework_loop(%Issue{} = issue, workspace) do
     with true <- review_rework_retry_loop_exhausted_without_new_progress?(workspace),
          {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback} = inspection} when feedback != [] <-
-           ReviewMonitor.inspect_issue(issue, Config.settings!().review_monitor),
+           inspect_review_if_enabled(issue),
          false <- fresh_review_feedback_after_latest_codex_request?(inspection),
          {:ok, correction} <-
            Workspace.create_correction_in_workspace(workspace, issue, %{
@@ -181,7 +181,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
     :ok = Workspace.resolve_blocking_corrections_in_workspace(workspace, summary)
 
-    case ReviewMonitor.inspect_issue(issue, Config.settings!().review_monitor) do
+    case inspect_review_if_enabled(issue) do
       {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback}} when feedback != [] ->
         :ok = Tracker.update_issue_state(issue.id, Config.settings!().review_monitor.rework_state)
         _ = Tracker.create_comment(issue.id, later_progress_review_rework_comment(issue, corrections, pr_number, pr_url, head_sha))
@@ -204,7 +204,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
     :ok = Workspace.resolve_blocking_corrections_in_workspace(workspace, summary)
 
-    case ReviewMonitor.inspect_issue(issue, Config.settings!().review_monitor) do
+    case inspect_review_if_enabled(issue) do
       {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback}} when feedback != [] ->
         :ok = Tracker.update_issue_state(issue.id, Config.settings!().review_monitor.rework_state)
         _ = Tracker.create_comment(issue.id, fresh_review_feedback_rework_comment(issue, corrections, pr_number, pr_url, head_sha))
@@ -346,7 +346,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp review_rework_retry_loop_exhausted_without_new_progress?(_workspace), do: false
 
   defp fresh_review_feedback_after_latest_codex_request?(%Issue{} = issue) do
-    case ReviewMonitor.inspect_issue(issue, Config.settings!().review_monitor) do
+    case inspect_review_if_enabled(issue) do
       {:ok, inspection} ->
         fresh_review_feedback_after_latest_codex_request?(inspection)
 
@@ -369,6 +369,16 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp fresh_review_feedback_after_latest_codex_request?(_inspection), do: false
+
+  defp inspect_review_if_enabled(%Issue{} = issue) do
+    monitor = Config.settings!().review_monitor
+
+    if monitor.enabled do
+      ReviewMonitor.inspect_issue(issue, monitor)
+    else
+      {:ok, %{pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :disabled}}
+    end
+  end
 
   defp review_rework_runtime_progress_corrections_at_or_after(workspace, %DateTime{} = progress_at) do
     workspace

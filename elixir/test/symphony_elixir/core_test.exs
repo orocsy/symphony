@@ -1564,6 +1564,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
         review_monitor_rework_state: "Rework"
@@ -1656,6 +1657,95 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "no durable progress rescue does not inspect reviews when review monitor is disabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-review-disabled-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: false,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-168-review-disabled-rescue",
+        identifier: "COD-168",
+        title: "Recipe chat create route",
+        state: "In Progress",
+        branch_name: "orocsy/cod-168-recipe-chat-miu-create-route-and-harness",
+        description: """
+        ## Write Scope
+        - src/app/api/recipe-chats/route.ts
+
+        ### MIU 1 - Create Route
+        Create the recipe chat route.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/integration/recipe-chat-routes.test.ts
+        ```
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        send(parent, {:unexpected_review_inspection, endpoint})
+        {:error, {:unexpected_endpoint, endpoint}}
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-168-review-disabled-rescue", body}
+      assert body =~ "retry_with_hydrated_requirements"
+      refute_receive {:memory_tracker_state_update, "issue-cod-168-review-disabled-rescue", "Rework"}, 50
+      refute_receive {:unexpected_review_inspection, _endpoint}, 50
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "retry_with_hydrated_requirements"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "repeated review rework retries with same dirty handoff progress block instead of redispatch" do
     test_root =
       Path.join(
@@ -1670,6 +1760,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
         review_monitor_rework_state: "Rework"
@@ -1807,6 +1898,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
         review_monitor_rework_state: "Rework"
@@ -2444,6 +2536,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review", "In Review"],
         review_monitor_rework_state: "Rework"
@@ -2549,6 +2642,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         tracker_active_states: ["Rework"],
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review", "In Review"],
         review_monitor_rework_state: "Rework"
@@ -2689,6 +2783,7 @@ defmodule SymphonyElixir.CoreTest do
         tracker_kind: "memory",
         tracker_active_states: ["Rework"],
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review", "In Review"],
         review_monitor_rework_state: "Rework"
@@ -2838,6 +2933,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: workspace_root,
+        review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review", "In Review"],
         review_monitor_rework_state: "Rework"
