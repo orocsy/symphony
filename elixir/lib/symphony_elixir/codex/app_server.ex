@@ -680,46 +680,54 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
-        case turn_token_budget_violation(payload, Config.settings!().codex.max_turn_total_tokens) do
-          {:error, total_tokens, max_tokens} ->
-            metadata = metadata_from_message(port, payload)
+        if turn_aborted_payload?(payload) do
+          handle_turn_aborted_payload(on_message, payload, payload_string, port)
+        else
+          case turn_token_budget_violation(payload, Config.settings!().codex.max_turn_total_tokens) do
+            {:error, total_tokens, max_tokens} ->
+              metadata = metadata_from_message(port, payload)
 
-            emit_message(
-              on_message,
-              :turn_token_budget_exceeded,
-              %{payload: payload, raw: payload_string, total_tokens: total_tokens, max_tokens: max_tokens},
-              metadata
-            )
+              emit_message(
+                on_message,
+                :turn_token_budget_exceeded,
+                %{payload: payload, raw: payload_string, total_tokens: total_tokens, max_tokens: max_tokens},
+                metadata
+              )
 
-            stop_port(port)
-            {:error, {:turn_token_budget_exceeded, total_tokens, max_tokens}}
+              stop_port(port)
+              {:error, {:turn_token_budget_exceeded, total_tokens, max_tokens}}
 
-          :ok ->
-            handle_turn_method(
-              port,
-              on_message,
-              payload,
-              payload_string,
-              method,
-              timeout_ms,
-              tool_executor,
-              auto_approve_requests,
-              command_guard
-            )
+            :ok ->
+              handle_turn_method(
+                port,
+                on_message,
+                payload,
+                payload_string,
+                method,
+                timeout_ms,
+                tool_executor,
+                auto_approve_requests,
+                command_guard
+              )
+          end
         end
 
       {:ok, payload} ->
-        emit_message(
-          on_message,
-          :other_message,
-          %{
-            payload: payload,
-            raw: payload_string
-          },
-          metadata_from_message(port, payload)
-        )
+        if turn_aborted_payload?(payload) do
+          handle_turn_aborted_payload(on_message, payload, payload_string, port)
+        else
+          emit_message(
+            on_message,
+            :other_message,
+            %{
+              payload: payload,
+              raw: payload_string
+            },
+            metadata_from_message(port, payload)
+          )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, command_guard)
+          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, command_guard)
+        end
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -752,6 +760,44 @@ defmodule SymphonyElixir.Codex.AppServer do
       metadata_from_message(port, payload)
     )
   end
+
+  defp handle_turn_aborted_payload(on_message, payload, payload_string, port) do
+    details = turn_aborted_details(payload)
+
+    emit_turn_event(
+      on_message,
+      :turn_aborted,
+      payload,
+      payload_string,
+      port,
+      details
+    )
+
+    {:error, {:turn_aborted, details}}
+  end
+
+  defp turn_aborted_payload?(%{"method" => "codex/event/turn_aborted"}), do: true
+  defp turn_aborted_payload?(%{"method" => "turn/aborted"}), do: true
+  defp turn_aborted_payload?(payload) when is_map(payload), do: payload_contains_type?(payload, "turn_aborted", 0)
+  defp turn_aborted_payload?(_payload), do: false
+
+  defp turn_aborted_details(%{"params" => params}) when is_map(params), do: params
+  defp turn_aborted_details(payload) when is_map(payload), do: payload
+  defp turn_aborted_details(payload), do: payload
+
+  defp payload_contains_type?(_value, _type, depth) when depth > 6, do: false
+
+  defp payload_contains_type?(%{} = payload, type, depth) do
+    Map.get(payload, "type") == type or
+      Map.get(payload, :type) == type or
+      Enum.any?(payload, fn {_key, value} -> payload_contains_type?(value, type, depth + 1) end)
+  end
+
+  defp payload_contains_type?(values, type, depth) when is_list(values) do
+    Enum.any?(values, &payload_contains_type?(&1, type, depth + 1))
+  end
+
+  defp payload_contains_type?(_value, _type, _depth), do: false
 
   defp handle_turn_method(
          port,
