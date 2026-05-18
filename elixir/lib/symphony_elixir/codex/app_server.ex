@@ -525,8 +525,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_feedback_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
     feedback
     |> Enum.flat_map(fn
-      %{"path" => path} when is_binary(path) and path != "" -> [path]
-      _ -> []
+      %{"path" => path, "body" => body} when is_binary(path) and path != "" ->
+        [path | paths_from_review_rework_text(body)]
+
+      %{"path" => path} when is_binary(path) and path != "" ->
+        [path]
+
+      %{"body" => body} ->
+        paths_from_review_rework_text(body)
+
+      _ ->
+        []
     end)
     |> Enum.uniq()
   end
@@ -556,6 +565,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp string_values(_value), do: []
 
   defp paths_from_requirement_text(text) when is_binary(text) do
+    paths_from_review_rework_text(text)
+  end
+
+  defp paths_from_requirement_text(_text), do: []
+
+  defp paths_from_review_rework_text(text) when is_binary(text) do
     ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
     |> Regex.scan(text)
     |> Enum.flat_map(fn captures ->
@@ -570,7 +585,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> Enum.filter(&review_rework_path_like?/1)
   end
 
-  defp paths_from_requirement_text(_text), do: []
+  defp paths_from_review_rework_text(_text), do: []
 
   defp normalize_requirement_path(path) when is_binary(path) do
     path
