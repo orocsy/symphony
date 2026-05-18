@@ -14,7 +14,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   def prepare(workspace, issue) when is_binary(workspace) do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
-         {:ok, inspection} <- inspect_review(workspace, issue, requirements) do
+         {:ok, inspection} <- inspect_review(workspace, issue, requirements),
+         :ok <- maybe_switch_to_review_head(workspace, inspection) do
       preflight =
         if review_feedback?(inspection) do
           review_rework_preflight(workspace, issue, requirements, inspection)
@@ -157,6 +158,52 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp issue_brief_candidate_paths(_workspace, _requirements), do: []
+
+  defp maybe_switch_to_review_head(workspace, %{feedback: feedback, head_ref: branch})
+       when is_binary(workspace) and is_list(feedback) and feedback != [] and is_binary(branch) and branch != "" do
+    if clean_worktree?(workspace) and safe_branch_name?(branch) do
+      _ = git_command(workspace, ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"])
+
+      if local_branch_exists?(workspace, branch) do
+        _ = git_command(workspace, ["switch", branch])
+        _ = git_command(workspace, ["merge", "--ff-only", "origin/#{branch}"])
+      else
+        _ = git_command(workspace, ["switch", "--track", "-c", branch, "origin/#{branch}"])
+      end
+    end
+
+    :ok
+  end
+
+  defp maybe_switch_to_review_head(_workspace, _inspection), do: :ok
+
+  defp clean_worktree?(workspace) do
+    case git_command(workspace, ["status", "--porcelain"]) do
+      {"", 0} -> true
+      _ -> false
+    end
+  end
+
+  defp local_branch_exists?(workspace, branch) do
+    case git_command(workspace, ["rev-parse", "--verify", "--quiet", "refs/heads/#{branch}"]) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp safe_branch_name?(branch) when is_binary(branch) do
+    branch != "" and
+      not String.contains?(branch, ["\n", "\r", <<0>>]) and
+      not String.starts_with?(branch, "-")
+  end
+
+  defp safe_branch_name?(_branch), do: false
+
+  defp git_command(workspace, args) when is_binary(workspace) and is_list(args) do
+    System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
+  rescue
+    error -> {Exception.message(error), 1}
+  end
 
   defp review_inspection_failed(reason) do
     %{
