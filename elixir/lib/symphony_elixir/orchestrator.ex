@@ -1476,6 +1476,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_states, terminal_states) and
       !issue_blocked_by_non_terminal?(issue, terminal_states) and
       !workflow_blocked_by_open_correction?(issue) and
+      !review_rework_review_request_pending?(issue) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -1492,6 +1493,50 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp state_slots_available?(_issue, _running), do: false
+
+  defp review_rework_review_request_pending?(%Issue{state: state_name} = issue)
+       when is_binary(state_name) do
+    monitor = Config.settings!().review_monitor
+
+    cond do
+      not monitor.enabled ->
+        false
+
+      normalize_issue_state(state_name) != normalize_issue_state(monitor.rework_state) ->
+        false
+
+      true ->
+        review_request_pending_for_issue?(issue, monitor)
+    end
+  end
+
+  defp review_rework_review_request_pending?(_issue), do: false
+
+  defp review_request_pending_for_issue?(%Issue{} = issue, monitor) do
+    case ReviewMonitor.inspect_issue(issue, monitor) do
+      {:ok, %{repo: repo, pr: pr, feedback: feedback}} when is_list(feedback) and feedback != [] ->
+        case ReviewMonitor.codex_review_request_pending?(repo, pr, feedback) do
+          {:ok, true} ->
+            Logger.info("Review rework dispatch is waiting for fresh Codex review: #{issue_context(issue)}")
+
+            true
+
+          {:ok, false} ->
+            false
+
+          {:error, reason} ->
+            Logger.debug("Unable to inspect pending Codex review request before dispatch: #{inspect(reason)}")
+            false
+        end
+
+      {:ok, _inspection} ->
+        false
+
+      {:error, reason} ->
+        Logger.debug("Unable to inspect review feedback before dispatch: #{inspect(reason)}")
+        false
+    end
+  end
 
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = normalize_issue_state(issue_state)
