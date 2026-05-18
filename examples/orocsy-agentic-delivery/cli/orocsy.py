@@ -489,6 +489,28 @@ def ensure_runtime_files(repo: Path, *, intent: str, issue: str, force: bool = F
     state_path = root / "state" / "current.json"
     if state_path.exists() and not force:
         state = load_json(state_path, {})
+        changed = False
+        now = utc_now()
+        if not state.get("schema_version"):
+            state["schema_version"] = SCHEMA_VERSION
+            changed = True
+        if not state.get("run_id"):
+            state["run_id"] = new_id("run")
+            changed = True
+        if not state.get("goal_id"):
+            state["goal_id"] = new_id("goal")
+            changed = True
+        if not state.get("created_at"):
+            state["created_at"] = now
+            changed = True
+        if not state.get("updated_at"):
+            state["updated_at"] = now
+            changed = True
+        if "gates" not in state:
+            state["gates"] = {}
+            changed = True
+        if changed:
+            write_json(state_path, state)
     else:
         now = utc_now()
         state = {

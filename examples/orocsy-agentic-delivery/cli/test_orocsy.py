@@ -74,6 +74,44 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             state = json.loads((repo / ".orocsy/delivery/state/current.json").read_text(encoding="utf-8"))
             self.assertEqual(state["last_event_id"], json.loads(events[-1])["event_id"])
 
+    def test_run_start_backfills_missing_ids_in_existing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            state_path = repo / ".orocsy/delivery/state/current.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "scoped",
+                        "phase": "init",
+                        "intent": "Prepared by Symphony",
+                        "issue": "COD-999",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["--repo", str(repo), "run", "start", "--issue", "COD-999"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("started run run_", output)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertTrue(state["run_id"].startswith("run_"))
+            self.assertTrue(state["goal_id"].startswith("goal_"))
+            self.assertEqual(state["status"], "running")
+            self.assertEqual(state["issue"], "COD-999")
+            self.assertEqual(state["gates"], {})
+
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            event = json.loads(events[-1])
+            self.assertEqual(event["event"], "run.started")
+            self.assertEqual(event["run_id"], state["run_id"])
+            self.assertEqual(event["goal_id"], state["goal_id"])
+
     def test_legacy_codex_delivery_root_migrates_to_writable_runtime_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
