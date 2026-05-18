@@ -690,10 +690,13 @@ defmodule SymphonyElixir.RescueSupervisor do
 
       String.contains?(source, "no-durable-progress") or
         String.contains?(source, "missing-first-durable-event") or
+        String.contains?(source, "token-budget-handoff") or
         String.contains?(summary, "durable progress") or
         String.contains?(summary, "first durable") or
+        String.contains?(summary, "turn token budget") or
         String.contains?(findings, "no-durable-progress") or
-        String.contains?(findings, "missing_first_durable_event")
+        String.contains?(findings, "missing_first_durable_event") or
+        String.contains?(findings, "turn_token_budget_exceeded")
     end)
   end
 
