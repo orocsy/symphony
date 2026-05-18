@@ -47,12 +47,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     "vercel@openai-curated"
   ]
   @review_rework_forbidden_command_patterns [
-    "(^|\\s)rg(\\s|$)",
-    "(^|\\s)grep(\\s|$)",
-    "(^|\\s)gh\\s+api(\\s|$)",
-    "(^|\\s)find(\\s|$)",
-    "(^|\\s)git\\s+ls-files(\\s|$)",
-    "(^|\\s)ls(\\s|$)"
+    "(^|\\s|[\"'])rg(\\s|$)",
+    "(^|\\s|[\"'])grep(\\s|$)",
+    "(^|\\s|[\"'])gh\\s+api(\\s|$)",
+    "(^|\\s|[\"'])find(\\s|$)",
+    "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
+    "(^|\\s|[\"'])ls(\\s|$)"
   ]
   @fresh_implementation_forbidden_command_patterns @review_rework_forbidden_command_patterns
   @type session :: %{
@@ -537,8 +537,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> Enum.join("|")
 
     [
-      "(^|\\s)sed\\s+-n\\s+\\S+\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|$))",
-      "(^|\\s)(cat|head|tail|nl)\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|$))"
+      "(^|\\s|[\"'])sed\\s+-n\\s+\\S+\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|[\"']|$))",
+      "(^|\\s|[\"'])(cat|head|tail|nl)\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|[\"']|$))"
     ]
   end
 
@@ -964,7 +964,12 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
 
-  defp gh_api_pattern?(pattern), do: pattern == "(^|\\s)gh\\s+api(\\s|$)"
+  defp gh_api_pattern?(pattern) do
+    pattern in [
+      "(^|\\s)gh\\s+api(\\s|$)",
+      "(^|\\s|[\"'])gh\\s+api(\\s|$)"
+    ]
+  end
 
   defp handoff_gh_api_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
     Regex.match?(~r/(^|[\s'"])gh\s+api(\s|$)/, command) and
