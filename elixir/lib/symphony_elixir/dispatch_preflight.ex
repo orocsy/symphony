@@ -182,7 +182,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "created_at" => now_iso8601(),
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
-      "branch" => requirements["branch"] || issue_value(issue, :branch_name),
+      "branch" => Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
       "checkpoint_event" => "review-feedback-classified",
       "first_task" =>
         "Fix only the listed current-head review feedback on the existing PR branch, then run focused validation, push, and request a fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor.",
@@ -191,6 +191,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "review" => %{
         "pr_number" => Map.get(inspection, :pr_number),
         "pr_url" => Map.get(inspection, :pr_url),
+        "head_ref" => Map.get(inspection, :head_ref),
         "head_sha" => Map.get(inspection, :head_sha),
         "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
         "feedback_count" => length(feedback),

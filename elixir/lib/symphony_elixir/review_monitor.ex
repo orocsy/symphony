@@ -129,7 +129,18 @@ defmodule SymphonyElixir.ReviewMonitor do
 
     if branches == [] do
       Logger.debug("Review monitor skipped #{issue_context(issue)} because it has no branch name")
-      {:ok, %{repo: nil, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
+
+      {:ok,
+       %{
+         repo: nil,
+         pr: nil,
+         pr_number: nil,
+         pr_url: nil,
+         head_ref: nil,
+         head_sha: nil,
+         feedback: [],
+         feedback_source: :none
+       }}
     else
       with {:ok, repo} <- normalize_repo(monitor.repo) do
         inspect_issue_branches(repo, branches)
@@ -173,6 +184,7 @@ defmodule SymphonyElixir.ReviewMonitor do
          pr: pr,
          pr_number: pr_number(pr),
          pr_url: pr_url(pr),
+         head_ref: head_ref(pr),
          head_sha: head_sha(pr),
          feedback: current_feedback,
          feedback_source: feedback_source
@@ -181,7 +193,16 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp no_pr_inspection(repo) do
-    %{repo: repo, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :no_pr}
+    %{
+      repo: repo,
+      pr: nil,
+      pr_number: nil,
+      pr_url: nil,
+      head_ref: nil,
+      head_sha: nil,
+      feedback: [],
+      feedback_source: :no_pr
+    }
   end
 
   defp issue_review_branch_candidates(%Issue{} = issue) do
@@ -997,6 +1018,9 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp pr_url(pr) when is_map(pr), do: pr["html_url"]
   defp pr_url(_pr), do: nil
+
+  defp head_ref(pr) when is_map(pr), do: get_in(pr, ["head", "ref"])
+  defp head_ref(_pr), do: nil
 
   defp head_sha(pr) when is_map(pr), do: get_in(pr, ["head", "sha"])
   defp head_sha(_pr), do: nil

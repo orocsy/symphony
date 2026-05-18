@@ -3050,6 +3050,7 @@ defmodule SymphonyElixir.CoreTest do
             %{
               pr_number: 33,
               pr_url: "https://github.com/acme/nutribuddy/pull/33",
+              head_ref: "orocsy/feature-deepseek-provider-integration",
               head_sha: "integration-head",
               feedback: [_],
               feedback_source: :review_threads
@@ -4493,6 +4494,8 @@ defmodule SymphonyElixir.CoreTest do
 
       assert get_in(preflight, ["review", "pr_number"]) == 33
       assert get_in(preflight, ["review", "pr_url"]) == "https://github.com/acme/nutribuddy/pull/33"
+      assert get_in(preflight, ["review", "head_ref"]) == "orocsy/feature-deepseek-provider-integration"
+      assert preflight["branch"] == "orocsy/feature-deepseek-provider-integration"
       assert get_in(preflight, ["review", "feedback_count"]) == 1
       assert get_in(preflight, ["requirements", "issue_brief", "path"]) == ".orocsy/delivery/issue-brief.md"
       assert [%{"path" => "src/app/api/recipe-chats/route.ts"}] = get_in(preflight, ["review", "feedback"])
