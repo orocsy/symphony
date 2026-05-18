@@ -58,6 +58,21 @@ defmodule SymphonyElixir.RescueSupervisor do
     case inspect_review_if_enabled(issue) do
       {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback} = inspection} when feedback != [] ->
         cond do
+          codex_review_request_pending?(inspection) ->
+            Logger.info("Rescue supervisor kept #{issue.identifier} parked because a fresh Codex review request is pending")
+            [issue.id]
+
+          review_rework_retry_budget_exhausted_without_new_progress?(workspace) ->
+            classification = "worker_prompt_defect"
+            summary = review_rework_retry_budget_block_summary(classification)
+
+            :ok = Workspace.classify_blocking_corrections_by_id_in_workspace(workspace, progress_correction_ids, classification, summary)
+            _ = Tracker.create_comment(issue.id, review_retry_loop_block_comment(issue, progress_corrections, pr_number, pr_url, head_sha))
+
+            Logger.warning("Rescue supervisor classified #{issue.identifier} as #{classification}; leaving review-rework correction open")
+
+            [issue.id]
+
           fresh_review_feedback_after_latest_codex_request?(inspection) ->
             classification = "review_rework_needed"
 
@@ -69,23 +84,6 @@ defmodule SymphonyElixir.RescueSupervisor do
             _ = Tracker.create_comment(issue.id, review_rework_comment(issue, progress_corrections, classification, pr_number, pr_url, head_sha))
 
             Logger.info("Rescue supervisor classified #{issue.identifier} as #{classification} after fresh review feedback for PR ##{pr_number}")
-
-            [issue.id]
-
-          codex_review_request_pending?(inspection) ->
-            Logger.info("Rescue supervisor kept #{issue.identifier} parked because a fresh Codex review request is pending")
-            [issue.id]
-
-          review_rework_retry_loop_exhausted_without_new_progress?(workspace) ->
-            classification = "worker_prompt_defect"
-
-            summary =
-              "#{classification}: repeated review-rework runtime progress retries did not complete the dirty handoff under #{@worker_prompt_fix_version}."
-
-            :ok = Workspace.classify_blocking_corrections_by_id_in_workspace(workspace, progress_correction_ids, classification, summary)
-            _ = Tracker.create_comment(issue.id, review_retry_loop_block_comment(issue, progress_corrections, pr_number, pr_url, head_sha))
-
-            Logger.warning("Rescue supervisor classified #{issue.identifier} as #{classification}; leaving review-rework correction open")
 
             [issue.id]
 
@@ -352,6 +350,35 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp review_rework_retry_loop_exhausted_without_new_progress?(_workspace), do: false
+
+  defp review_rework_retry_budget_exhausted_without_new_progress?(workspace) when is_binary(workspace) do
+    cond do
+      failed_worker_retry_budget_disabled?() ->
+        true
+
+      true ->
+        review_rework_retry_loop_exhausted_without_new_progress?(workspace)
+    end
+  end
+
+  defp review_rework_retry_budget_exhausted_without_new_progress?(_workspace), do: false
+
+  defp failed_worker_retry_budget_disabled? do
+    case Config.settings!().agent.max_failed_worker_retries do
+      value when is_integer(value) and value <= 0 -> true
+      _ -> false
+    end
+  end
+
+  defp review_rework_retry_budget_block_summary(classification) do
+    max_failed_worker_retries = Config.settings!().agent.max_failed_worker_retries
+
+    if is_integer(max_failed_worker_retries) and max_failed_worker_retries <= 0 do
+      "#{classification}: review-rework runtime progress retry budget is disabled by agent.max_failed_worker_retries=#{max_failed_worker_retries}; keeping the correction blocked instead of redispatching the same PR feedback."
+    else
+      "#{classification}: repeated review-rework runtime progress retries did not complete the dirty handoff under #{@worker_prompt_fix_version}."
+    end
+  end
 
   defp fresh_review_feedback_after_latest_codex_request?(%Issue{} = issue) do
     case inspect_review_if_enabled(issue) do
@@ -904,12 +931,22 @@ defmodule SymphonyElixir.RescueSupervisor do
     - Correction: `#{correction_ids}`
     - PR: ##{pr_number} #{pr_url}
     - Head: `#{short_sha(head_sha)}`
-    - Prior review-rework retries: #{@review_rework_loop_limit}+
+    - Prior review-rework retries: #{review_rework_retry_budget_label()}
     - Workspace progress: no dirty files, no commits ahead of the tracking branch
     - Runtime dispatch fix: `#{@worker_prompt_fix_version}`
     - Next action: stop redispatching automatically; fix the review-fix worker prompt/runtime dispatch path so the next turn records real file, commit, test, review, or blocker progress before the first-event budget.
     """
     |> String.trim()
+  end
+
+  defp review_rework_retry_budget_label do
+    max_failed_worker_retries = Config.settings!().agent.max_failed_worker_retries
+
+    if is_integer(max_failed_worker_retries) and max_failed_worker_retries <= 0 do
+      "blocked by agent.max_failed_worker_retries=#{max_failed_worker_retries}"
+    else
+      "#{@review_rework_loop_limit}+"
+    end
   end
 
   defp correction_ids(corrections) do
