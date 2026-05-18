@@ -961,26 +961,26 @@ defmodule SymphonyElixir.Orchestrator do
   defp effective_first_event_max_tokens(_running_entry, configured), do: configured
 
   defp first_event_progress_tokens(running_entry, total_tokens) when is_integer(total_tokens) do
-    if review_rework_running_entry?(running_entry) do
-      cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
-      max(total_tokens - cached_input_tokens, 0)
-    else
-      total_tokens
-    end
+    uncached_progress_tokens(running_entry, total_tokens)
   end
 
   defp first_event_progress_tokens(_running_entry, total_tokens), do: total_tokens
 
   defp durable_progress_guard_tokens(running_entry, total_tokens) when is_integer(total_tokens) do
-    if review_rework_running_entry?(running_entry) do
-      cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
+    uncached_progress_tokens(running_entry, total_tokens)
+  end
+
+  defp durable_progress_guard_tokens(_running_entry, total_tokens), do: total_tokens
+
+  defp uncached_progress_tokens(running_entry, total_tokens) do
+    cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
+
+    if is_integer(cached_input_tokens) and cached_input_tokens > 0 do
       max(total_tokens - cached_input_tokens, 0)
     else
       total_tokens
     end
   end
-
-  defp durable_progress_guard_tokens(_running_entry, total_tokens), do: total_tokens
 
   defp count_dispatch_preflight_progress?(_running_entry), do: false
 
