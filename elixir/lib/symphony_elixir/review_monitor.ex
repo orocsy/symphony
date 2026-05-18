@@ -84,12 +84,15 @@ defmodule SymphonyElixir.ReviewMonitor do
     if issue.state == monitor.rework_state do
       :ok
     else
-      case feedback_for_issue(issue, monitor) do
-        {:ok, nil} ->
+      case inspect_issue(issue, monitor) do
+        {:ok, %{pr: nil}} ->
           :ok
 
-        {:ok, feedback} ->
-          mark_rework(issue, monitor, feedback)
+        {:ok, %{feedback: []} = inspection} ->
+          maybe_request_missing_codex_review(issue, monitor, inspection)
+
+        {:ok, %{repo: repo, pr: pr, feedback: feedback}} ->
+          mark_rework(issue, monitor, build_feedback(repo, pr, feedback))
 
         {:error, reason} ->
           Logger.warning("Review monitor could not inspect #{issue_context(issue)}: #{inspect(reason)}")
@@ -177,22 +180,6 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   def review_feedback_after_latest_codex_request?(_repo, _pr, _feedback), do: {:ok, false}
-
-  defp feedback_for_issue(%Issue{} = issue, monitor) do
-    case inspect_issue(issue, monitor) do
-      {:ok, %{pr: nil}} ->
-        {:ok, nil}
-
-      {:ok, %{feedback: []}} ->
-        {:ok, nil}
-
-      {:ok, %{repo: repo, pr: pr, feedback: feedback}} ->
-        {:ok, build_feedback(repo, pr, feedback)}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
 
   defp normalize_repo(repo) when is_binary(repo) do
     repo =
@@ -299,6 +286,81 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp normalize_issue_comments(comments) do
     Enum.filter(comments, &is_map/1)
+  end
+
+  defp maybe_request_missing_codex_review(%Issue{} = issue, monitor, %{repo: repo, pr: pr}) do
+    if review_state_issue?(issue, monitor) do
+      case fetch_issue_comments(repo, pr) do
+        {:ok, comments} ->
+          if codex_review_handoff_present?(comments) do
+            :ok
+          else
+            request_missing_codex_review(issue, monitor, repo, pr)
+          end
+
+        {:error, reason} ->
+          Logger.warning("Review monitor could not inspect PR issue comments for #{issue_context(issue)}: #{inspect(reason)}")
+      end
+    end
+  end
+
+  defp maybe_request_missing_codex_review(_issue, _monitor, _inspection), do: :ok
+
+  defp review_state_issue?(%Issue{state: state}, monitor) do
+    issue_state = normalize_state_name(state)
+
+    monitor.states
+    |> Enum.map(&normalize_state_name/1)
+    |> Enum.any?(&(&1 == issue_state))
+  end
+
+  defp normalize_state_name(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp codex_review_handoff_present?(comments) when is_list(comments) do
+    not is_nil(latest_codex_review_request_at(comments)) or
+      not is_nil(latest_clean_codex_review_after_latest_request_at(comments))
+  end
+
+  defp codex_review_handoff_present?(_comments), do: false
+
+  defp request_missing_codex_review(%Issue{} = issue, monitor, repo, pr) do
+    body = missing_codex_review_request_body(issue, pr)
+
+    case create_issue_comment(repo, pr, body) do
+      {:ok, _comment} ->
+        _ = Tracker.create_comment(issue.id, missing_codex_review_tracker_comment(issue, monitor, pr))
+
+        Logger.info("Review monitor requested missing Codex review for #{issue_context(issue)} PR ##{pr_number(pr)}")
+
+      {:error, reason} ->
+        Logger.warning("Review monitor could not request Codex review for #{issue_context(issue)}: #{inspect(reason)}")
+    end
+  end
+
+  defp missing_codex_review_request_body(%Issue{} = issue, pr) do
+    """
+    @codex review
+
+    Requested by Symphony review monitor because #{issue.identifier || issue.id || "this issue"} is in review state with PR ##{pr_number(pr)}, but no Codex review request or clean Codex result was found for the current handoff.
+    """
+    |> String.trim()
+  end
+
+  defp missing_codex_review_tracker_comment(%Issue{} = issue, monitor, pr) do
+    """
+    Symphony review monitor requested the missing Codex PR review instead of leaving this issue idle in `#{issue.state}`.
+
+    - Issue: `#{issue.identifier}`
+    - PR: ##{pr_number(pr)} #{pr_url(pr)}
+    - State kept: `#{issue.state}`
+    - Next action: wait for Codex review; if current-head feedback appears, the monitor will move this issue to `#{monitor.rework_state}` for review hardening.
+    """
+    |> String.trim()
   end
 
   defp fetch_current_feedback(_repo, nil, _comments, _reviews), do: {:ok, [], :no_pr}
@@ -716,6 +778,57 @@ defmodule SymphonyElixir.ReviewMonitor do
 
       _ ->
         fn endpoint -> System.cmd("gh", ["api", endpoint], stderr_to_stdout: true) end
+    end
+  end
+
+  defp create_issue_comment(_repo, nil, _body), do: {:error, :missing_pull_request}
+
+  defp create_issue_comment(repo, pr, body) when is_binary(repo) and is_binary(body) do
+    case pr_number(pr) do
+      nil ->
+        {:error, :missing_pr_number}
+
+      number ->
+        github_api_post("repos/#{repo}/issues/#{number}/comments", %{"body" => body})
+    end
+  end
+
+  defp create_issue_comment(_repo, _pr, _body), do: {:error, :invalid_issue_comment_request}
+
+  defp github_api_post(endpoint, fields) do
+    case github_api_post_runner().(endpoint, fields) do
+      {:ok, decoded} ->
+        {:ok, decoded}
+
+      {output, 0} when is_binary(output) ->
+        Jason.decode(output)
+
+      {output, exit_code} ->
+        {:error, {:github_api_post_failed, exit_code, summarize_output(output)}}
+
+      other ->
+        {:error, {:github_api_post_unexpected_result, other}}
+    end
+  rescue
+    error -> {:error, {:github_api_post_exception, Exception.message(error)}}
+  end
+
+  defp github_api_post_runner do
+    case Application.get_env(:symphony_elixir, :github_api_post_runner) do
+      runner when is_function(runner, 2) ->
+        runner
+
+      _ ->
+        fn endpoint, fields ->
+          args =
+            ["api", endpoint]
+            |> Kernel.++(
+              fields
+              |> Enum.flat_map(fn {key, value} -> ["-f", "#{key}=#{value}"] end)
+            )
+
+          System.cmd("gh", args, stderr_to_stdout: true)
+        end
     end
   end
 

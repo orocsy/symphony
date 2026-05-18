@@ -2628,6 +2628,81 @@ defmodule SymphonyElixir.CoreTest do
     refute_receive {:memory_tracker_comment, "issue-cod-152-review-monitor-dedupe", _body}, 50
   end
 
+  test "review monitor requests missing Codex review for clean Human Review PR" do
+    parent = self()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-cod-187-missing-review-request",
+      identifier: "COD-187",
+      title: "Recipe chat provider selection specs",
+      state: "Human Review",
+      branch_name: "orocsy/cod-187-provider-selection"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      send(parent, {:github_get, endpoint})
+
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 29,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/29",
+               "head" => %{"sha" => "clean-review-head", "ref" => "orocsy/cod-187-provider-selection"}
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/29/comments" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/pulls/29/reviews" ->
+          {:ok, []}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/29/comments?") ->
+          {:ok, []}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_api_post_runner, fn endpoint, fields ->
+      send(parent, {:github_post, endpoint, fields})
+      {:ok, %{"id" => 123, "body" => fields["body"]}}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+      Application.delete_env(:symphony_elixir, :github_api_post_runner)
+    end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:github_post, "repos/acme/nutribuddy/issues/29/comments", %{"body" => body}}
+    assert body =~ "@codex review"
+    assert body =~ "COD-187"
+    assert body =~ "no Codex review request"
+
+    assert_receive {:memory_tracker_comment, "issue-cod-187-missing-review-request", comment}
+    assert comment =~ "requested the missing Codex PR review"
+    assert comment =~ "pull/29"
+    refute_receive {:memory_tracker_state_update, "issue-cod-187-missing-review-request", "Rework"}, 50
+  end
+
   test "review request pending scans issue comment pages beyond the default first page" do
     parent = self()
 
