@@ -124,10 +124,46 @@ defmodule SymphonyElixir.ReviewMonitor do
   defp normalize_issue_allowlist(_allowlist), do: MapSet.new()
 
   @spec inspect_issue(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
-  def inspect_issue(%Issue{branch_name: branch}, monitor)
-      when is_binary(branch) and branch != "" do
-    with {:ok, repo} <- normalize_repo(monitor.repo),
-         {:ok, pr} <- fetch_open_pull_request(repo, branch),
+  def inspect_issue(%Issue{} = issue, monitor) do
+    branches = issue_review_branch_candidates(issue)
+
+    if branches == [] do
+      Logger.debug("Review monitor skipped #{issue_context(issue)} because it has no branch name")
+      {:ok, %{repo: nil, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
+    else
+      with {:ok, repo} <- normalize_repo(monitor.repo) do
+        inspect_issue_branches(repo, branches)
+      end
+    end
+  end
+
+  defp inspect_issue_branches(repo, branches) do
+    branches
+    |> Enum.reduce_while({:ok, no_pr_inspection(repo)}, fn branch, {:ok, fallback} ->
+      case inspect_issue_branch(repo, branch) do
+        {:ok, %{feedback: feedback} = inspection} when feedback != [] ->
+          {:halt, {:ok, inspection}}
+
+        {:ok, %{pr: pr} = inspection} when not is_nil(pr) ->
+          next_fallback =
+            case fallback do
+              %{pr: nil} -> inspection
+              _ -> fallback
+            end
+
+          {:cont, {:ok, next_fallback}}
+
+        {:ok, _inspection} ->
+          {:cont, {:ok, fallback}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp inspect_issue_branch(repo, branch) do
+    with {:ok, pr} <- fetch_open_pull_request(repo, branch),
          {:ok, comments} <- fetch_pull_comments(repo, pr),
          {:ok, reviews} <- fetch_pull_reviews(repo, pr),
          {:ok, current_feedback, feedback_source} <- fetch_current_feedback(repo, pr, comments, reviews) do
@@ -144,10 +180,79 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
-  def inspect_issue(%Issue{} = issue, _monitor) do
-    Logger.debug("Review monitor skipped #{issue_context(issue)} because it has no branch name")
-    {:ok, %{repo: nil, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
+  defp no_pr_inspection(repo) do
+    %{repo: repo, pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :no_pr}
   end
+
+  defp issue_review_branch_candidates(%Issue{} = issue) do
+    ([issue.branch_name] ++ description_review_branches(issue.description || ""))
+    |> Enum.map(&clean_branch_name/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp description_review_branches(description) when is_binary(description) do
+    [
+      description_scalar_section(description, "Review Branch"),
+      description_scalar_section(description, "Final Integration Branch"),
+      description_scalar_section(description, "Integration Branch")
+    ] ++ description_contract_branches(description)
+  end
+
+  defp description_review_branches(_description), do: []
+
+  defp description_scalar_section(description, heading) do
+    pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
+
+    case Regex.run(pattern, description || "", capture: :all_but_first) do
+      [body] -> scalar_branch(body)
+      _ -> ""
+    end
+  end
+
+  defp description_contract_branches(description) do
+    Regex.scan(
+      ~r/^\s*(?:[-*]\s*)?(?:final\s+)?(?:review|integration)\s+branch\s*:\s*(.+)$/im,
+      description || "",
+      capture: :all_but_first
+    )
+    |> List.flatten()
+    |> Enum.map(&scalar_branch/1)
+  end
+
+  defp scalar_branch(text) when is_binary(text) do
+    text
+    |> String.split("\n")
+    |> Enum.map(&clean_branch_name/1)
+    |> Enum.reject(&(&1 == ""))
+    |> List.first()
+    |> to_string()
+  end
+
+  defp scalar_branch(_text), do: ""
+
+  defp clean_branch_name(branch) when is_binary(branch) do
+    value =
+      branch
+      |> String.trim()
+      |> String.trim_leading("*")
+      |> String.trim_leading("-")
+      |> String.trim()
+
+    value =
+      case Regex.run(~r/`([^`]+)`/, value, capture: :all_but_first) do
+        [quoted] -> quoted
+        _ -> value
+      end
+
+    value
+    |> String.trim()
+    |> String.trim_trailing(".")
+    |> String.replace(~r/^origin\//, "")
+    |> String.trim()
+  end
+
+  defp clean_branch_name(_branch), do: ""
 
   @spec codex_review_request_pending?(String.t() | nil, map() | nil, list()) ::
           {:ok, boolean()} | {:error, term()}

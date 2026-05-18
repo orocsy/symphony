@@ -2940,6 +2940,122 @@ defmodule SymphonyElixir.CoreTest do
              SymphonyElixir.ReviewMonitor.inspect_issue(issue, %{repo: "acme/nutribuddy"})
   end
 
+  test "review monitor inspects declared integration branch when issue branch PR has no feedback" do
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      decoded = URI.decode(endpoint)
+
+      cond do
+        String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+            String.contains?(decoded, "head=acme:orocsy/cod-190-handoff") ->
+          {:ok,
+           [
+             %{
+               "number" => 34,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/34",
+               "head" => %{"ref" => "orocsy/cod-190-handoff", "sha" => "issue-branch-head"}
+             }
+           ]}
+
+        String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+            String.contains?(decoded, "head=acme:orocsy/feature-deepseek-provider-integration") ->
+          {:ok,
+           [
+             %{
+               "number" => 33,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/33",
+               "head" => %{
+                 "ref" => "orocsy/feature-deepseek-provider-integration",
+                 "sha" => "integration-head"
+               }
+             }
+           ]}
+
+        decoded in [
+          "repos/acme/nutribuddy/pulls/33/comments",
+          "repos/acme/nutribuddy/pulls/33/reviews",
+          "repos/acme/nutribuddy/issues/33/comments",
+          "repos/acme/nutribuddy/pulls/34/comments",
+          "repos/acme/nutribuddy/pulls/34/reviews",
+          "repos/acme/nutribuddy/issues/34/comments"
+        ] ->
+          {:ok, []}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, variables ->
+      nodes =
+        case variables["number"] do
+          33 ->
+            [
+              %{
+                "isResolved" => false,
+                "isOutdated" => false,
+                "comments" => %{
+                  "nodes" => [
+                    %{
+                      "body" => "Wire DeepSeek selection into follow-up messages.",
+                      "path" => "src/app/api/recipe-chats/[chatId]/messages/route.ts",
+                      "line" => 190,
+                      "createdAt" => "2026-05-18T18:31:40Z",
+                      "url" => "https://github.com/acme/nutribuddy/pull/33#discussion"
+                    }
+                  ]
+                }
+              }
+            ]
+
+          _ ->
+            []
+        end
+
+      {:ok,
+       %{
+         "data" => %{
+           "repository" => %{
+             "pullRequest" => %{
+               "headRefOid" => "head",
+               "reviewThreads" => %{
+                 "nodes" => nodes,
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+               }
+             }
+           }
+         }
+       }}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+      Application.delete_env(:symphony_elixir, :github_graphql_runner)
+    end)
+
+    issue = %Issue{
+      id: "issue-cod-190",
+      identifier: "COD-190",
+      title: "DeepSeek Integration Check",
+      state: "Rework",
+      branch_name: "orocsy/cod-190-handoff",
+      description: """
+      ## Base / Branch Contract
+
+      - Final integration branch: `orocsy/feature-deepseek-provider-integration`.
+      - Final PR target: `main`.
+      """
+    }
+
+    assert {:ok,
+            %{
+              pr_number: 33,
+              pr_url: "https://github.com/acme/nutribuddy/pull/33",
+              head_sha: "integration-head",
+              feedback: [_],
+              feedback_source: :review_threads
+            }} = SymphonyElixir.ReviewMonitor.inspect_issue(issue, %{repo: "acme/nutribuddy"})
+  end
+
   test "no durable progress correction without PR feedback retries after requirements hydration" do
     test_root =
       Path.join(
@@ -4238,6 +4354,148 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Validation command guidance:"
       assert prompt =~ "Review rework execution contract"
       refute prompt =~ "You are an agent for this repository."
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight uses focused issue brief to find final integration PR feedback" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-brief-integration-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-190-preflight",
+        identifier: "COD-190",
+        title: "DeepSeek integration handoff",
+        state: "Rework",
+        branch_name: "orocsy/cod-190-handoff",
+        description: "Handoff issue with focused brief in workspace."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), """
+      # COD-190 Issue Brief
+
+      ## Base / Branch Contract
+
+      - Final integration branch: `orocsy/feature-deepseek-provider-integration`.
+      - Final PR target: `main`.
+      """)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:orocsy/cod-190-handoff") ->
+            {:ok,
+             [
+               %{
+                 "number" => 34,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/34",
+                 "head" => %{"sha" => "issue-head", "ref" => "orocsy/cod-190-handoff"}
+               }
+             ]}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:orocsy/feature-deepseek-provider-integration") ->
+            {:ok,
+             [
+               %{
+                 "number" => 33,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/33",
+                 "head" => %{
+                   "sha" => "integration-head",
+                   "ref" => "orocsy/feature-deepseek-provider-integration"
+                 }
+               }
+             ]}
+
+          decoded in [
+            "repos/acme/nutribuddy/pulls/33/comments",
+            "repos/acme/nutribuddy/pulls/33/reviews",
+            "repos/acme/nutribuddy/issues/33/comments",
+            "repos/acme/nutribuddy/pulls/34/comments",
+            "repos/acme/nutribuddy/pulls/34/reviews",
+            "repos/acme/nutribuddy/issues/34/comments"
+          ] ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, variables ->
+        nodes =
+          case variables["number"] do
+            33 ->
+              [
+                %{
+                  "isResolved" => false,
+                  "isOutdated" => false,
+                  "comments" => %{
+                    "nodes" => [
+                      %{
+                        "body" => "Reject invalid provider modes instead of faking.",
+                        "path" => "src/app/api/recipe-chats/route.ts",
+                        "line" => 514,
+                        "createdAt" => "2026-05-18T18:31:40Z",
+                        "url" => "https://github.com/acme/nutribuddy/pull/33#discussion"
+                      }
+                    ]
+                  }
+                }
+              ]
+
+            _ ->
+              []
+          end
+
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => "head",
+                 "reviewThreads" => %{
+                   "nodes" => nodes,
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["review", "pr_number"]) == 33
+      assert get_in(preflight, ["review", "pr_url"]) == "https://github.com/acme/nutribuddy/pull/33"
+      assert get_in(preflight, ["review", "feedback_count"]) == 1
+      assert get_in(preflight, ["requirements", "issue_brief", "path"]) == ".orocsy/delivery/issue-brief.md"
+      assert [%{"path" => "src/app/api/recipe-chats/route.ts"}] = get_in(preflight, ["review", "feedback"])
     after
       File.rm_rf(test_root)
     end

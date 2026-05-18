@@ -14,7 +14,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   def prepare(workspace, issue) when is_binary(workspace) do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
-         {:ok, inspection} <- inspect_review(issue) do
+         {:ok, inspection} <- inspect_review(workspace, issue, requirements) do
       preflight =
         if review_feedback?(inspection) do
           review_rework_preflight(workspace, issue, requirements, inspection)
@@ -78,17 +78,22 @@ defmodule SymphonyElixir.DispatchPreflight do
         {:ok, requirements}
 
       {:error, :no_issue_requirements} ->
-        {:ok, fallback_requirements(issue)}
+        {:ok, fallback_requirements(workspace, issue)}
 
       {:error, {:missing_issue_requirements, _missing}} ->
-        {:ok, fallback_requirements(issue)}
+        {:ok, fallback_requirements(workspace, issue)}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp inspect_review(%Issue{} = issue) do
+  defp inspect_review(workspace, issue, requirements) do
+    issue =
+      issue
+      |> struct_issue()
+      |> maybe_append_issue_brief_description(workspace, requirements)
+
     monitor = Config.settings!().review_monitor
 
     cond do
@@ -103,13 +108,55 @@ defmodule SymphonyElixir.DispatchPreflight do
     end
   end
 
-  defp inspect_review(issue) when is_map(issue) do
-    issue
-    |> struct_issue()
-    |> inspect_review()
+  defp maybe_append_issue_brief_description(%Issue{} = issue, workspace, requirements) do
+    case issue_brief_body(workspace, requirements) do
+      "" ->
+        issue
+
+      brief ->
+        description =
+          [issue.description || "", "## Focused Issue Brief\n\n#{brief}"]
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.join("\n\n")
+
+        %{issue | description: description}
+    end
   end
 
-  defp inspect_review(_issue), do: {:ok, %{pr: nil, pr_number: nil, pr_url: nil, head_sha: nil, feedback: [], feedback_source: :none}}
+  defp issue_brief_body(workspace, requirements) when is_binary(workspace) do
+    workspace
+    |> issue_brief_candidate_paths(requirements)
+    |> Enum.find_value("", fn path ->
+      if File.regular?(path) do
+        path
+        |> File.read!()
+        |> truncate(20_000)
+      end
+    end)
+  rescue
+    _error -> ""
+  end
+
+  defp issue_brief_body(_workspace, _requirements), do: ""
+
+  defp issue_brief_candidate_paths(workspace, requirements) when is_map(requirements) do
+    requirement_path =
+      case requirements do
+        %{"issue_brief" => %{"path" => path}} when is_binary(path) -> [Path.join(workspace, path)]
+        _ -> []
+      end
+
+    identifier = safe_issue_identifier(requirements["identifier"] || "")
+
+    requirement_path ++
+      [
+        Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+        Path.join(workspace, ".codex/agentic/issue-briefs/#{identifier}.md")
+      ]
+  end
+
+  defp issue_brief_candidate_paths(_workspace, _requirements), do: []
 
   defp review_inspection_failed(reason) do
     %{
@@ -407,7 +454,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp compact_requirements(_requirements), do: %{}
 
-  defp fallback_requirements(issue) do
+  defp fallback_requirements(workspace, issue) do
     %{
       "identifier" => issue_value(issue, :identifier),
       "title" => issue_value(issue, :title),
@@ -418,9 +465,37 @@ defmodule SymphonyElixir.DispatchPreflight do
       "mius" => [],
       "validation" => %{"commands" => [], "files" => [], "events" => [], "scenarios" => []},
       "out_of_scope" => [],
-      "issue_brief" => nil
+      "issue_brief" => fallback_issue_brief_reference(workspace, issue_value(issue, :identifier))
     }
   end
+
+  defp fallback_issue_brief_reference(workspace, identifier) when is_binary(workspace) and is_binary(identifier) do
+    relative_paths = [
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"]),
+      ".orocsy/delivery/issue-brief.md"
+    ]
+
+    relative_paths
+    |> Enum.find_value(fn relative_path ->
+      path = Path.join(workspace, relative_path)
+
+      if File.regular?(path) do
+        %{"path" => relative_path, "bytes" => File.stat!(path).size}
+      end
+    end)
+  rescue
+    _error -> nil
+  end
+
+  defp fallback_issue_brief_reference(_workspace, _identifier), do: nil
+
+  defp safe_issue_identifier(identifier) when is_binary(identifier) do
+    identifier
+    |> String.trim()
+    |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+  end
+
+  defp safe_issue_identifier(_identifier), do: ""
 
   defp feedback_summary(%{type: type, payload: payload}) when is_map(payload) do
     comment = latest_comment(payload)
