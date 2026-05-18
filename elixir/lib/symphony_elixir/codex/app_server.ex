@@ -507,7 +507,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => "review_rework"} = preflight} ->
         preflight
-        |> review_rework_feedback_paths()
+        |> review_rework_allowed_read_paths()
         |> review_rework_path_guard_patterns_for_paths()
 
       _ ->
@@ -515,6 +515,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   rescue
     _error -> []
+  end
+
+  defp review_rework_allowed_read_paths(%{} = preflight) do
+    (review_rework_feedback_paths(preflight) ++ review_rework_requirement_paths(preflight))
+    |> Enum.uniq()
   end
 
   defp review_rework_feedback_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
@@ -527,6 +532,60 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_feedback_paths(_preflight), do: []
+
+  defp review_rework_requirement_paths(%{"requirements" => requirements}) when is_map(requirements) do
+    requirements
+    |> requirement_path_sources()
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_requirement_paths(_preflight), do: []
+
+  defp requirement_path_sources(requirements) when is_map(requirements) do
+    [
+      Map.get(requirements, "write_scope"),
+      Map.get(requirements, "shared_files"),
+      get_in(requirements, ["validation", "commands"]),
+      get_in(requirements, ["validation", "files"])
+    ]
+    |> Enum.flat_map(&string_values/1)
+  end
+
+  defp string_values(values) when is_list(values), do: Enum.flat_map(values, &string_values/1)
+  defp string_values(value) when is_binary(value), do: [value]
+  defp string_values(_value), do: []
+
+  defp paths_from_requirement_text(text) when is_binary(text) do
+    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    |> Regex.scan(text)
+    |> Enum.flat_map(fn captures ->
+      captures
+      |> tl()
+      |> Enum.find(&(&1 != ""))
+      |> case do
+        path when is_binary(path) -> [normalize_requirement_path(path)]
+        _ -> []
+      end
+    end)
+    |> Enum.filter(&review_rework_path_like?/1)
+  end
+
+  defp paths_from_requirement_text(_text), do: []
+
+  defp normalize_requirement_path(path) when is_binary(path) do
+    path
+    |> String.trim()
+    |> String.trim_leading("./")
+  end
+
+  defp review_rework_path_like?(path) when is_binary(path) do
+    path != "" and
+      String.contains?(path, "/") and
+      not String.contains?(path, [" ", "\t", "\n", "\r"]) and
+      not String.starts_with?(path, ["http://", "https://", "origin/"])
+  end
+
+  defp review_rework_path_like?(_path), do: false
 
   defp review_rework_path_guard_patterns_for_paths([]), do: []
 
