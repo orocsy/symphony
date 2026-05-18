@@ -4203,7 +4203,7 @@ defmodule SymphonyElixir.CoreTest do
             issue: issue,
             workspace_path: workspace,
             started_at: DateTime.add(DateTime.utc_now(), -1, :second),
-            codex_total_tokens: 35_000
+            codex_total_tokens: 50_000
           }
         },
         claimed: MapSet.new([issue.id]),
@@ -4218,10 +4218,70 @@ defmodule SymphonyElixir.CoreTest do
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
-      assert correction["guard"]["first_event_max_tokens"] == 30_000
-      assert correction["guard"]["first_event_progress_tokens"] == 35_000
+      assert correction["guard"]["first_event_max_tokens"] == 45_000
+      assert correction["guard"]["first_event_progress_tokens"] == 50_000
       assert correction["guard"]["cached_input_tokens"] == 0
       assert correction["summary"] =~ "first durable Orocsy progress event"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review rework first edit token budget allows configured forty five thousand ceiling" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-configured-first-edit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 45_000
+      )
+
+      issue = %Issue{
+        id: "issue-cod-182-review-configured-first-edit",
+        identifier: "COD-182",
+        title: "Profile preferences route",
+        state: "Rework",
+        branch_name: "orocsy/cod-182-savedprofile-miu-profile-preferences-route"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+      File.mkdir_p!(Path.dirname(preflight_path))
+      File.write!(preflight_path, Jason.encode!(%{"mode" => "review_rework"}))
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+            codex_total_tokens: 30_054
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      assert Map.has_key?(state.running, issue.id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
     end

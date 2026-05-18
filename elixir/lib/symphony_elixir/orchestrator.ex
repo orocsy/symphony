@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
-  @review_rework_first_event_max_tokens 30_000
+  @review_rework_first_event_max_tokens 45_000
   @recent_codex_update_limit 8
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
