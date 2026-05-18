@@ -1657,6 +1657,116 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "token budget handoff correction with current PR feedback is rescued into rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-token-budget-handoff-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review", "In Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-181-token-budget-handoff",
+        identifier: "COD-181",
+        title: "Saved/Profile MIU: Saved Recipe Routes",
+        state: "Rework",
+        branch_name: "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.token-budget-handoff",
+                 source_status: "retry-exhausted",
+                 summary:
+                   "Symphony stopped a Codex worker after it exceeded the configured live turn token budget, but the workspace contains fresh local handoff progress from this run. The worker reached retry attempt 1, which exceeds agent.max_failed_worker_retries=0.",
+                 findings: [
+                   "Agent run failed for issue_id=issue-cod-181-token-budget-handoff issue_identifier=COD-181: {:turn_token_budget_exceeded, 1542669, 1500000}"
+                 ],
+                 next_action: "retry"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 28,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/28",
+                 "head" => %{
+                   "sha" => "326bb9dd518a91bda82d84e05e9fd27f447c8684",
+                   "ref" => "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/28/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Include full saved-list DTO fields.",
+                 "commit_id" => "326bb9dd518a91bda82d84e05e9fd27f447c8684",
+                 "path" => "src/app/api/saved-recipes/route.ts",
+                 "line" => 155,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/28#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/28/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_state_update, "issue-cod-181-token-budget-handoff", "Rework"}
+      assert_receive {:memory_tracker_comment, "issue-cod-181-token-budget-handoff", body}
+      assert body =~ "review_rework_needed"
+      assert body =~ "pull/28"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "review_rework_needed"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "runtime progress rescue preserves unrelated open blocking corrections" do
     test_root =
       Path.join(
