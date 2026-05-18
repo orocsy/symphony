@@ -130,6 +130,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
     forbidden_command_patterns = effective_forbidden_command_patterns(workspace, forbidden_command_patterns)
+    command_guard = %{patterns: forbidden_command_patterns, workspace: workspace}
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -152,7 +153,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approvals, forbidden_command_patterns) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approvals, command_guard) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -571,7 +572,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, forbidden_command_patterns) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, command_guard) do
     receive_loop(
       port,
       on_message,
@@ -579,7 +580,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       "",
       tool_executor,
       auto_approve_requests,
-      forbidden_command_patterns
+      command_guard
     )
   end
 
@@ -590,7 +591,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          pending_line,
          tool_executor,
          auto_approve_requests,
-         forbidden_command_patterns
+         command_guard
        ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
@@ -603,7 +604,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           tool_executor,
           auto_approve_requests,
-          forbidden_command_patterns
+          command_guard
         )
 
       {^port, {:data, {:noeol, chunk}}} ->
@@ -614,7 +615,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           pending_line <> to_string(chunk),
           tool_executor,
           auto_approve_requests,
-          forbidden_command_patterns
+          command_guard
         )
 
       {^port, {:exit_status, status}} ->
@@ -632,7 +633,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          timeout_ms,
          tool_executor,
          auto_approve_requests,
-         forbidden_command_patterns
+         command_guard
        ) do
     payload_string = to_string(data)
 
@@ -703,7 +704,7 @@ defmodule SymphonyElixir.Codex.AppServer do
               timeout_ms,
               tool_executor,
               auto_approve_requests,
-              forbidden_command_patterns
+              command_guard
             )
         end
 
@@ -718,7 +719,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, forbidden_command_patterns)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, command_guard)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -735,7 +736,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, forbidden_command_patterns)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, command_guard)
     end
   end
 
@@ -761,11 +762,11 @@ defmodule SymphonyElixir.Codex.AppServer do
          timeout_ms,
          tool_executor,
          auto_approve_requests,
-         forbidden_command_patterns
+         command_guard
        ) do
     metadata = metadata_from_message(port, payload)
 
-    case forbidden_command_violation(payload, forbidden_command_patterns) do
+    case forbidden_command_violation(payload, command_guard) do
       {:error, command, pattern} ->
         emit_message(
           on_message,
@@ -787,7 +788,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           tool_executor,
           auto_approve_requests,
           metadata,
-          forbidden_command_patterns
+          command_guard
         )
     end
   end
@@ -802,7 +803,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          tool_executor,
          auto_approve_requests,
          metadata,
-         forbidden_command_patterns
+         command_guard
        ) do
     case maybe_handle_approval_request(
            port,
@@ -832,7 +833,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           "",
           tool_executor,
           auto_approve_requests,
-          forbidden_command_patterns
+          command_guard
         )
 
       :approval_required ->
@@ -875,9 +876,28 @@ defmodule SymphonyElixir.Codex.AppServer do
             "",
             tool_executor,
             auto_approve_requests,
-            forbidden_command_patterns
+            command_guard
           )
         end
+    end
+  end
+
+  defp forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace}) when is_list(patterns) do
+    command = command_text(payload)
+
+    cond do
+      is_nil(command) ->
+        :ok
+
+      match = first_matching_command_pattern(command, patterns) ->
+        if gh_api_pattern?(match) and handoff_gh_api_allowed?(command, workspace) do
+          :ok
+        else
+          {:error, command, match}
+        end
+
+      true ->
+        :ok
     end
   end
 
@@ -897,6 +917,55 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp gh_api_pattern?(pattern), do: pattern == "(^|\\s)gh\\s+api(\\s|$)"
+
+  defp handoff_gh_api_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    Regex.match?(~r/(^|[\s'"])gh\s+api(\s|$)/, command) and
+      handoff_gh_api_command?(command) and durable_handoff_progress?(workspace)
+  end
+
+  defp handoff_gh_api_allowed?(_command, _workspace), do: false
+
+  defp handoff_gh_api_command?(command) do
+    normalized = String.replace(command, ~r/\s+/, " ")
+
+    endpoints =
+      ~r/(?:^|[\s'"])gh\s+api\s+["']?([^\s"']+)/
+      |> Regex.scan(normalized, capture: :all_but_first)
+      |> Enum.map(fn [endpoint] -> endpoint end)
+
+    endpoints != [] and Enum.all?(endpoints, &handoff_gh_api_endpoint?/1)
+  end
+
+  defp handoff_gh_api_endpoint?(endpoint) do
+    allowed_patterns = [
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/branches\/[^\s"']+$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/git\/refs(?:\/[^\s"']*)?$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/git\/ref\/[^\s"']+$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/pulls(?:\?[^\s"']*)?$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/pulls\/\d+$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/issues\/\d+\/comments$/
+    ]
+
+    Enum.any?(allowed_patterns, &Regex.match?(&1, endpoint))
+  end
+
+  defp durable_handoff_progress?(workspace) when is_binary(workspace) do
+    events_path = Path.join(workspace, ".orocsy/delivery/events/events.jsonl")
+
+    events_path
+    |> File.stream!()
+    |> Enum.any?(fn line ->
+      case Jason.decode(String.trim(line)) do
+        {:ok, %{"event" => "tool.finished", "status" => "passed"}} -> true
+        {:ok, %{"event" => "gate.post-miu", "status" => "passed"}} -> true
+        _ -> false
+      end
+    end)
+  rescue
+    _error -> false
+  end
 
   defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->
