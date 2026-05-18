@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "typescript-best-practices",
     "vercel:react-best-practices"
   ]
+  @fresh_implementation_disabled_skill_names @review_rework_disabled_skill_names
   @review_rework_disabled_plugins [
     "browser@openai-bundled",
     "build-web-apps@openai-curated",
@@ -54,6 +55,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s)ls(\\s|$)",
     "\\s(&&|\\|\\||;|\\|)\\s"
   ]
+  @fresh_implementation_forbidden_command_patterns @review_rework_forbidden_command_patterns
   @type session :: %{
           port: port(),
           metadata: map(),
@@ -332,7 +334,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         "cwd" => workspace,
         "dynamicTools" => DynamicTool.tool_specs()
       }
-      |> maybe_put_review_rework_thread_overrides(workspace)
+      |> maybe_put_worker_thread_overrides(workspace)
 
     send_message(port, %{
       "method" => "thread/start",
@@ -352,7 +354,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp maybe_put_review_rework_thread_overrides(params, workspace) when is_binary(workspace) do
+  defp maybe_put_worker_thread_overrides(params, workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => "review_rework"}} ->
         params
@@ -360,12 +362,39 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> Map.put("developerInstructions", review_rework_developer_instructions())
         |> Map.put("config", review_rework_thread_config())
 
+      {:ok, %{"mode" => "fresh_implementation"}} ->
+        params
+        |> Map.put("baseInstructions", fresh_implementation_base_instructions())
+        |> Map.put("developerInstructions", fresh_implementation_developer_instructions())
+        |> Map.put("config", fresh_implementation_thread_config())
+
       _ ->
         params
     end
   end
 
-  defp maybe_put_review_rework_thread_overrides(params, _workspace), do: params
+  defp maybe_put_worker_thread_overrides(params, _workspace), do: params
+
+  defp fresh_implementation_thread_config do
+    %{
+      "skills" => %{
+        "disabled_skill_names" => @fresh_implementation_disabled_skill_names
+      },
+      "features" => %{
+        "apps" => false,
+        "plugins" => false,
+        "tool_search" => false
+      },
+      "apps" => %{
+        "_default" => %{
+          "enabled" => false,
+          "open_world_enabled" => false,
+          "destructive_enabled" => false
+        }
+      },
+      "plugins" => disabled_named_config(@review_rework_disabled_plugins)
+    }
+  end
 
   defp review_rework_thread_config do
     %{
@@ -401,6 +430,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> String.trim()
   end
 
+  defp fresh_implementation_base_instructions do
+    """
+    You are a Symphony fresh-MIU worker for one Linear issue and one declared write scope.
+    Use the current prompt, the focused issue brief, and the named files only.
+    Make a scoped code/test/doc edit or record an explicit Orocsy blocker. Do not perform broad project discovery.
+    """
+    |> String.trim()
+  end
+
   defp review_rework_developer_instructions do
     """
     Symphony review-rework micro-worker.
@@ -421,23 +459,48 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> String.trim()
   end
 
+  defp fresh_implementation_developer_instructions do
+    """
+    Symphony fresh-MIU micro-worker.
+
+    This thread exists only to complete the current Linear issue's first declared MIU.
+    Do not load Codex skills, plugins, apps, MCP tools, prior session JSONL, broad project docs, historical tickets, or unrelated issue history.
+    Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
+    Start from `git status --short --branch`, then read `.orocsy/delivery/issue-brief.md` if present.
+    Use exact files, line ranges, data shapes, tests, and validation commands from the issue brief. Do not run `rg`, `grep`, `find`, `git ls-files`, GitHub, or Linear discovery before the first scoped edit unless the issue brief is missing required code-level scope.
+    If the brief is missing exact write scope, dependencies, target files, target tests, or acceptance criteria, write an Orocsy blocker/correction and stop instead of searching broadly.
+    Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction.
+    For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
+    After the scoped edit, run focused validation, append tool/gate/eval evidence, commit, push the issue branch, create/update one PR, request Codex review, and update Linear.
+    If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
+    In the first turn, complete the scoped MIU handoff or stop with a concrete blocker.
+    Never merge automatically.
+    """
+    |> String.trim()
+  end
+
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
-    if review_rework_workspace?(workspace) do
-      Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
-    else
-      patterns
+    case dispatch_preflight_mode(workspace) do
+      "review_rework" ->
+        Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
+
+      "fresh_implementation" ->
+        Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
+
+      _mode ->
+        patterns
     end
   end
 
   defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
 
-  defp review_rework_workspace?(workspace) when is_binary(workspace) do
+  defp dispatch_preflight_mode(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => "review_rework"}} -> true
-      _ -> false
+      {:ok, %{"mode" => mode}} when is_binary(mode) -> mode
+      _ -> nil
     end
   rescue
-    _error -> false
+    _error -> nil
   end
 
   defp review_rework_path_guard_patterns(workspace) do

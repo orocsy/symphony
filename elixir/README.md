@@ -23,6 +23,13 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
+When dispatch preflight marks a run as `fresh_implementation` or `review_rework`, Symphony starts
+Codex with a narrower thread configuration. These mode-specific sessions disable broad skills,
+plugins, apps, and tool search, and the app-server client enforces broad-discovery command bans such
+as `rg`, `grep`, `find`, `git ls-files`, and `gh api`. Fresh implementation mode is intended for
+one small MIU with an explicit issue brief; review rework mode is intended for already-collected PR
+feedback.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 

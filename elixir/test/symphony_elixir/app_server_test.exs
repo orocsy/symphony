@@ -371,6 +371,284 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server starts fresh implementation threads with isolated MIU config" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-implementation-thread-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-FRESH")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-fresh.trace")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-FRESH",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["docs/TECHNICAL_DESIGN.md"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-fresh.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fresh"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-fresh",
+        identifier: "MT-FRESH",
+        title: "Fresh MIU",
+        description: "Implement a focused MIU",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FRESH",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Implement fresh MIU", issue)
+
+      thread_start =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      assert get_in(thread_start, ["params", "baseInstructions"]) =~ "Symphony fresh-MIU worker"
+      assert get_in(thread_start, ["params", "baseInstructions"]) =~ "Do not perform broad project discovery"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Symphony fresh-MIU micro-worker"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ ".orocsy/delivery/issue-brief.md"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "technical-miu-trace"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run `rg`, `grep`, `find`"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Never merge automatically"
+
+      disabled_skills = get_in(thread_start, ["params", "config", "skills", "disabled_skill_names"])
+      assert "agentic-delivery-loop" in disabled_skills
+      assert "linear:linear" in disabled_skills
+      assert "typescript-best-practices" in disabled_skills
+
+      assert get_in(thread_start, ["params", "config", "features", "plugins"]) == false
+      assert get_in(thread_start, ["params", "config", "features", "apps"]) == false
+      assert get_in(thread_start, ["params", "config", "features", "tool_search"]) == false
+      assert get_in(thread_start, ["params", "config", "apps", "_default", "enabled"]) == false
+      assert get_in(thread_start, ["params", "config", "plugins", "linear@openai-curated", "enabled"]) == false
+      refute Map.has_key?(get_in(thread_start, ["params", "config"]), "mcp_servers")
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks broad search commands in fresh implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-implementation-forbidden-search-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-FRESH-SEARCH")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-FRESH-SEARCH",
+          "branch" => "orocsy/mt-fresh-search",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["docs/TECHNICAL_DESIGN.md"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fresh-search"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-search"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"SavedRecipe\\" docs/TECHNICAL_DESIGN.md"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-fresh-search",
+        identifier: "MT-FRESH-SEARCH",
+        title: "Fresh MIU search",
+        description: "Search should be blocked in fresh implementation",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FRESH-SEARCH",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Implement fresh MIU", issue)
+
+      assert command == ~s(rg -n "SavedRecipe" docs/TECHNICAL_DESIGN.md)
+      assert pattern == "(^|\\s)rg(\\s|$)"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks exec_command function calls in fresh implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-implementation-function-call-command-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-FRESH-FUNCTION-CALL")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-FRESH-FUNCTION-CALL",
+          "branch" => "orocsy/mt-fresh-function-call",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["docs/TECHNICAL_DESIGN.md"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fresh-function-call"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-function-call"}}}'
+            printf '%s\\n' '{"method":"codex/event/response_item","params":{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"find . -maxdepth 2 -type f\\"}"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-fresh-function-call",
+        identifier: "MT-FRESH-FUNCTION-CALL",
+        title: "Fresh MIU function call",
+        description: "Function-call exec commands should be blocked in fresh implementation",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FRESH-FUNCTION-CALL",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Implement fresh MIU", issue)
+
+      assert command == "find . -maxdepth 2 -type f"
+      assert pattern == "(^|\\s)find(\\s|$)"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks broad search commands in review rework mode" do
     test_root =
       Path.join(

@@ -966,6 +966,18 @@ Session identifiers:
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
 
+Mode-specific startup policy:
+
+- Implementations MAY apply additional thread configuration based on scheduler/preflight context
+  such as fresh implementation or review rework.
+- If an implementation disables skills, plugins, apps, tool search, or broad discovery for a mode,
+  it MUST document that behavior in the implementation README or workflow docs.
+- If an implementation defines mode-specific forbidden shell commands, it MUST enforce those
+  commands against both command event payloads and function-call command payloads accepted by the
+  targeted app-server protocol.
+- Mode-specific restrictions MUST fail the worker attempt with an observable error instead of
+  silently allowing a disallowed command.
+
 ### 10.3 Streaming Turn Processing
 
 The client processes app-server updates according to the targeted Codex app-server protocol until
