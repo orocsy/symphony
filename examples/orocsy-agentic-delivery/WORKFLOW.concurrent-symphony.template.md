@@ -21,6 +21,7 @@ review_monitor:
   repo: "$PROJECT_REPO"
   states:
     - Human Review
+    - In Review
   rework_state: Rework
 hooks:
   timeout_ms: 300000
@@ -31,16 +32,24 @@ hooks:
     git checkout -B "$base_branch" "origin/$base_branch"
     if [ -x .codex/worktree_init.sh ]; then
       ./.codex/worktree_init.sh
+    elif [ -n "${PROJECT_DEPENDENCY_ROOT:-}" ] && [ -d "$PROJECT_DEPENDENCY_ROOT/node_modules" ] && [ ! -e node_modules ]; then
+      ln -s "$PROJECT_DEPENDENCY_ROOT/node_modules" node_modules
+      echo "Linked node_modules from $PROJECT_DEPENDENCY_ROOT"
     fi
     orocsy_cli="${OROCSY_CLI:-}"
     if [ -z "$orocsy_cli" ] && [ -n "$SYMPHONY_REPO" ]; then
       orocsy_cli="$SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/orocsy.py"
+    fi
+    issue_file_arg=""
+    if [ -f .orocsy/delivery/issue-requirements.json ]; then
+      issue_file_arg="--issue-file .orocsy/delivery/issue-requirements.json"
     fi
     if [ -n "$orocsy_cli" ] && [ -f "$orocsy_cli" ]; then
       python3 "$orocsy_cli" --repo . symphony prepare-workspace \
         --issue "{{ issue.identifier }}" \
         --intent "Symphony issue {{ issue.identifier }}" \
         --orocsy-cli "$orocsy_cli" \
+        $issue_file_arg \
         --evidence-event tool.finished \
         --evidence-event gate.post-miu
     else
@@ -48,15 +57,26 @@ hooks:
       exit 1
     fi
   before_run: |
+    if [ -x .codex/worktree_init.sh ]; then
+      ./.codex/worktree_init.sh
+    elif [ -n "${PROJECT_DEPENDENCY_ROOT:-}" ] && [ -d "$PROJECT_DEPENDENCY_ROOT/node_modules" ] && [ ! -e node_modules ]; then
+      ln -s "$PROJECT_DEPENDENCY_ROOT/node_modules" node_modules
+      echo "Linked node_modules from $PROJECT_DEPENDENCY_ROOT"
+    fi
     orocsy_cli="${OROCSY_CLI:-}"
     if [ -z "$orocsy_cli" ] && [ -n "$SYMPHONY_REPO" ]; then
       orocsy_cli="$SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/orocsy.py"
+    fi
+    issue_file_arg=""
+    if [ -f .orocsy/delivery/issue-requirements.json ]; then
+      issue_file_arg="--issue-file .orocsy/delivery/issue-requirements.json"
     fi
     if [ -n "$orocsy_cli" ] && [ -f "$orocsy_cli" ]; then
       python3 "$orocsy_cli" --repo . symphony prepare-workspace \
         --issue "{{ issue.identifier }}" \
         --intent "Symphony issue {{ issue.identifier }}" \
         --orocsy-cli "$orocsy_cli" \
+        $issue_file_arg \
         --evidence-event tool.finished \
         --evidence-event gate.post-miu
       PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . run start --issue "{{ issue.identifier }}"
@@ -170,16 +190,24 @@ Orocsy worker prelude:
      genuinely needs more.
 6. First durable progress checkpoint:
    - Before optional skills, broad docs, recursive listings, or reading more
-     than eight implementation files, create/switch to the issue branch, update
-     `.orocsy/delivery/policy.yml` with the declared write-scope globs if the
-     prepare hook could not infer them, and create or refresh the Technical MIU
-     trace/spec with concrete current file paths, target code shape, data
-     lifetime, concurrency/provider constraints, exact tests, and validation
-     commands.
-   - Immediately append a durable progress event:
-     `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "first-turn-miu-handoff"`
-   - If the MIU shape is still unclear after the issue and directly named files,
-     record a blocker and stop instead of reading broadly.
+     than eight implementation files, produce one real checkpoint:
+     - Rework or existing PR: inspect only the current PR review threads for
+       this branch, classify current-head feedback, then append:
+       `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`
+     - Fresh implementation: first run `git status --short --branch`,
+       switch/create the exact Linear issue branch from `origin/main` if
+       needed, read the issue brief plus only the first target file/test, update
+       `.orocsy/delivery/policy.yml` with declared write-scope globs if the
+       prepare hook could not infer them, and either make the first scoped
+       code/test edit or refresh the Technical MIU trace/spec with concrete
+       current file paths, target code shape, data lifetime,
+       concurrency/provider constraints, exact tests, and validation commands.
+       Then append:
+       `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`
+     - Blocked issue: create an Orocsy inbox correction with the exact blocker
+       and stop.
+   - `first-turn-miu-handoff` alone only proves the worker is alive; it is not
+     substantive progress and must not be the only first-event evidence.
 7. Confirm the `before_run` hook already recorded `run.started`,
    `gate.leaks`, `gate.secrets`, and `gate.artifacts` with this bounded command:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
@@ -360,7 +388,7 @@ CI/CD timing:
 
 Review hardening trigger:
 
-0. The runtime `review_monitor` polls `Human Review` issues for current-head
+0. The runtime `review_monitor` polls review states for current-head
    GitHub PR feedback and moves them to `Rework` before dispatch. A worker
    should not need a human to copy Codex review comments back into Linear.
 1. If the issue state is `Rework`, or the issue has an attached open PR with

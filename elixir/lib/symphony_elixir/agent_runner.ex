@@ -5,14 +5,16 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    worker_host =
+      issue
+      |> selected_worker_host_for_issue(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
@@ -34,7 +36,8 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
+               {:ok, _preflight} <- maybe_prepare_dispatch_preflight(workspace, issue, worker_host) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
@@ -44,6 +47,36 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp maybe_prepare_dispatch_preflight(_workspace, _issue, worker_host) when is_binary(worker_host),
+    do: {:ok, %{"mode" => "remote_worker_preflight_skipped"}}
+
+  defp maybe_prepare_dispatch_preflight(workspace, issue, nil) do
+    DispatchPreflight.prepare(workspace, issue)
+  end
+
+  defp remote_worker_review_feedback?(%Issue{} = issue) do
+    monitor = Config.settings!().review_monitor
+
+    cond do
+      not monitor.enabled ->
+        {:ok, false}
+
+      true ->
+        case ReviewMonitor.inspect_issue(issue, monitor) do
+          {:ok, %{feedback: feedback}} when is_list(feedback) -> {:ok, feedback != []}
+          {:ok, _inspection} -> {:ok, false}
+          {:error, _reason} -> {:ok, false}
+        end
+    end
+  end
+
+  defp remote_worker_review_feedback?(_issue), do: {:ok, false}
+
+  if Mix.env() == :test do
+    def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
+    def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -82,14 +115,14 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, worker_host)
       after
         AppServer.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, worker_host) do
     prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)
 
     with {:ok, turn_session} <-
@@ -101,7 +134,7 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
+      case post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -113,7 +146,8 @@ defmodule SymphonyElixir.AgentRunner do
             opts,
             issue_state_fetcher,
             turn_number + 1,
-            max_turns
+            max_turns,
+            worker_host
           )
 
         {:continue, refreshed_issue} ->
@@ -127,6 +161,33 @@ defmodule SymphonyElixir.AgentRunner do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  defp post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host) do
+    cond do
+      Workspace.blocking_correction_in_workspace?(workspace, worker_host) ->
+        Logger.info("Stopping agent run for #{issue_context(issue)} after open Orocsy blocking correction; returning control to orchestrator")
+        {:done, issue}
+
+      review_rework_pushed_handoff?(workspace) ->
+        Logger.info("Stopping agent run for #{issue_context(issue)} after review-rework pushed validated handoff; returning control to orchestrator")
+        {:done, issue}
+
+      true ->
+        continue_with_issue?(issue, issue_state_fetcher)
+    end
+  end
+
+  defp review_rework_pushed_handoff?(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} ->
+        workspace
+        |> PromptBuilder.workspace_recovery_checkpoint()
+        |> String.starts_with?("Pushed validated handoff checkpoint:")
+
+      _ ->
+        false
     end
   end
 
@@ -145,8 +206,9 @@ defmodule SymphonyElixir.AgentRunner do
       - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
       - Resume from the current workspace and workpad state instead of restarting from scratch.
       - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty validated handoff checkpoint. Inspect the focused diff, then stage, commit, push, request/update PR review, and update Linear before any broad scans or validation reruns.
+      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Inspect the focused diff, run the smallest focused validation for the dirty file, then stage, commit, push, and request/update PR review before any broad scans or validation reruns.
       - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.
+      - Do not move review-rework issues to Done/Closed/terminal states from a continuation turn; a fresh review request is not the same thing as a clean review result.
       - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
       """
 
@@ -198,6 +260,24 @@ defmodule SymphonyElixir.AgentRunner do
       host when is_binary(host) and host != "" -> host
       _ when hosts == [] -> nil
       _ -> List.first(hosts)
+    end
+  end
+
+  defp selected_worker_host_for_issue(issue, preferred_host, configured_hosts) do
+    worker_host = selected_worker_host(preferred_host, configured_hosts)
+
+    if is_binary(worker_host) and review_feedback_requires_local_worker?(issue) do
+      Logger.info("Routing #{issue_context(issue)} to local worker because current review feedback requires dispatch preflight")
+      nil
+    else
+      worker_host
+    end
+  end
+
+  defp review_feedback_requires_local_worker?(issue) do
+    case remote_worker_review_feedback?(issue) do
+      {:ok, true} -> true
+      {:ok, false} -> false
     end
   end
 

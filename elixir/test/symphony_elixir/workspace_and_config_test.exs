@@ -653,6 +653,113 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute_receive {:memory_tracker_state_update, "issue-review-2", "Rework"}, 50
   end
 
+  test "review monitor scans active issues with open PR feedback and moves them to rework" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "issue-review-active",
+        identifier: "COD-152",
+        title: "Swipe feed UI",
+        state: "In Progress",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+    ])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 4,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/4",
+               "head" => %{
+                 "sha" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+                 "ref" => "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/4/comments" ->
+          {:ok,
+           [
+             %{
+               "body" => "Handle pointer cancel without committing a swipe.",
+               "commit_id" => "efb64f412ce2f3a5f25b2a3766632e864951464a",
+               "path" => "src/features/swipe/SwipeDeck.tsx",
+               "line" => 120,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/4#discussion"
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/4/reviews" ->
+          {:ok, []}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:memory_tracker_state_update, "issue-review-active", "Rework"}
+    assert_receive {:memory_tracker_comment, "issue-review-active", body}
+    assert body =~ "COD-152"
+    assert body =~ "pull/4"
+    assert body =~ "src/features/swipe/SwipeDeck.tsx:120"
+  end
+
+  test "review monitor respects the tracker issue allowlist before inspecting PRs" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_issue_allowlist: ["COD-170"],
+      tracker_active_states: ["Todo", "In Progress"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "issue-review-outside-allowlist",
+        identifier: "COD-152",
+        title: "Outside allowlist",
+        state: "Human Review",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      }
+    ])
+
+    test_pid = self()
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      send(test_pid, {:github_called_for_non_allowlisted_issue, endpoint})
+      {:error, {:unexpected_endpoint, endpoint}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    refute_receive {:github_called_for_non_allowlisted_issue, _endpoint}, 50
+    refute_receive {:memory_tracker_state_update, "issue-review-outside-allowlist", "Rework"}, 50
+    refute_receive {:memory_tracker_comment, "issue-review-outside-allowlist", _body}, 50
+  end
+
   test "todo issue with terminal blockers remains dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -732,6 +839,539 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
       File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace hydration writes issue requirements and declared scope from parseable issue brief" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-cod-152",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "In Progress",
+        branch_name: "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow",
+        description: """
+        ## Feature Group
+        recipe-chat
+
+        ## Ticket Type
+        test-spec
+
+        ## Integration Branch
+        `orocsy/feature-recipe-chat-integration`
+
+        ## Expected Test State
+        pending/skip-gated
+
+        ## Test Activation
+        COD-203 activates this test.
+
+        ## Write Scope
+        - src/features/swipe/**
+        - tests/unit/swipe-deck.test.ts
+
+        ## Shared Files
+        - package.json
+
+        ## Dependencies
+        - COD-151
+
+        ### MIU 1 - Swipe Deck
+        Implement the swipe deck against the existing route contract.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/swipe-deck.test.ts
+        ```
+
+        ## Out Of Scope
+        - AI chat generation
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      issue_file = Path.join(workspace, ".orocsy/delivery/issue-requirements.json")
+      policy_file = Path.join(workspace, ".orocsy/delivery/policy.yml")
+      state_file = Path.join(workspace, ".orocsy/delivery/state/current.json")
+
+      assert File.regular?(issue_file)
+      requirements = issue_file |> File.read!() |> Jason.decode!()
+      assert requirements["identifier"] == "COD-152"
+      assert requirements["branch"] == "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+      assert requirements["feature_group"] == "recipe-chat"
+      assert requirements["ticket_type"] == "test-spec"
+      assert requirements["integration_branch"] == "orocsy/feature-recipe-chat-integration"
+      assert requirements["expected_test_state"] == "pending/skip-gated"
+      assert requirements["test_activation"] == "COD-203 activates this test."
+      assert "src/features/swipe/**" in requirements["write_scope"]
+      assert ["MIU 1 - Swipe Deck"] == requirements["mius"]
+
+      state = state_file |> File.read!() |> Jason.decode!()
+      assert state["issue_requirements"]["identifier"] == "COD-152"
+
+      policy = File.read!(policy_file)
+      assert policy =~ "src/features/swipe/**"
+      assert policy =~ "pnpm test -- tests/unit/swipe-deck.test.ts"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace hydration parses scope and validation commands template headings" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-template-issue-requirements-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-template-scope",
+        identifier: "COD-900",
+        title: "Template shaped workstream",
+        state: "In Progress",
+        branch_name: "orocsy/cod-900-template-shaped-workstream",
+        description: """
+        ## Scope
+
+        In:
+
+        - src/app/page.tsx
+        - tests/unit/page.test.ts
+
+        Out:
+
+        - docs/**
+
+        ## MIUs
+
+        ### MIU 1 - Page state
+
+        - Runtime path: `/`
+        - Validation command: `pnpm typecheck`
+
+        ## Validation Commands
+
+        ```bash
+        pnpm typecheck
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      requirements =
+        workspace
+        |> Path.join(".orocsy/delivery/issue-requirements.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert requirements["write_scope"] == ["src/app/page.tsx", "tests/unit/page.test.ts"]
+      assert requirements["out_of_scope"] == ["docs/**"]
+      assert requirements["validation"]["commands"] == ["pnpm typecheck"]
+
+      policy =
+        workspace
+        |> Path.join(".orocsy/delivery/policy.yml")
+        |> File.read!()
+
+      assert policy =~ "src/app/page.tsx"
+      assert policy =~ "tests/unit/page.test.ts"
+      assert policy =~ "pnpm typecheck"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "issue requirements fall back for MIU-only descriptions" do
+    issue = %Issue{
+      id: "issue-miu-only",
+      identifier: "COD-901",
+      title: "MIU-only placeholder",
+      state: "In Progress",
+      description: """
+      ### MIU 1 - Placeholder
+
+      - Runtime path:
+      - Exact tests:
+      """
+    }
+
+    assert {:error, :no_issue_requirements} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+  end
+
+  test "workspace hydration converts descriptive write scope to declared-scope path patterns" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-descriptive-scope-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-descriptive-scope",
+        identifier: "COD-157",
+        title: "Bridge Contract",
+        state: "In Progress",
+        branch_name: "orocsy/cod-157",
+        description: """
+        ## Write Scope
+        - docs/TECHNICAL_DESIGN.md only for the accepted-swipe contract section.
+        - src/lib/schemas/swipe.ts and src/lib/schemas/recipe-chat.ts only if schema code is required.
+        - tests/unit/*contract* only if a schema-level contract test fits.
+
+        ### MIU 1 - Contract
+        Document the handoff.
+
+        ## Validation
+        ```bash
+        pnpm typecheck
+        ```
+
+        ## Out Of Scope
+        - UI implementation
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      requirements =
+        workspace
+        |> Path.join(".orocsy/delivery/issue-requirements.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert "docs/TECHNICAL_DESIGN.md only for the accepted-swipe contract section." in requirements["write_scope"]
+
+      policy =
+        workspace
+        |> Path.join(".orocsy/delivery/policy.yml")
+        |> File.read!()
+
+      assert policy =~ "  - docs/TECHNICAL_DESIGN.md\n"
+      assert policy =~ "  - src/lib/schemas/swipe.ts\n"
+      assert policy =~ "  - src/lib/schemas/recipe-chat.ts\n"
+      assert policy =~ "  - tests/unit/*contract*\n"
+      refute policy =~ "only for the accepted-swipe"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace hydration does not abort on partial issue requirements" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-empty-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-empty-scope",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        description: """
+        ## Write Scope
+
+        ### MIU 1 - Provider adapter
+
+        ## Validation
+        ```bash
+        pnpm test
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/issue-requirements.json"))
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/state/current.json"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace reconciles stale main checkout to existing Linear branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-branch-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      branch = "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: source_repo, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(source_repo, "src/features/swipe"))
+      File.write!(Path.join(source_repo, "src/features/swipe/deck.ts"), "export const deck = true;\n")
+      assert {_output, 0} = System.cmd("git", ["add", "src/features/swipe/deck.ts"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add swipe deck"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-152",
+        identifier: "COD-152",
+        title: "Swipe feed UI and mutation flow",
+        state: "In Progress",
+        branch_name: branch,
+        description: "Runtime should reconcile the workspace branch before dispatch."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == branch
+      assert File.regular?(Path.join(workspace, "src/features/swipe/deck.ts"))
+
+      assert {upstream, 0} =
+               System.cmd("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert String.trim(upstream) == "origin/#{branch}"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace creates missing Linear branch from origin main without tracking main" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-branch-create-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      branch = "orocsy/cod-153-miu-5-recipe-chat-generation"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-153",
+        identifier: "COD-153",
+        title: "Recipe chat generation",
+        state: "In Progress",
+        branch_name: branch,
+        description: "Runtime should create the Linear branch before dispatch."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == branch
+
+      assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
+      refute String.contains?(status, "origin/main")
+
+      assert {_upstream, upstream_status} =
+               System.cmd("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert upstream_status != 0
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace creates missing Linear branch from declared integration branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-branch-create-from-integration-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      integration_branch = "orocsy/feature-recipe-chat-integration"
+      issue_branch = "orocsy/cod-201-provider-tests"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", integration_branch], cd: source_repo, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(source_repo, "src/lib/providers"))
+      File.write!(Path.join(source_repo, "src/lib/providers/ai-provider.ts"), "export const integration = true;\n")
+      assert {_output, 0} = System.cmd("git", ["add", "src/lib/providers/ai-provider.ts"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add integration contract"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-201",
+        identifier: "COD-201",
+        title: "Provider adapter tests",
+        state: "Ready for Symphony",
+        branch_name: issue_branch,
+        description: """
+        ## Integration Branch
+        `#{integration_branch}`
+
+        ## Write Scope
+        - `tests/unit/recipe-provider.test.ts`
+
+        ## MIUs
+        ### MIU 1 - Provider adapter tests
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/recipe-provider.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == issue_branch
+      assert File.regular?(Path.join(workspace, "src/lib/providers/ai-provider.ts"))
+
+      assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
+      refute String.contains?(status, "origin/main")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace creates missing Linear branch from template branch contract base" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-branch-create-from-contract-base-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      integration_branch = "orocsy/feature-recipe-chat-integration"
+      issue_branch = "orocsy/cod-202-follow-up-route"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", integration_branch], cd: source_repo, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(source_repo, "src/app/api/recipe-chats/[chatId]/messages"))
+
+      File.write!(
+        Path.join(source_repo, "src/app/api/recipe-chats/[chatId]/messages/route.ts"),
+        "export const fromIntegration = true;\n"
+      )
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "src/app/api/recipe-chats/[chatId]/messages/route.ts"], cd: source_repo)
+
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add follow-up route contract"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-202",
+        identifier: "COD-202",
+        title: "Follow-up route",
+        state: "Ready for Symphony",
+        branch_name: issue_branch,
+        description: """
+        ## Branch / PR Contract
+
+        - Branch: use Linear branch name.
+        - Base: `#{integration_branch}`
+        - PR: target the integration branch.
+        - Merge behavior: workflow owner merges after review.
+
+        ## Scope
+
+        In:
+
+        - src/app/api/recipe-chats/[chatId]/messages/route.ts
+
+        Out:
+
+        - src/app/page.tsx
+
+        ## MIUs
+
+        ### MIU 1 - Follow-Up Route
+
+        - Runtime path: POST /api/recipe-chats/[chatId]/messages
+
+        ## Validation Commands
+
+        ```bash
+        pnpm typecheck
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == issue_branch
+
+      assert File.regular?(Path.join(workspace, "src/app/api/recipe-chats/[chatId]/messages/route.ts"))
+
+      assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
+      refute String.contains?(status, "origin/main")
+    after
+      File.rm_rf(test_root)
     end
   end
 

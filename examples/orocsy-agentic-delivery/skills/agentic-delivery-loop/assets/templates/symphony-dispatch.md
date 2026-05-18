@@ -24,7 +24,7 @@
 Each Symphony worker must run inside the Orocsy runtime contract:
 
 ```bash
-python3 "$OROCSY_CLI" --repo . symphony prepare-workspace --issue <ISSUE>
+python3 "$OROCSY_CLI" --repo . symphony prepare-workspace --issue <ISSUE> --issue-file .orocsy/delivery/issue-requirements.json
 python3 "$OROCSY_CLI" --repo . run start --issue <ISSUE>
 python3 "$OROCSY_CLI" --repo . gate leaks --record
 python3 "$OROCSY_CLI" --repo . gate secrets --record

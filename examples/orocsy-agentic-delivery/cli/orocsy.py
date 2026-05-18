@@ -430,6 +430,7 @@ def load_issue_requirements(path: Path) -> dict[str, Any]:
         "identifier": str(raw.get("identifier") or raw.get("issue") or raw.get("id") or "").strip(),
         "title": str(raw.get("title") or "").strip(),
         "state": str(raw.get("state") or raw.get("status") or "").strip(),
+        "branch": str(raw.get("branch") or raw.get("branch_name") or raw.get("branchName") or "").strip(),
         "project": str(raw.get("project") or raw.get("project_slug") or "").strip(),
         "write_scope": normalize_mutable_delivery_paths(string_list(raw.get("write_scope") or raw.get("writeScope"))),
         "shared_files": normalize_mutable_delivery_paths(string_list(raw.get("shared_files") or raw.get("sharedFiles"))),
@@ -871,8 +872,28 @@ def artifact_patterns(config: dict[str, list[str]]) -> list[str]:
     return sorted({pattern for pattern in patterns if pattern.strip()})
 
 
+def escape_glob_route_brackets(pattern: str) -> str:
+    escaped = []
+    for char in pattern:
+        if char == "[":
+            escaped.append("[[]")
+        elif char == "]":
+            escaped.append("[]]")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
 def path_matches_any(path: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+    for pattern in patterns:
+        if path == pattern or fnmatch.fnmatch(path, pattern):
+            return True
+
+        escaped_pattern = escape_glob_route_brackets(pattern)
+        if escaped_pattern != pattern and fnmatch.fnmatch(path, escaped_pattern):
+            return True
+
+    return False
 
 
 def relative_path_is_child(path: str, root: str) -> bool:
@@ -1765,7 +1786,7 @@ def symphony_prelude(issue: str) -> list[str]:
         "Do not load global/plugin skill bodies during the first worker turn; this workflow and the workspace-local Orocsy CLI are the runtime instructions.",
         "Use the workspace-local .codex/delivery/bin/orocsy.py CLI for runtime gates and event evidence.",
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
-        "Create or update the MIU trace and append a first-turn-miu-handoff event before optional skills, broad docs, or more than eight implementation files.",
+        "Before optional skills, broad docs, or more than eight implementation files, record substantive progress: review-feedback-classified for review work, technical-miu-trace after the first scoped plan/edit for fresh work, or an inbox correction for a blocker. first-turn-miu-handoff alone is not substantive progress.",
         "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; the ledger is .orocsy/delivery/events/events.jsonl.",
         "Use `python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record` for bounded ignored generated-artifact cleanup; do not run raw cleanup shell commands.",
         "Implement one MIU at a time and append tool/test/build/browser events.",
