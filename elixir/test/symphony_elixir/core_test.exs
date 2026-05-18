@@ -146,6 +146,144 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.should_dispatch_issue_for_test(unblocked, state)
   end
 
+  test "dispatch gate parks Rework while a fresh Codex review request is pending" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_rework_state: "Rework"
+    )
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    issue = %Issue{
+      id: "issue-review-pending-dispatch",
+      identifier: "COD-181",
+      title: "Saved Recipe Routes",
+      state: "Rework",
+      branch_name: "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+    }
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 28,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/28",
+               "head" => %{
+                 "sha" => "999e84e6549a6fefd8e1f9d823a208a822f8c70a",
+                 "ref" => "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/28/comments" ->
+          {:ok,
+           [
+             %{
+               "body" => "Preserve the existing chatId when re-saving.",
+               "commit_id" => "999e84e6549a6fefd8e1f9d823a208a822f8c70a",
+               "path" => "src/lib/db/saved-recipe-store.ts",
+               "line" => 63,
+               "created_at" => "2026-05-18T04:17:07Z",
+               "html_url" => "https://github.com/acme/nutribuddy/pull/28#discussion"
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/28/reviews" ->
+          {:ok, []}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/28/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review\n\nFresh review requested for review-rework commit 999e84e.",
+               "created_at" => "2026-05-18T04:20:05Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch gate allows Rework when feedback is newer than latest Codex review request" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_rework_state: "Rework"
+    )
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    issue = %Issue{
+      id: "issue-review-newer-feedback-dispatch",
+      identifier: "COD-181",
+      title: "Saved Recipe Routes",
+      state: "Rework",
+      branch_name: "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+    }
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 28,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/28",
+               "head" => %{
+                 "sha" => "999e84e6549a6fefd8e1f9d823a208a822f8c70a",
+                 "ref" => "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/28/comments" ->
+          {:ok,
+           [
+             %{
+               "body" => "New current-head feedback after the review request.",
+               "commit_id" => "999e84e6549a6fefd8e1f9d823a208a822f8c70a",
+               "path" => "src/lib/db/saved-recipe-store.ts",
+               "line" => 63,
+               "created_at" => "2026-05-18T04:22:00Z",
+               "html_url" => "https://github.com/acme/nutribuddy/pull/28#discussion"
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/28/reviews" ->
+          {:ok, []}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/28/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review\n\nFresh review requested for review-rework commit 999e84e.",
+               "created_at" => "2026-05-18T04:20:05Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
