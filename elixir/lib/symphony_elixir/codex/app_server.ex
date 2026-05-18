@@ -55,6 +55,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s)ls(\\s|$)",
     "\\s(&&|\\|\\||;|\\|)\\s"
   ]
+  @fresh_implementation_forbidden_command_patterns @review_rework_forbidden_command_patterns
   @type session :: %{
           port: port(),
           metadata: map(),
@@ -479,22 +480,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
-    if review_rework_workspace?(workspace) do
-      Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
-    else
-      patterns
+    case dispatch_preflight_mode(workspace) do
+      "review_rework" ->
+        Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
+
+      "fresh_implementation" ->
+        Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
+
+      _mode ->
+        patterns
     end
   end
 
   defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
 
-  defp review_rework_workspace?(workspace) when is_binary(workspace) do
+  defp dispatch_preflight_mode(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => "review_rework"}} -> true
-      _ -> false
+      {:ok, %{"mode" => mode}} when is_binary(mode) -> mode
+      _ -> nil
     end
   rescue
-    _error -> false
+    _error -> nil
   end
 
   defp review_rework_path_guard_patterns(workspace) do
