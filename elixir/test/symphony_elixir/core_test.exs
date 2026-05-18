@@ -4305,6 +4305,8 @@ defmodule SymphonyElixir.CoreTest do
                  **P1** Open the recipe flow on accepted right swipes.
 
                  When `action === "right"` and the server accepts, keep the accepted recipe/chat payload and route into the recipe flow instead of advancing the deck and losing the card.
+
+                 Also inspect `src/app/api/recipe-chats/[chatId]/messages/route.ts` when the review feedback names a related route in the body.
                  """,
                  "commit_id" => "2830e3d4a36de99e8b8f40caeb7858712ad84f6c",
                  "path" => "src/features/swipe/SwipeDeck.tsx",
@@ -4350,7 +4352,10 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "server accepts"
       assert prompt =~ "Worker-required checkpoint: `review-feedback-classified`"
       assert prompt =~ "Runtime preflight is not worker progress"
-      assert prompt =~ "Target feedback file(s): `src/features/swipe/SwipeDeck.tsx`"
+
+      assert prompt =~
+               "Target feedback file(s): `src/features/swipe/SwipeDeck.tsx`, `src/app/api/recipe-chats/[chatId]/messages/route.ts`"
+
       assert prompt =~ "Toolchain preflight:"
       assert prompt =~ "Validation command guidance:"
       assert prompt =~ "Review rework execution contract"

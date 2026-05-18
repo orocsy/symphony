@@ -607,12 +607,58 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp feedback_paths(items) when is_list(items) do
     items
-    |> Enum.map(& &1["path"])
+    |> Enum.flat_map(&feedback_item_paths/1)
     |> Enum.reject(&blank?/1)
     |> Enum.uniq()
   end
 
   defp feedback_paths(_items), do: []
+
+  defp feedback_item_paths(%{"path" => path, "body" => body}) when is_binary(path) and path != "" do
+    [path | feedback_body_paths(body)]
+  end
+
+  defp feedback_item_paths(%{"path" => path}) when is_binary(path) and path != "" do
+    [path]
+  end
+
+  defp feedback_item_paths(%{"body" => body}) do
+    feedback_body_paths(body)
+  end
+
+  defp feedback_item_paths(_item), do: []
+
+  defp feedback_body_paths(body) when is_binary(body) do
+    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    |> Regex.scan(body)
+    |> Enum.flat_map(fn captures ->
+      captures
+      |> tl()
+      |> Enum.find(&(&1 != ""))
+      |> case do
+        path when is_binary(path) -> [normalize_feedback_body_path(path)]
+        _ -> []
+      end
+    end)
+    |> Enum.filter(&feedback_body_path_like?/1)
+  end
+
+  defp feedback_body_paths(_body), do: []
+
+  defp normalize_feedback_body_path(path) when is_binary(path) do
+    path
+    |> String.trim()
+    |> String.trim_leading("./")
+  end
+
+  defp feedback_body_path_like?(path) when is_binary(path) do
+    path != "" and
+      String.contains?(path, "/") and
+      not String.contains?(path, [" ", "\t", "\n", "\r"]) and
+      not String.starts_with?(path, ["http://", "https://", "origin/"])
+  end
+
+  defp feedback_body_path_like?(_path), do: false
 
   defp format_inline_items([]), do: "unknown"
   defp format_inline_items(items), do: Enum.map_join(items, ", ", &"`#{&1}`")
