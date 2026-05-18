@@ -945,6 +945,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       ~r/^repos\/[^\/\s]+\/[^\/\s]+\/git\/ref\/[^\s"']+$/,
       ~r/^repos\/[^\/\s]+\/[^\/\s]+\/pulls(?:\?[^\s"']*)?$/,
       ~r/^repos\/[^\/\s]+\/[^\/\s]+\/pulls\/\d+$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/pulls\/\d+\/comments$/,
+      ~r/^repos\/[^\/\s]+\/[^\/\s]+\/pulls\/\d+\/reviews$/,
       ~r/^repos\/[^\/\s]+\/[^\/\s]+\/issues\/\d+\/comments$/
     ]
 
