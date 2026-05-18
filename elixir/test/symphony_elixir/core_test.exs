@@ -1795,6 +1795,115 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "no durable progress review rework stays parked when worker retries are disabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-review-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework",
+        max_failed_worker_retries: 0
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-181-review-budget",
+        identifier: "COD-181",
+        title: "Saved recipe routes",
+        state: "Rework",
+        branch_name: "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress",
+                 source_status: "blocked",
+                 summary: "Worker exceeded durable progress guard while fixing review feedback.",
+                 findings: ["no-durable-progress"],
+                 next_action: "block"
+               })
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 28,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/28",
+                 "head" => %{
+                   "sha" => "c3a597c3c804357f2ad0059d1bea2928385e0ba6",
+                   "ref" => "orocsy/cod-181-savedprofile-miu-saved-recipe-routes"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/28/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Persist the chat row before saving right swipes.",
+                 "commit_id" => "c3a597c3c804357f2ad0059d1bea2928385e0ba6",
+                 "path" => "src/app/api/swipes/handler.ts",
+                 "line" => 84,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/28#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/28/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-181-review-budget", body}
+      assert body =~ "worker_prompt_defect"
+      assert body =~ "agent.max_failed_worker_retries=0"
+      refute_receive {:memory_tracker_state_update, "issue-cod-181-review-budget", "Rework"}, 50
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      classified = correction_path |> File.read!() |> Jason.decode!()
+      assert classified["status"] == "open"
+      assert classified["classification"] == "worker_prompt_defect"
+      assert classified["classification_summary"] =~ "agent.max_failed_worker_retries=0"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "token budget handoff correction with current PR feedback is rescued into rework" do
     test_root =
       Path.join(
