@@ -649,6 +649,86 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows git handoff shell chains in fresh implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-implementation-git-handoff-chain-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-FRESH-GIT-HANDOFF")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-FRESH-GIT-HANDOFF",
+          "branch" => "orocsy/mt-fresh-git-handoff",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["docs/TECHNICAL_DESIGN.md"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fresh-git-handoff"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-git-handoff"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git add docs/TECHNICAL_DESIGN.md && git commit -m \\"docs: define saved profile contract\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-fresh-git-handoff",
+        identifier: "MT-FRESH-GIT-HANDOFF",
+        title: "Fresh MIU git handoff",
+        description: "Git add and commit handoff chains should be allowed in fresh implementation",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FRESH-GIT-HANDOFF",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Implement fresh MIU", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks broad search commands in review rework mode" do
     test_root =
       Path.join(
