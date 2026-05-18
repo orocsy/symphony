@@ -626,7 +626,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Implement fresh MIU", issue)
 
       assert command == ~s(rg -n "SavedRecipe" docs/TECHNICAL_DESIGN.md)
-      assert pattern == "(^|\\s)rg(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])rg(\\s|$)"
     after
       File.rm_rf(test_root)
     end
@@ -708,7 +708,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Implement fresh MIU", issue)
 
       assert command == "find . -maxdepth 2 -type f"
-      assert pattern == "(^|\\s)find(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])find(\\s|$)"
     after
       File.rm_rf(test_root)
     end
@@ -870,7 +870,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Implement fresh MIU", issue)
 
       assert command == "gh api repos/orocsy/nutribuddy/pulls"
-      assert pattern == "(^|\\s)gh\\s+api(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])gh\\s+api(\\s|$)"
     after
       File.rm_rf(test_root)
     end
@@ -1143,7 +1143,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert command ==
                "gh api repos/orocsy/nutribuddy/issues/9/comments -f body=@codex-review && gh api repos/orocsy/nutribuddy/pulls/9/merge -X PUT -f merge_method=merge"
 
-      assert pattern == "(^|\\s)gh\\s+api(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])gh\\s+api(\\s|$)"
     after
       File.rm_rf(test_root)
     end
@@ -1221,7 +1221,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command == ~s(rg -n "recipeChat|savedRecipe" src)
-      assert pattern == "(^|\\s)rg(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])rg(\\s|$)"
     after
       File.rm_rf(test_root)
     end
@@ -1299,7 +1299,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command == "git ls-files src/features/swipe"
-      assert pattern == "(^|\\s)git\\s+ls-files(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])git\\s+ls-files(\\s|$)"
     after
       File.rm_rf(test_root)
     end
@@ -1470,6 +1470,171 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server blocks shell-wrapped reads outside review feedback paths" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-shell-wrapped-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-SHELL-WRAPPED-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-SHELL-WRAPPED-READ",
+          "branch" => "orocsy/mt-review-shell-wrapped-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/app/api/swipes/handler.ts", "line" => 84}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-shell-wrapped-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-shell-wrapped-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,180p'\\'' src/app/api/recipe-chats/route.ts\\""}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-shell-wrapped-read",
+        identifier: "MT-REVIEW-SHELL-WRAPPED-READ",
+        title: "Review rework shell wrapped read",
+        description: "Shell-wrapped sideways reads should be blocked in review rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-SHELL-WRAPPED-READ",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Fix review feedback", issue)
+
+      assert command == ~s(/bin/zsh -lc "sed -n '1,180p' src/app/api/recipe-chats/route.ts")
+      assert pattern =~ "sed"
+      assert pattern =~ "swipes/handler"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows shell-wrapped current feedback path reads in review rework mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-shell-wrapped-allowed-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-SHELL-WRAPPED-ALLOWED-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-SHELL-WRAPPED-ALLOWED-READ",
+          "branch" => "orocsy/mt-review-shell-wrapped-allowed-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/app/api/swipes/handler.ts", "line" => 84}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-shell-wrapped-allowed-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-shell-wrapped-allowed-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,120p'\\'' src/app/api/swipes/handler.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-shell-wrapped-allowed-read",
+        identifier: "MT-REVIEW-SHELL-WRAPPED-ALLOWED-READ",
+        title: "Review rework shell wrapped allowed read",
+        description: "Shell-wrapped current feedback path reads should be allowed in review rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-SHELL-WRAPPED-ALLOWED-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks exec_command function calls in review rework mode" do
     test_root =
       Path.join(
@@ -1547,7 +1712,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command == "ls src/lib/db && sed -n 1,340p src/lib/db/guest-session-store.ts"
-      assert pattern == "(^|\\s)ls(\\s|$)"
+      assert pattern == "(^|\\s|[\"'])ls(\\s|$)"
     after
       File.rm_rf(test_root)
     end
