@@ -4344,6 +4344,64 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "fresh implementation first event token budget ignores initial prompt input baseline" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-initial-input-first-event-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 45_000
+      )
+
+      issue = %Issue{
+        id: "issue-cod-175-fresh-initial-input-first-event",
+        identifier: "COD-175",
+        title: "Saved/Profile Contract",
+        state: "In Progress",
+        branch_name: "orocsy/cod-175-savedprofile-contract"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+            codex_total_tokens: 56_254,
+            codex_cached_input_tokens: 11_008,
+            codex_initial_uncached_input_tokens: 16_602
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      assert Map.has_key?(state.running, issue.id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "fresh implementation no durable progress guard ignores cached prompt input" do
     test_root =
       Path.join(

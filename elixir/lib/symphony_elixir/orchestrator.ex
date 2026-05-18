@@ -974,11 +974,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp uncached_progress_tokens(running_entry, total_tokens) do
     cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
+    initial_uncached_input_tokens = Map.get(running_entry, :codex_initial_uncached_input_tokens, 0)
 
-    if is_integer(cached_input_tokens) and cached_input_tokens > 0 do
-      max(total_tokens - cached_input_tokens, 0)
+    cached_adjusted_tokens =
+      if is_integer(cached_input_tokens) and cached_input_tokens > 0 do
+        max(total_tokens - cached_input_tokens, 0)
+      else
+        total_tokens
+      end
+
+    if is_integer(initial_uncached_input_tokens) and initial_uncached_input_tokens > 0 do
+      max(cached_adjusted_tokens - initial_uncached_input_tokens, 0)
     else
-      total_tokens
+      cached_adjusted_tokens
     end
   end
 
@@ -1641,6 +1649,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_output_tokens: 0,
             codex_total_tokens: 0,
             codex_cached_input_tokens: 0,
+            codex_initial_uncached_input_tokens: 0,
             codex_last_reported_input_tokens: 0,
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
@@ -2591,6 +2600,7 @@ defmodule SymphonyElixir.Orchestrator do
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
     codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     codex_cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
+    codex_initial_uncached_input_tokens = initial_uncached_input_tokens(running_entry, token_delta)
     codex_app_server_pid = Map.get(running_entry, :codex_app_server_pid)
     last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
@@ -2642,6 +2652,7 @@ defmodule SymphonyElixir.Orchestrator do
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
         codex_cached_input_tokens: codex_cached_input_tokens + token_delta.cached_input_tokens,
+        codex_initial_uncached_input_tokens: codex_initial_uncached_input_tokens,
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
@@ -2661,6 +2672,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp append_recent_codex_event(_events, update, previous_validation_command) do
     append_recent_codex_event([], update, previous_validation_command)
+  end
+
+  defp initial_uncached_input_tokens(running_entry, token_delta) do
+    existing = Map.get(running_entry, :codex_initial_uncached_input_tokens, 0)
+
+    cond do
+      is_integer(existing) and existing > 0 ->
+        existing
+
+      is_integer(token_delta.input_reported) and token_delta.input_reported > 0 ->
+        cached_input = if is_integer(token_delta.cached_input_reported), do: token_delta.cached_input_reported, else: 0
+        max(token_delta.input_reported - cached_input, 0)
+
+      true ->
+        0
+    end
   end
 
   defp recent_codex_event_summary(update, previous_validation_command) when is_map(update) do
