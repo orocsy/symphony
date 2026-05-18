@@ -52,8 +52,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s)gh\\s+api(\\s|$)",
     "(^|\\s)find(\\s|$)",
     "(^|\\s)git\\s+ls-files(\\s|$)",
-    "(^|\\s)ls(\\s|$)",
-    "\\s(&&|\\|\\||;|\\|)\\s"
+    "(^|\\s)ls(\\s|$)"
   ]
   @fresh_implementation_forbidden_command_patterns @review_rework_forbidden_command_patterns
   @type session :: %{
