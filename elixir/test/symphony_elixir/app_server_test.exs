@@ -714,6 +714,86 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows local directory listing in fresh implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-implementation-local-listing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-FRESH-LOCAL-LISTING")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-FRESH-LOCAL-LISTING",
+          "branch" => "orocsy/mt-fresh-local-listing",
+          "requirements" => %{
+            "ticket_type" => "implementation",
+            "write_scope" => ["src/features/saved/*", "tests/unit/saved-profile-screens.test.ts"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fresh-local-listing"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-local-listing"}}}'
+            printf '%s\\n' '{"method":"codex/event/response_item","params":{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"ls -la src/features/saved 2>/dev/null || true && sed -n '\\''1,240p'\\'' tests/unit/saved-profile-screens.test.ts\\"}"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-fresh-local-listing",
+        identifier: "MT-FRESH-LOCAL-LISTING",
+        title: "Fresh MIU local listing",
+        description: "Local directory listing should not park fresh implementation",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FRESH-LOCAL-LISTING",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Implement fresh MIU", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows git handoff shell chains in fresh implementation mode" do
     test_root =
       Path.join(

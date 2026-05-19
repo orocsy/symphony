@@ -54,7 +54,13 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
     "(^|\\s|[\"'])ls(\\s|$)"
   ]
-  @fresh_implementation_forbidden_command_patterns @review_rework_forbidden_command_patterns
+  @fresh_implementation_forbidden_command_patterns [
+    "(^|\\s|[\"'])rg(\\s|$)",
+    "(^|\\s|[\"'])grep(\\s|$)",
+    "(^|\\s|[\"'])gh\\s+api(\\s|$)",
+    "(^|\\s|[\"'])find(\\s|$)",
+    "(^|\\s|[\"'])git\\s+ls-files(\\s|$)"
+  ]
   @type session :: %{
           port: port(),
           metadata: map(),
