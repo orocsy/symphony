@@ -478,16 +478,30 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp durable_workspace_progress_after_corrections?(_workspace, _corrections), do: false
 
-  defp latest_uncommitted_or_unpushed_progress_at(workspace) do
-    [
-      git_dirty_observed_at(workspace),
-      git_unpushed_head_commit_observed_at(workspace)
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> latest_datetime()
+  defp latest_uncommitted_or_unpushed_progress_at(workspace) when is_binary(workspace) do
+    if not File.dir?(workspace) do
+      nil
+    else
+      [
+        git_dirty_observed_at(workspace),
+        git_unpushed_head_commit_observed_at(workspace)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> latest_datetime()
+    end
   end
 
+  defp latest_uncommitted_or_unpushed_progress_at(_workspace), do: nil
+
   defp git_dirty_observed_at(workspace) do
+    if not File.dir?(workspace) do
+      nil
+    else
+      do_git_dirty_observed_at(workspace)
+    end
+  end
+
+  defp do_git_dirty_observed_at(workspace) do
     case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
       {status, 0} ->
         status
@@ -506,6 +520,14 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp git_unpushed_head_commit_observed_at(workspace) do
+    if not File.dir?(workspace) do
+      nil
+    else
+      do_git_unpushed_head_commit_observed_at(workspace)
+    end
+  end
+
+  defp do_git_unpushed_head_commit_observed_at(workspace) do
     upstream =
       case System.cmd("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
              cd: workspace,
