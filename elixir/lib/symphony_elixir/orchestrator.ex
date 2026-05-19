@@ -1161,14 +1161,34 @@ defmodule SymphonyElixir.Orchestrator do
             end
 
           :has_review_feedback ->
-            if codex_review_request_pending?(inspection) do
-              Logger.info(
-                "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
-              )
+            cond do
+              codex_review_request_pending?(inspection) ->
+                Logger.info(
+                  "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                )
 
-              {:blocked, :review_pending}
-            else
-              :not_ready
+                {:blocked, :review_pending}
+
+              pushed_handoff_review_request_recorded?(candidate.workspace) ->
+                case review_feedback_after_latest_request_status(inspection) do
+                  :feedback_after_request ->
+                    :not_ready
+
+                  :no_feedback_after_request ->
+                    Logger.info(
+                      "Pushed review handoff already requested Codex review and is waiting for review state to change: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                    )
+
+                    {:blocked, :review_pending}
+
+                  {:error, reason} ->
+                    reason = {:review_feedback_after_latest_request_lookup_failed, reason}
+                    park_pushed_handoff_blocker(issue, candidate, reason)
+                    {:blocked, reason}
+                end
+
+              true ->
+                :not_ready
             end
         end
 
@@ -1310,6 +1330,53 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp clean_codex_review_status(_inspection), do: :missing
+
+  defp review_feedback_after_latest_request_status(%{repo: repo, pr: pr, feedback: feedback}) do
+    case ReviewMonitor.review_feedback_after_latest_codex_request?(repo, pr, feedback) do
+      {:ok, true} -> :feedback_after_request
+      {:ok, false} -> :no_feedback_after_request
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp review_feedback_after_latest_request_status(_inspection), do: :no_feedback_after_request
+
+  defp pushed_handoff_review_request_recorded?(workspace) when is_binary(workspace) do
+    workspace
+    |> durable_progress_event_paths()
+    |> Enum.any?(&review_request_event_recorded?/1)
+  end
+
+  defp pushed_handoff_review_request_recorded?(_workspace), do: false
+
+  defp review_request_event_recorded?(path) do
+    if File.regular?(path) do
+      path
+      |> File.stream!()
+      |> Enum.any?(&review_request_event_line?/1)
+    else
+      false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_request_event_line?(line) when is_binary(line) do
+    case Jason.decode(line) do
+      {:ok, %{"event" => "tool.finished", "status" => "passed", "tool" => tool}}
+      when tool in ["github-pr-created-and-codex-review-requested", "codex-review-requested"] ->
+        true
+
+      {:ok, %{"event" => event, "status" => "passed"}}
+      when event in ["github-pr-created-and-codex-review-requested", "codex-review-requested"] ->
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp review_request_event_line?(_line), do: false
 
   defp handoff_review_state do
     Config.settings!().review_monitor.states

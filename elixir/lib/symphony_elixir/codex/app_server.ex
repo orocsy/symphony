@@ -452,9 +452,13 @@ defmodule SymphonyElixir.Codex.AppServer do
     This thread exists only to resolve current-head PR review feedback already named in the user prompt.
     Do not load Codex skills, plugins, apps, MCP tools, broad project docs, prior session JSONL, or unrelated issue history.
     Do not refetch GitHub or Linear review text when the prompt already includes the current-head feedback body.
-    Do not run rg, grep, find, ls, git ls-files, gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
+    Do not run rg, grep, find, ls, git ls-files, mutating gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
+    After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state.
+    For review-request handoff comments, use `gh pr comment <pr-number> --body '@codex review'`; never use `gh api --method POST` or issue-comment API endpoints.
     If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff, run focused validation, commit, push, request fresh review, and leave Linear state transitions to Symphony's review monitor.
+    For Vitest validation, use the exact `pnpm exec vitest run --configLoader runner <test-file>` command from the issue brief. Do not run `pnpm test <test-file>` and do not probe or touch `node_modules/.vite-temp`; if that path appears, switch to the runner command instead of requesting approval.
     Start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
+    If the issue brief names an exact write-scope file that does not exist yet, create that exact file; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Before spending broad analysis tokens, either edit a scoped code/test file or write an explicit Orocsy blocker/correction.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
@@ -474,7 +478,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Start from `git status --short --branch`, then read `.orocsy/delivery/issue-brief.md` if present.
     Use exact files, line ranges, data shapes, tests, and validation commands from the issue brief. Do not run `rg`, `grep`, `find`, `git ls-files`, GitHub, or Linear discovery before the first scoped edit unless the issue brief is missing required code-level scope.
+    After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state; use `gh pr create` or `gh pr comment` for PR creation and Codex review requests.
+    For Vitest validation, use the exact `pnpm exec vitest run --configLoader runner <test-file>` command from the issue brief. Do not run `pnpm test <test-file>` and do not probe or touch `node_modules/.vite-temp`; if that path appears, switch to the runner command instead of requesting approval.
     If the brief is missing exact write scope, dependencies, target files, target tests, or acceptance criteria, write an Orocsy blocker/correction and stop instead of searching broadly.
+    If an exact write-scope file from the brief is missing, create that exact path; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
     Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction.
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
     After the scoped edit, run focused validation, append tool/gate/eval evidence, commit, push the issue branch, create/update one PR, request Codex review, and update Linear.
@@ -513,7 +520,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => "review_rework"} = preflight} ->
         preflight
-        |> review_rework_allowed_read_paths()
+        |> review_rework_allowed_read_paths(workspace)
         |> review_rework_path_guard_patterns_for_paths()
 
       _ ->
@@ -523,8 +530,18 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> []
   end
 
-  defp review_rework_allowed_read_paths(%{} = preflight) do
-    (review_rework_feedback_paths(preflight) ++ review_rework_requirement_paths(preflight))
+  defp review_rework_allowed_read_paths(%{} = preflight, workspace) do
+    base_paths =
+      (review_rework_feedback_paths(preflight) ++
+         review_rework_requirement_paths(preflight) ++
+         review_rework_issue_brief_paths(preflight, workspace))
+      |> Enum.uniq()
+
+    counterpart_paths = review_rework_counterpart_paths(workspace, base_paths)
+
+    (base_paths ++
+       counterpart_paths ++
+       review_rework_local_import_paths(workspace, base_paths ++ counterpart_paths))
     |> Enum.uniq()
   end
 
@@ -555,6 +572,24 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_requirement_paths(_preflight), do: []
+
+  defp review_rework_issue_brief_paths(%{"requirements" => %{"issue_brief" => %{"path" => path}}}, workspace)
+       when is_binary(path) and is_binary(workspace) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_path = Path.expand(path, expanded_workspace)
+
+    with true <- String.starts_with?(expanded_path, expanded_workspace <> "/"),
+         true <- File.regular?(expanded_path),
+         {:ok, content} <- File.read(expanded_path) do
+      paths_from_review_rework_text(content)
+    else
+      _ -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp review_rework_issue_brief_paths(_preflight, _workspace), do: []
 
   defp requirement_path_sources(requirements) when is_map(requirements) do
     [
@@ -593,14 +628,212 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp paths_from_review_rework_text(_text), do: []
 
+  defp review_rework_local_import_paths(workspace, source_paths) when is_binary(workspace) do
+    source_paths
+    |> Enum.filter(&review_rework_code_file?/1)
+    |> Enum.flat_map(&local_import_paths_from_file(workspace, &1))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_local_import_paths(_workspace, _source_paths), do: []
+
+  defp review_rework_counterpart_paths(workspace, paths) when is_binary(workspace) do
+    paths
+    |> Enum.flat_map(&counterpart_path_candidates/1)
+    |> Enum.filter(&local_workspace_file?(workspace, &1))
+    |> Enum.map(&normalize_requirement_path/1)
+    |> Enum.uniq()
+  end
+
+  defp review_rework_counterpart_paths(_workspace, _paths), do: []
+
+  defp counterpart_path_candidates(path) when is_binary(path) do
+    path = normalize_requirement_path(path)
+
+    cond do
+      String.starts_with?(path, "tests/") ->
+        source_counterpart_candidates(path)
+
+      String.starts_with?(path, "src/") ->
+        test_counterpart_candidates(path)
+
+      true ->
+        []
+    end
+  end
+
+  defp counterpart_path_candidates(_path), do: []
+
+  defp source_counterpart_candidates(path) do
+    ext = Path.extname(path)
+    stem = path |> Path.basename(ext) |> String.replace(~r/\.(test|spec)$/, "")
+    relative_dir = test_relative_dir(path)
+    hyphen_segments = String.split(stem, "-", trim: true)
+    hyphen_source_candidates = hyphen_source_candidates(hyphen_segments, ext)
+
+    [
+      "src/#{stem}#{ext}",
+      "src/lib/#{stem}#{ext}",
+      "src/features/#{stem}#{ext}"
+      | source_candidates_from_test_dir(relative_dir, stem, ext)
+    ]
+    |> Kernel.++(hyphen_source_candidates)
+    |> Enum.uniq()
+  end
+
+  defp test_counterpart_candidates(path) do
+    ext = Path.extname(path)
+    stem = path |> Path.basename(ext) |> String.replace(~r/\.(test|spec)$/, "")
+
+    path_segments =
+      path
+      |> Path.rootname()
+      |> String.split("/", trim: true)
+      |> Enum.drop(1)
+
+    dashed_stem = Enum.join(path_segments, "-")
+
+    [stem, dashed_stem]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.flat_map(fn candidate_stem ->
+      [
+        "tests/unit/#{candidate_stem}.test#{ext}",
+        "tests/integration/#{candidate_stem}.test#{ext}",
+        "tests/e2e/#{candidate_stem}.spec#{ext}"
+      ]
+    end)
+    |> Enum.uniq()
+  end
+
+  defp test_relative_dir(path) do
+    path
+    |> Path.dirname()
+    |> String.split("/", trim: true)
+    |> Enum.drop(2)
+    |> Enum.join("/")
+  end
+
+  defp source_candidates_from_test_dir("", _stem, _ext), do: []
+
+  defp source_candidates_from_test_dir(relative_dir, stem, ext) do
+    [
+      "src/#{relative_dir}/#{stem}#{ext}",
+      "src/lib/#{relative_dir}/#{stem}#{ext}",
+      "src/features/#{relative_dir}/#{stem}#{ext}"
+    ]
+  end
+
+  defp hyphen_source_candidates([first | rest], ext) when rest != [] do
+    tail = Enum.join(rest, "-")
+
+    [
+      "src/#{first}/#{tail}#{ext}",
+      "src/lib/#{first}/#{tail}#{ext}",
+      "src/features/#{first}/#{tail}#{ext}"
+    ]
+  end
+
+  defp hyphen_source_candidates(_segments, _ext), do: []
+
+  defp review_rework_code_file?(path) when is_binary(path) do
+    Path.extname(path) in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
+  end
+
+  defp review_rework_code_file?(_path), do: false
+
+  defp review_rework_supported_file?(path) when is_binary(path) do
+    Path.extname(path) in [
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".cjs",
+      ".md",
+      ".json",
+      ".yml",
+      ".yaml",
+      ".css",
+      ".scss"
+    ]
+  end
+
+  defp review_rework_supported_file?(_path), do: false
+
+  defp local_import_paths_from_file(workspace, source_path) do
+    workspace = Path.expand(workspace)
+    expanded_source = Path.expand(source_path, workspace)
+
+    with true <- String.starts_with?(expanded_source, workspace <> "/"),
+         true <- File.regular?(expanded_source),
+         {:ok, content} <- File.read(expanded_source) do
+      source_path
+      |> Path.dirname()
+      |> import_specifiers_from_content(content)
+      |> Enum.flat_map(&resolve_local_import_path(workspace, &1))
+    else
+      _ -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp import_specifiers_from_content(source_dir, content) do
+    ~r/(?:from\s+|import\s*\(\s*|require\(\s*)["'](\.{1,2}\/[^"']+)["']/
+    |> Regex.scan(content, capture: :all_but_first)
+    |> Enum.flat_map(fn
+      [specifier] -> [{source_dir, specifier}]
+      _ -> []
+    end)
+  end
+
+  defp resolve_local_import_path(workspace, {source_dir, specifier}) do
+    base =
+      specifier
+      |> Path.expand(Path.join("/", source_dir))
+      |> String.trim_leading("/")
+
+    candidates =
+      if Path.extname(base) == "" do
+        [
+          base,
+          "#{base}.ts",
+          "#{base}.tsx",
+          "#{base}.js",
+          "#{base}.jsx",
+          "#{base}.mjs",
+          "#{base}.cjs",
+          Path.join(base, "index.ts"),
+          Path.join(base, "index.tsx"),
+          Path.join(base, "index.js"),
+          Path.join(base, "index.jsx")
+        ]
+      else
+        [base]
+      end
+
+    candidates
+    |> Enum.filter(&local_workspace_file?(workspace, &1))
+    |> Enum.map(&normalize_requirement_path/1)
+  end
+
+  defp local_workspace_file?(workspace, path) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_path = Path.expand(path, expanded_workspace)
+
+    String.starts_with?(expanded_path, expanded_workspace <> "/") and File.regular?(expanded_path)
+  end
+
   defp normalize_requirement_path(path) when is_binary(path) do
     path
     |> String.trim()
     |> String.trim_leading("./")
+    |> String.replace(~r/:\d+(?:-\d+)?$/, "")
   end
 
   defp review_rework_path_like?(path) when is_binary(path) do
     path != "" and
+      review_rework_supported_file?(path) and
       String.contains?(path, "/") and
       not String.contains?(path, [" ", "\t", "\n", "\r"]) and
       not String.starts_with?(path, ["http://", "https://", "origin/"])
@@ -1061,12 +1294,25 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp handoff_gh_api_command?(command) do
     normalized = String.replace(command, ~r/\s+/, " ")
 
-    endpoints =
-      ~r/(?:^|[\s'"])gh\s+api\s+["']?([^\s"']+)/
-      |> Regex.scan(normalized, capture: :all_but_first)
-      |> Enum.map(fn [endpoint] -> endpoint end)
+    cond do
+      Regex.match?(~r/(?:^|[\s'"])gh\s+api\s+graphql(\s|$)/, normalized) ->
+        handoff_gh_api_graphql_command?(normalized)
 
-    endpoints != [] and Enum.all?(endpoints, &handoff_gh_api_endpoint?/1)
+      true ->
+        endpoints =
+          ~r/(?:^|[\s'"])gh\s+api(?:\s+--method\s+GET)?\s+["']?([^\s"']+)/
+          |> Regex.scan(normalized, capture: :all_but_first)
+          |> Enum.map(fn [endpoint] -> endpoint end)
+
+        endpoints != [] and Enum.all?(endpoints, &handoff_gh_api_endpoint?/1)
+    end
+  end
+
+  defp handoff_gh_api_graphql_command?(command) do
+    String.contains?(command, "repository(") and
+      String.contains?(command, "pullRequest") and
+      not Regex.match?(~r/\bmutation\b/i, command) and
+      not Regex.match?(~r/\b(?:addComment|addPullRequestReview|create[A-Z]|update[A-Z]|delete[A-Z])\b/, command)
   end
 
   defp handoff_gh_api_endpoint?(endpoint) do
