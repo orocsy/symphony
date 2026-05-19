@@ -418,6 +418,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "gh pr comment <pr-number> --body '@codex review'"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "create that exact file"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "alternate app roots"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "colocated sibling tests"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "dispatch-preflight.json"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "read-only runtime context"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Never move a review-rework issue to `Done`"

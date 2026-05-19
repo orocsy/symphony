@@ -459,6 +459,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     For Vitest validation, use the exact `pnpm exec vitest run --configLoader runner <test-file>` command from the issue brief. Do not run `pnpm test <test-file>` and do not probe or touch `node_modules/.vite-temp`; if that path appears, switch to the runner command instead of requesting approval.
     Start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
     If the issue brief names an exact write-scope file that does not exist yet, create that exact file; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
+    If the issue brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Before spending broad analysis tokens, either edit a scoped code/test file or write an explicit Orocsy blocker/correction.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
@@ -482,6 +483,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     For Vitest validation, use the exact `pnpm exec vitest run --configLoader runner <test-file>` command from the issue brief. Do not run `pnpm test <test-file>` and do not probe or touch `node_modules/.vite-temp`; if that path appears, switch to the runner command instead of requesting approval.
     If the brief is missing exact write scope, dependencies, target files, target tests, or acceptance criteria, write an Orocsy blocker/correction and stop instead of searching broadly.
     If an exact write-scope file from the brief is missing, create that exact path; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
+    If the brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
     Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction.
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
     After the scoped edit, run focused validation, append tool/gate/eval evidence, commit, push the issue branch, create/update one PR, request Codex review, and update Linear.
