@@ -92,7 +92,13 @@ defmodule SymphonyElixir.IssueRequirements do
     |> issue_brief_candidate_paths(identifier)
     |> Enum.find_value("", fn path ->
       if File.regular?(path) do
-        File.read!(path)
+        body = File.read!(path)
+
+        if String.trim(body) == "" do
+          nil
+        else
+          body
+        end
       end
     end)
   rescue
