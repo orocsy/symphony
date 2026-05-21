@@ -322,20 +322,17 @@ defmodule SymphonyElixir.IssueRequirements do
   end
 
   defp issue_brief_reference(identifier, workspace) when is_binary(identifier) and is_binary(workspace) do
-    relative_path = Path.join([".codex/agentic/issue-briefs", "#{safe_identifier(identifier)}.md"])
-    path = Path.join(workspace, relative_path)
+    workspace
+    |> issue_brief_candidate_paths(identifier)
+    |> Enum.find_value(fn path ->
+      if File.regular?(path) do
+        body = File.read!(path)
 
-    cond do
-      File.regular?(path) ->
-        %{"path" => relative_path, "bytes" => File.stat!(path).size}
-
-      File.regular?(Path.join(workspace, ".orocsy/delivery/issue-brief.md")) ->
-        delivery_path = ".orocsy/delivery/issue-brief.md"
-        %{"path" => delivery_path, "bytes" => File.stat!(Path.join(workspace, delivery_path)).size}
-
-      true ->
-        nil
-    end
+        if String.trim(body) != "" do
+          %{"path" => Path.relative_to(path, workspace), "bytes" => File.stat!(path).size}
+        end
+      end
+    end)
   end
 
   defp issue_brief_reference(_identifier, _workspace), do: nil

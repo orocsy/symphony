@@ -519,8 +519,8 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp fallback_issue_brief_reference(workspace, identifier) when is_binary(workspace) and is_binary(identifier) do
     relative_paths = [
-      Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"]),
-      ".orocsy/delivery/issue-brief.md"
+      ".orocsy/delivery/issue-brief.md",
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
     ]
 
     relative_paths
@@ -528,7 +528,11 @@ defmodule SymphonyElixir.DispatchPreflight do
       path = Path.join(workspace, relative_path)
 
       if File.regular?(path) do
-        %{"path" => relative_path, "bytes" => File.stat!(path).size}
+        body = File.read!(path)
+
+        if String.trim(body) != "" do
+          %{"path" => relative_path, "bytes" => File.stat!(path).size}
+        end
       end
     end)
   rescue
