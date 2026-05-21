@@ -994,6 +994,104 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "issue requirements skip empty primary issue brief and read fallback brief" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-empty-brief-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+      File.mkdir_p!(Path.join(workspace, ".codex/agentic/issue-briefs"))
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), "\n")
+
+      File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-902.md"), """
+      ## Write Scope
+      - src/features/fallback.ts
+
+      ### MIU 1 - Fallback Brief Hydration
+      Hydrate requirements from the copied issue brief.
+
+      ## Validation
+      ```bash
+      pnpm test -- fallback
+      ```
+      """)
+
+      issue = %Issue{
+        id: "issue-empty-brief-fallback",
+        identifier: "COD-902",
+        title: "Fallback issue brief",
+        state: "In Progress",
+        description: "Placeholder without structured requirements"
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+      assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-902.md"
+      assert requirements["write_scope"] == ["src/features/fallback.ts"]
+      assert requirements["mius"] == ["MIU 1 - Fallback Brief Hydration"]
+      assert requirements["validation"]["commands"] == ["pnpm test -- fallback"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "issue requirements record the same non-empty issue brief used for parsing" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-reference-precedence-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+      File.mkdir_p!(Path.join(workspace, ".codex/agentic/issue-briefs"))
+
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), """
+      ## Write Scope
+      - src/features/primary.ts
+
+      ### MIU 1 - Primary Brief
+      Hydrate from the primary delivery issue brief.
+
+      ## Validation
+      ```bash
+      pnpm test -- primary
+      ```
+      """)
+
+      File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-903.md"), """
+      ## Write Scope
+      - src/features/fallback.ts
+
+      ### MIU 1 - Fallback Brief
+      This copied brief should not be used while the primary brief is populated.
+
+      ## Validation
+      ```bash
+      pnpm test -- fallback
+      ```
+      """)
+
+      issue = %Issue{
+        id: "issue-reference-precedence",
+        identifier: "COD-903",
+        title: "Reference precedence",
+        state: "In Progress",
+        description: "Placeholder without structured requirements"
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+      assert requirements["issue_brief"]["path"] == ".orocsy/delivery/issue-brief.md"
+      assert requirements["write_scope"] == ["src/features/primary.ts"]
+      assert requirements["mius"] == ["MIU 1 - Primary Brief"]
+      assert requirements["validation"]["commands"] == ["pnpm test -- primary"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "issue requirements fall back for MIU-only descriptions" do
     issue = %Issue{
       id: "issue-miu-only",

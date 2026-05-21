@@ -369,7 +369,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
     - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
 
-    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. Do not create/update a PR, request review, or update Linear handoff until this turn has produced real code/test progress, run the required validation, and created a commit on the issue branch.
+    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. In a fresh implementation first turn, stop after the scoped checkpoint and `technical-miu-trace`; the next handoff-recovery turn handles focused validation, commit, push, PR review request, and Linear handoff. Do not create/update a PR, request review, or update Linear handoff from the first implementation turn.
     """
     |> String.trim()
   end
@@ -519,8 +519,8 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp fallback_issue_brief_reference(workspace, identifier) when is_binary(workspace) and is_binary(identifier) do
     relative_paths = [
-      Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"]),
-      ".orocsy/delivery/issue-brief.md"
+      ".orocsy/delivery/issue-brief.md",
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"])
     ]
 
     relative_paths
@@ -528,7 +528,11 @@ defmodule SymphonyElixir.DispatchPreflight do
       path = Path.join(workspace, relative_path)
 
       if File.regular?(path) do
-        %{"path" => relative_path, "bytes" => File.stat!(path).size}
+        body = File.read!(path)
+
+        if String.trim(body) != "" do
+          %{"path" => relative_path, "bytes" => File.stat!(path).size}
+        end
       end
     end)
   rescue
