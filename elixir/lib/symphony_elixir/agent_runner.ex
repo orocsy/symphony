@@ -137,7 +137,7 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      if fresh_first_turn_checkpoint_completed?(workspace, turn_number, checkpoint_present_at_turn_start) do
+      if fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) do
         Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
         :ok
       else
@@ -174,11 +174,13 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp fresh_first_turn_checkpoint_completed?(workspace, 1, false) when is_binary(workspace) do
-    fresh_implementation_checkpoint_present?(workspace)
+  defp fresh_checkpoint_stop_completed?(turn_session, workspace, false) when is_binary(workspace) do
+    turn_session[:result] == :fresh_checkpoint_stop or fresh_implementation_checkpoint_present?(workspace)
   end
 
-  defp fresh_first_turn_checkpoint_completed?(_workspace, _turn_number, _checkpoint_present_at_turn_start), do: false
+  defp fresh_checkpoint_stop_completed?(turn_session, _workspace, _checkpoint_present_at_turn_start) do
+    turn_session[:result] == :fresh_checkpoint_stop
+  end
 
   defp post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host) do
     cond do
