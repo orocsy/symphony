@@ -193,7 +193,7 @@ defmodule SymphonyElixir.PromptBuilder do
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
     - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
     - If any required command fails because a binary is missing, PATH differs, credentials are absent, network/provider access fails, or approval/input is required, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
-    - Implement one MIU at a time, run focused validation immediately, append tool/gate/eval evidence, commit, push the issue branch, create/update one PR, request Codex review, and update Linear.
+    - Implement one MIU at a time. In a fresh implementation first turn, stop after one scoped code/test/doc edit or blocker plus `technical-miu-trace`; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff.
     - For Rework or an existing PR, fetch only current PR review threads/comments for this branch, classify findings, fix accepted in-scope current-code findings, validate, push, request review again, and never move Linear to a terminal state until a fresh review scan is clean.
     - Never merge automatically from inside the worker.
     """

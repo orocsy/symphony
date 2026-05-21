@@ -369,7 +369,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
     - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
 
-    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. Do not create/update a PR, request review, or update Linear handoff until this turn has produced real code/test progress, run the required validation, and created a commit on the issue branch.
+    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. In a fresh implementation first turn, stop after the scoped checkpoint and `technical-miu-trace`; the next handoff-recovery turn handles focused validation, commit, push, PR review request, and Linear handoff. Do not create/update a PR, request review, or update Linear handoff from the first implementation turn.
     """
     |> String.trim()
   end

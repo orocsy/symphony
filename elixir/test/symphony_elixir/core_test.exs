@@ -8990,6 +8990,118 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner stops after fresh implementation first checkpoint instead of continuing" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-fresh-checkpoint-stop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      run_id="$(date +%s%N)-$$"
+      printf 'RUN:%s\\n' "$run_id" >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-fresh-stop"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-stop-1"}}}'
+            mkdir -p .orocsy/delivery/events
+            printf '%s\\n' '{"event":"tool.finished","status":"passed","tool":"technical-miu-trace"}' >> .orocsy/delivery/events/events.jsonl
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          5)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-stop-2"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, {:issue_state_fetch, :unexpected})
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-fresh-stop",
+             identifier: "MT-FRESH-STOP",
+             title: "Fresh checkpoint stop",
+             description: "Still active after first turn",
+             state: "In Progress"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-fresh-stop",
+        identifier: "MT-FRESH-STOP",
+        title: "Fresh checkpoint stop",
+        description: "Stop after technical-miu-trace",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FRESH-STOP",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      refute_receive {:issue_state_fetch, :unexpected}, 100
+
+      lines = File.read!(trace_file) |> String.split("\n", trim: true)
+
+      turn_start_count =
+        lines
+        |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.count(&(&1["method"] == "turn/start"))
+
+      assert turn_start_count == 1
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner stops after worker creates open blocking correction" do
     test_root =
       Path.join(

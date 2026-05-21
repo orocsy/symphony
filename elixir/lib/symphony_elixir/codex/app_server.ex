@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
+  @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
@@ -136,7 +137,13 @@ defmodule SymphonyElixir.Codex.AppServer do
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
     forbidden_command_patterns = effective_forbidden_command_patterns(workspace, forbidden_command_patterns)
-    command_guard = %{patterns: forbidden_command_patterns, workspace: workspace}
+
+    command_guard = %{
+      patterns: forbidden_command_patterns,
+      workspace: workspace,
+      fresh_checkpoint_stop_enabled: dispatch_preflight_mode(workspace) == "fresh_implementation",
+      fresh_checkpoint_present_at_turn_start: technical_miu_trace_event?(workspace)
+    }
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -486,9 +493,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     If the brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
     Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction.
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
-    After the scoped edit, run focused validation, append tool/gate/eval evidence, commit, push the issue branch, create/update one PR, request Codex review, and update Linear.
+    In the first fresh implementation turn, stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
-    In the first turn, complete the scoped MIU handoff or stop with a concrete blocker.
+    In the first turn, complete only the scoped implementation checkpoint or stop with a concrete blocker.
     Never merge automatically.
     """
     |> String.trim()
@@ -1127,32 +1134,62 @@ defmodule SymphonyElixir.Codex.AppServer do
        ) do
     metadata = metadata_from_message(port, payload)
 
-    case forbidden_command_violation(payload, command_guard) do
-      {:error, command, pattern} ->
+    cond do
+      fresh_checkpoint_stop_reached?(command_guard) ->
         emit_message(
           on_message,
-          :forbidden_command,
-          %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+          :fresh_checkpoint_stop,
+          %{
+            payload: payload,
+            raw: payload_string,
+            checkpoint_event: "technical-miu-trace",
+            reason: "fresh_implementation_first_checkpoint_reached"
+          },
           metadata
         )
 
-        {:error, {:forbidden_command, command, pattern}}
+        stop_port(port)
+        {:ok, :fresh_checkpoint_stop}
 
-      :ok ->
-        handle_allowed_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests,
-          metadata,
-          command_guard
-        )
+      true ->
+        case forbidden_command_violation(payload, command_guard) do
+          {:error, command, pattern} ->
+            emit_message(
+              on_message,
+              :forbidden_command,
+              %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+              metadata
+            )
+
+            {:error, {:forbidden_command, command, pattern}}
+
+          :ok ->
+            handle_allowed_turn_method(
+              port,
+              on_message,
+              payload,
+              payload_string,
+              method,
+              timeout_ms,
+              tool_executor,
+              auto_approve_requests,
+              metadata,
+              command_guard
+            )
+        end
     end
   end
+
+  defp fresh_checkpoint_stop_reached?(%{
+         workspace: workspace,
+         fresh_checkpoint_stop_enabled: true,
+         fresh_checkpoint_present_at_turn_start: false
+       })
+       when is_binary(workspace) do
+    technical_miu_trace_event?(workspace)
+  end
+
+  defp fresh_checkpoint_stop_reached?(_command_guard), do: false
 
   defp handle_allowed_turn_method(
          port,
@@ -1245,13 +1282,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace}) when is_list(patterns) do
     command = command_text(payload)
+    command_for_patterns = command_for_forbidden_patterns(command)
 
     cond do
       is_nil(command) ->
         :ok
 
-      match = first_matching_command_pattern(command, patterns) ->
-        if gh_api_pattern?(match) and handoff_gh_api_allowed?(command, workspace) do
+      match = first_matching_command_pattern(command_for_patterns, patterns) ->
+        if gh_api_pattern?(match) and handoff_gh_api_allowed?(command_for_patterns, workspace) do
           :ok
         else
           {:error, command, match}
@@ -1264,12 +1302,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp forbidden_command_violation(payload, patterns) when is_list(patterns) do
     command = command_text(payload)
+    command_for_patterns = command_for_forbidden_patterns(command)
 
     cond do
       is_nil(command) ->
         :ok
 
-      match = first_matching_command_pattern(command, patterns) ->
+      match = first_matching_command_pattern(command_for_patterns, patterns) ->
         {:error, command, match}
 
       true ->
@@ -1278,6 +1317,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp command_for_forbidden_patterns(command) when is_binary(command) do
+    if delivery_event_append_command?(command) do
+      redact_delivery_event_append_metadata(command)
+    else
+      command
+    end
+  end
+
+  defp command_for_forbidden_patterns(command), do: command
+
+  defp delivery_event_append_command?(command) when is_binary(command) do
+    String.contains?(command, ".codex/delivery/bin/orocsy.py") and
+      String.contains?(command, " event append")
+  end
+
+  defp redact_delivery_event_append_metadata(command) when is_binary(command) do
+    ["command", "summary", "message", "details", "detail", "body"]
+    |> Enum.reduce(command, fn flag, acc ->
+      acc
+      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
+    end)
+  end
 
   defp gh_api_pattern?(pattern) do
     pattern in [
@@ -1347,6 +1411,22 @@ defmodule SymphonyElixir.Codex.AppServer do
   rescue
     _error -> false
   end
+
+  defp technical_miu_trace_event?(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(@delivery_event_path)
+    |> File.stream!()
+    |> Enum.any?(fn line ->
+      case Jason.decode(String.trim(line)) do
+        {:ok, %{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}} -> true
+        _ -> false
+      end
+    end)
+  rescue
+    _error -> false
+  end
+
+  defp technical_miu_trace_event?(_workspace), do: false
 
   defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->

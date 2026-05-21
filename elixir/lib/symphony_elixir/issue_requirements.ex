@@ -11,7 +11,10 @@ defmodule SymphonyElixir.IssueRequirements do
   def from_issue(issue, workspace \\ nil)
 
   def from_issue(%Issue{} = issue, workspace) do
-    description = issue.description || ""
+    description =
+      issue
+      |> issue_description()
+      |> maybe_append_issue_brief(issue.identifier, workspace)
 
     if not requirements_description?(description) do
       {:error, :no_issue_requirements}
@@ -30,7 +33,7 @@ defmodule SymphonyElixir.IssueRequirements do
         "project" => "",
         "write_scope" => write_scope(description),
         "shared_files" => section_list(description, "Shared Files"),
-        "dependencies" => section_list(description, "Dependencies"),
+        "dependencies" => dependencies(description),
         "mius" => miu_list(description),
         "validation" => validation(description),
         "out_of_scope" => out_of_scope(description),
@@ -71,6 +74,40 @@ defmodule SymphonyElixir.IssueRequirements do
 
   defp requirements_description?(_description), do: false
 
+  defp issue_description(%Issue{description: description}) when is_binary(description), do: description
+  defp issue_description(_issue), do: ""
+
+  defp maybe_append_issue_brief(description, identifier, workspace)
+       when is_binary(description) and is_binary(identifier) and is_binary(workspace) do
+    case issue_brief_body(identifier, workspace) do
+      "" -> description
+      brief -> [description, brief] |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.join("\n\n")
+    end
+  end
+
+  defp maybe_append_issue_brief(description, _identifier, _workspace), do: description
+
+  defp issue_brief_body(identifier, workspace) do
+    workspace
+    |> issue_brief_candidate_paths(identifier)
+    |> Enum.find_value("", fn path ->
+      if File.regular?(path) do
+        File.read!(path)
+      end
+    end)
+  rescue
+    _error -> ""
+  end
+
+  defp issue_brief_candidate_paths(workspace, identifier) do
+    safe = safe_identifier(identifier)
+
+    [
+      Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+      Path.join(workspace, ".codex/agentic/issue-briefs/#{safe}.md")
+    ]
+  end
+
   defp struct_from_map(issue) do
     %Issue{
       id: Map.get(issue, :id) || Map.get(issue, "id"),
@@ -99,6 +136,7 @@ defmodule SymphonyElixir.IssueRequirements do
     commands =
       validation_text(description)
       |> code_block_lines()
+      |> Enum.concat(validation_text(description) |> bullet_lines())
       |> Enum.concat(section_text(description, "Required Tests") |> bullet_lines())
       |> Enum.filter(&String.contains?(&1, ["pnpm", "mix", "npm", "yarn", "cargo", "pytest"]))
       |> Enum.uniq()
@@ -126,10 +164,51 @@ defmodule SymphonyElixir.IssueRequirements do
   end
 
   defp miu_list(description) do
-    Regex.scan(~r/^###\s+(.+)$/m, description, capture: :all_but_first)
+    mius =
+      Regex.scan(~r/^###\s+(.+)$/m, description, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    case mius do
+      [] -> fallback_miu_list(description)
+      mius -> mius
+    end
+  end
+
+  defp fallback_miu_list(description) do
+    [
+      scalar_section(description, "Runtime Problem"),
+      scalar_section(description, "Goal"),
+      scalar_section(description, "Requirements")
+    ]
     |> List.flatten()
+    |> Enum.map(&string/1)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
+    |> List.wrap()
+    |> case do
+      [] -> []
+      [first | _] -> [first]
+    end
+  end
+
+  defp dependencies(description) do
+    description
+    |> section_list("Dependencies")
+    |> Kernel.++(inline_depends_on(description))
+    |> Enum.uniq()
+  end
+
+  defp inline_depends_on(description) do
+    Regex.scan(~r/^\s*Depends on:\s*(.+)$/mi, description, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.flat_map(fn text ->
+      text
+      |> String.split([",", ";"])
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+    end)
   end
 
   defp section_list(description, heading) do

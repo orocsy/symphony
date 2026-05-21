@@ -7,6 +7,8 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
 
+  @delivery_event_path ".orocsy/delivery/events/events.jsonl"
+
   @type worker_host :: String.t() | nil
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -124,6 +126,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, worker_host) do
     prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)
+    checkpoint_present_at_turn_start = fresh_implementation_checkpoint_present?(workspace)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
@@ -134,35 +137,48 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+      if fresh_first_turn_checkpoint_completed?(workspace, turn_number, checkpoint_present_at_turn_start) do
+        Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
+        :ok
+      else
+        next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns,
-            worker_host
-          )
+        case next_action do
+          {:continue, refreshed_issue} when turn_number < max_turns ->
+            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+            do_run_codex_turns(
+              app_session,
+              workspace,
+              refreshed_issue,
+              codex_update_recipient,
+              opts,
+              issue_state_fetcher,
+              turn_number + 1,
+              max_turns,
+              worker_host
+            )
 
-          :ok
+          {:continue, refreshed_issue} ->
+            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
-        {:done, _refreshed_issue} ->
-          :ok
+            :ok
 
-        {:error, reason} ->
-          {:error, reason}
+          {:done, _refreshed_issue} ->
+            :ok
+
+          {:error, reason} ->
+            {:error, reason}
+        end
       end
     end
   end
+
+  defp fresh_first_turn_checkpoint_completed?(workspace, 1, false) when is_binary(workspace) do
+    fresh_implementation_checkpoint_present?(workspace)
+  end
+
+  defp fresh_first_turn_checkpoint_completed?(_workspace, _turn_number, _checkpoint_present_at_turn_start), do: false
 
   defp post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host) do
     cond do
@@ -190,6 +206,34 @@ defmodule SymphonyElixir.AgentRunner do
         false
     end
   end
+
+  defp fresh_implementation_checkpoint_present?(workspace) when is_binary(workspace) do
+    with {:ok, %{"mode" => "fresh_implementation"}} <- DispatchPreflight.read(workspace) do
+      technical_miu_trace_event?(workspace)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp fresh_implementation_checkpoint_present?(_workspace), do: false
+
+  defp technical_miu_trace_event?(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(@delivery_event_path)
+    |> File.stream!()
+    |> Enum.any?(fn line ->
+      case Jason.decode(String.trim(line)) do
+        {:ok, %{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}} -> true
+        _ -> false
+      end
+    end)
+  rescue
+    _error -> false
+  end
+
+  defp technical_miu_trace_event?(_workspace), do: false
 
   defp build_turn_prompt(issue, opts, workspace, 1, _max_turns) do
     PromptBuilder.build_prompt(issue, Keyword.put(opts, :workspace, workspace))
