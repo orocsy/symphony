@@ -1415,18 +1415,63 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp technical_miu_trace_event?(workspace) when is_binary(workspace) do
     workspace
     |> Path.join(@delivery_event_path)
-    |> File.stream!()
-    |> Enum.any?(fn line ->
-      case Jason.decode(String.trim(line)) do
-        {:ok, %{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}} -> true
-        _ -> false
-      end
-    end)
-  rescue
-    _error -> false
+    |> cached_technical_miu_trace_event?()
   end
 
   defp technical_miu_trace_event?(_workspace), do: false
+
+  defp cached_technical_miu_trace_event?(events_path) when is_binary(events_path) do
+    cache_key = {__MODULE__, :technical_miu_trace_event, events_path}
+
+    case Process.get(cache_key) do
+      :present ->
+        true
+
+      {signature, result} ->
+        current_signature = delivery_event_file_signature(events_path)
+
+        if current_signature == signature do
+          result
+        else
+          scan_cached_technical_miu_trace_event(events_path, cache_key, current_signature)
+        end
+
+      _ ->
+        scan_cached_technical_miu_trace_event(
+          events_path,
+          cache_key,
+          delivery_event_file_signature(events_path)
+        )
+    end
+  end
+
+  defp scan_cached_technical_miu_trace_event(events_path, cache_key, signature) do
+    result =
+      signature != :missing and
+        events_path
+        |> File.stream!()
+        |> Enum.any?(fn line ->
+          case Jason.decode(String.trim(line)) do
+            {:ok, %{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}} -> true
+            _ -> false
+          end
+        end)
+
+    Process.put(cache_key, if(result, do: :present, else: {signature, false}))
+
+    result
+  rescue
+    _error ->
+      Process.put(cache_key, {signature, false})
+      false
+  end
+
+  defp delivery_event_file_signature(events_path) do
+    case File.stat(events_path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime, size: size}} -> {size, mtime}
+      _ -> :missing
+    end
+  end
 
   defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->
