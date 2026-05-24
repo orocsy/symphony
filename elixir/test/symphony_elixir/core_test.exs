@@ -5616,6 +5616,118 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "pending Codex review request stops review rework before first durable event correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-request-first-event-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue = %Issue{
+        id: "issue-cod-205-review-request-wait",
+        identifier: "COD-205",
+        title: "Analytics MIU review request wait",
+        state: "Rework",
+        branch_name: "orocsy/cod-205-analytics-miu-flow-instrumentation"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+      File.mkdir_p!(Path.dirname(preflight_path))
+      File.write!(preflight_path, Jason.encode!(%{"mode" => "review_rework"}))
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 55,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/55",
+                 "head" => %{
+                   "sha" => "6b7fdf439d8e62163607af21bdf7a98fcbef31b8",
+                   "ref" => "orocsy/cod-205-analytics-miu-flow-instrumentation"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/55/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Migrate live guest data stores, not only seeded shadow state.",
+                 "commit_id" => "6b7fdf439d8e62163607af21bdf7a98fcbef31b8",
+                 "path" => "src/lib/server/guest-migration.ts",
+                 "line" => 282,
+                 "created_at" => "2026-05-24T13:08:00Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/55#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/55/reviews" ->
+            {:ok, []}
+
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/55/comments?") ->
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review",
+                 "created_at" => "2026-05-24T13:11:20Z",
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/55#issuecomment"
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue.id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            workspace_path: workspace,
+            started_at: DateTime.add(DateTime.utc_now(), -1, :second),
+            codex_total_tokens: 1_500
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue.id)
+      refute MapSet.member?(state.claimed, issue.id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "review rework first edit token budget allows configured forty five thousand ceiling" do
     test_root =
       Path.join(
