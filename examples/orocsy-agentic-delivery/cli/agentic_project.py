@@ -177,6 +177,7 @@ def workflow_uses_orocsy_runtime(content: str) -> bool:
         "Dirty validated handoff checkpoint",
         "Pushed validated handoff checkpoint",
         "review_monitor:",
+        "request_stale_after_ms",
         "Runtime failure parking guard",
         "Review completion gate",
         "Handoff git-state verification guard",
@@ -626,8 +627,8 @@ if ! grep -q "Pushed validated handoff checkpoint" "$WORKFLOW_FILE"; then
   exit 1
 fi
 
-if ! grep -q "review_monitor:" "$WORKFLOW_FILE" || ! grep -q "In Review" "$WORKFLOW_FILE"; then
-  echo "Refusing to run stale Symphony workflow: missing GitHub review monitor bridge for review states -> Rework." >&2
+if ! grep -q "review_monitor:" "$WORKFLOW_FILE" || ! grep -q "In Review" "$WORKFLOW_FILE" || ! grep -q "request_stale_after_ms" "$WORKFLOW_FILE"; then
+  echo "Refusing to run stale Symphony workflow: missing GitHub review monitor bridge or stale-review timeout." >&2
   echo "Regenerate with: python3 $SYMPHONY_REPO/examples/orocsy-agentic-delivery/cli/agentic_project.py init --repo $ROOT --force" >&2
   exit 1
 fi

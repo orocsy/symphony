@@ -107,6 +107,7 @@ defmodule SymphonyElixir.TestSupport do
           review_monitor_repo: nil,
           review_monitor_states: ["Human Review", "In Review"],
           review_monitor_rework_state: "Rework",
+          review_monitor_request_stale_after_ms: nil,
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
@@ -157,6 +158,7 @@ defmodule SymphonyElixir.TestSupport do
     review_monitor_repo = Keyword.get(config, :review_monitor_repo)
     review_monitor_states = Keyword.get(config, :review_monitor_states)
     review_monitor_rework_state = Keyword.get(config, :review_monitor_rework_state)
+    review_monitor_request_stale_after_ms = Keyword.get(config, :review_monitor_request_stale_after_ms)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -211,6 +213,7 @@ defmodule SymphonyElixir.TestSupport do
         "  repo: #{yaml_value(review_monitor_repo)}",
         "  states: #{yaml_value(review_monitor_states)}",
         "  rework_state: #{yaml_value(review_monitor_rework_state)}",
+        "  request_stale_after_ms: #{yaml_value(review_monitor_request_stale_after_ms)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
