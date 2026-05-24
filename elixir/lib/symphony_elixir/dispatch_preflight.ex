@@ -226,11 +226,11 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp preflight_mode(requirements, inspection) do
     cond do
-      review_feedback?(inspection) ->
-        "review_rework"
-
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
+
+      review_feedback?(inspection) ->
+        "review_rework"
 
       integration_check_review?(requirements, inspection) ->
         "integration_check"

@@ -1287,15 +1287,15 @@ defmodule SymphonyElixir.Orchestrator do
       clean_review_status == :confirmed ->
         finish_clean_review_classification_handoff(issue, candidate, inspection)
 
+      clean_review_status == :missing ->
+        request_review_classification_codex_review(issue, candidate, inspection)
+
       review_classification_review_request_recorded?(candidate.workspace) ->
         Logger.info(
           "No-code review classification handoff already requested Codex review and is waiting: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
         )
 
         {:blocked, :review_pending}
-
-      clean_review_status == :missing ->
-        request_review_classification_codex_review(issue, candidate, inspection)
 
       true ->
         reason = {:clean_codex_review_lookup_failed, clean_review_status}
