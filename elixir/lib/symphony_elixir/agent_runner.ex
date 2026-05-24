@@ -218,6 +218,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"}} <- DispatchPreflight.read(workspace),
          {:ok, classification} <- read_review_classification_handoff(workspace),
+         true <- clean_worktree?(workspace),
          {:ok, head_sha} <- current_head_sha(workspace),
          true <- classification_head_matches?(classification, head_sha) do
       no_code_review_classification?(classification) and resolved_review_classification?(classification)
@@ -310,6 +311,17 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp classification_head_matches?(_classification, _head_sha), do: false
+
+  defp clean_worktree?(workspace) when is_binary(workspace) do
+    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
+      {status, 0} -> String.trim(status) == ""
+      {_output, _exit_code} -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp clean_worktree?(_workspace), do: false
 
   defp normalize_review_classification(value) do
     value

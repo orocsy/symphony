@@ -3935,6 +3935,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
     with {:ok, classification} <- read_review_classification_handoff(workspace),
+         {:ok, dirty_status} <- git_output(workspace, ["status", "--porcelain=v1"]),
+         true <- String.trim(dirty_status) == "",
          {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]),
          true <- classification_head_matches?(classification, String.trim(head_sha)) do
       no_code_review_classification?(classification) and resolved_review_classification?(classification)

@@ -9363,6 +9363,7 @@ defmodule SymphonyElixir.CoreTest do
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
       {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
@@ -9416,6 +9417,13 @@ defmodule SymphonyElixir.CoreTest do
         classification_path,
         Jason.encode!(Map.put(stale_classification, "head", current_head), pretty: true) <> "\n"
       )
+
+      File.write!(Path.join(workspace, "uncommitted-review-fix.txt"), "pending edit\n")
+
+      refute AgentRunner.review_classification_handoff_stop_for_test(workspace)
+      assert :not_ready = Orchestrator.complete_review_classification_handoff_for_test(issue)
+
+      File.rm!(Path.join(workspace, "uncommitted-review-fix.txt"))
 
       assert AgentRunner.review_classification_handoff_stop_for_test(workspace)
     after
