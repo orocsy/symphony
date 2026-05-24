@@ -582,10 +582,12 @@ defmodule SymphonyElixir.Orchestrator do
     cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
 
     quiet_ms = durable_progress_quiet_ms(running_entry, now)
+    pushed_handoff_wait_checkpoint? = pushed_handoff_wait_checkpoint?(running_entry)
 
     no_first_event? =
       not substantive_first_progress_observed?(running_entry) and
-        not handoff_recovery_progress_observed?(running_entry)
+        not handoff_recovery_progress_observed?(running_entry) and
+        not pushed_handoff_wait_checkpoint?
 
     cond do
       is_integer(first_event_max_tokens) and first_event_max_tokens > 0 and
@@ -611,7 +613,7 @@ defmodule SymphonyElixir.Orchestrator do
         park_running_issue(state, issue_id, running_entry, reason, failure)
 
       is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
-        durable_progress_guard_tokens >= min_tokens and pushed_handoff_wait_checkpoint?(running_entry) ->
+          pushed_handoff_wait_checkpoint? ->
         identifier = Map.get(running_entry, :identifier, issue_id)
         session_id = running_entry_session_id(running_entry)
 

@@ -6559,7 +6559,8 @@ defmodule SymphonyElixir.CoreTest do
         workspace_root: workspace_root,
         codex_stall_timeout_ms: 0,
         codex_durable_progress_timeout_ms: 60_000,
-        codex_durable_progress_min_tokens: 100
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
       )
 
       issue_id = "issue-pushed-review-gate"
@@ -6656,7 +6657,7 @@ defmodule SymphonyElixir.CoreTest do
             issue: issue,
             started_at: started_at,
             workspace_path: workspace,
-            codex_total_tokens: 500
+            codex_total_tokens: 50_000
           }
         },
         claimed: MapSet.new([issue_id]),
