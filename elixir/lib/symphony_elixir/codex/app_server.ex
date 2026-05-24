@@ -29,6 +29,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "vercel:react-best-practices"
   ]
   @fresh_implementation_disabled_skill_names @review_rework_disabled_skill_names
+  @integration_check_disabled_skill_names @review_rework_disabled_skill_names
   @review_rework_disabled_plugins [
     "browser@openai-bundled",
     "build-web-apps@openai-curated",
@@ -142,7 +143,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       patterns: forbidden_command_patterns,
       workspace: workspace,
       fresh_checkpoint_stop_enabled: dispatch_preflight_mode(workspace) == "fresh_implementation",
-      fresh_checkpoint_present_at_turn_start: technical_miu_trace_event?(workspace)
+      fresh_checkpoint_present_at_turn_start: fresh_implementation_checkpoint_ready?(workspace)
     }
 
     tool_executor =
@@ -381,6 +382,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> Map.put("developerInstructions", fresh_implementation_developer_instructions())
         |> Map.put("config", fresh_implementation_thread_config())
 
+      {:ok, %{"mode" => "integration_check"}} ->
+        params
+        |> Map.put("baseInstructions", integration_check_base_instructions())
+        |> Map.put("developerInstructions", integration_check_developer_instructions())
+        |> Map.put("config", integration_check_thread_config())
+
       _ ->
         params
     end
@@ -392,6 +399,27 @@ defmodule SymphonyElixir.Codex.AppServer do
     %{
       "skills" => %{
         "disabled_skill_names" => @fresh_implementation_disabled_skill_names
+      },
+      "features" => %{
+        "apps" => false,
+        "plugins" => false,
+        "tool_search" => false
+      },
+      "apps" => %{
+        "_default" => %{
+          "enabled" => false,
+          "open_world_enabled" => false,
+          "destructive_enabled" => false
+        }
+      },
+      "plugins" => disabled_named_config(@review_rework_disabled_plugins)
+    }
+  end
+
+  defp integration_check_thread_config do
+    %{
+      "skills" => %{
+        "disabled_skill_names" => @integration_check_disabled_skill_names
       },
       "features" => %{
         "apps" => false,
@@ -452,6 +480,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> String.trim()
   end
 
+  defp integration_check_base_instructions do
+    """
+    You are a Symphony integration-check worker for one existing pull request.
+    Use the current prompt, focused issue brief, PR branch, and named conflict paths only.
+    Resolve the PR mergeability blocker, validate, push the same branch, and record a blocker if any external step fails.
+    """
+    |> String.trim()
+  end
+
   defp review_rework_developer_instructions do
     """
     Symphony review-rework micro-worker.
@@ -491,12 +528,36 @@ defmodule SymphonyElixir.Codex.AppServer do
     If the brief is missing exact write scope, dependencies, target files, target tests, or acceptance criteria, write an Orocsy blocker/correction and stop instead of searching broadly.
     If an exact write-scope file from the brief is missing, create that exact path; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
     If the brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
-    Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction.
+    Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction. Trace-only/read-only MIU notes are not durable progress.
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
     In the first fresh implementation turn, stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     In the first turn, complete only the scoped implementation checkpoint or stop with a concrete blocker.
     Never merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp integration_check_developer_instructions do
+    """
+    Symphony integration-check micro-worker.
+
+    This thread exists only to make the existing PR branch mergeable against its target branch.
+    Do not load Codex skills, plugins, apps, MCP tools, prior session JSONL, broad project docs, historical tickets, or unrelated issue history.
+    Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
+    Start from `git status --short --branch`, then use the issue brief/preflight paths and bounded git conflict commands to expose current merge conflicts.
+    If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only `git diff --stat` plus focused diffs for the dirty files, run the exact focused validation from the brief/correction, then stage, commit, push the existing PR branch, and request fresh review.
+    In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
+    If no unmerged files remain and the issue brief has a `Current Validation Rework` section or an open correction names validation failures, treat the turn as validation rework: inspect and edit only the named in-scope helper/test files before rerunning validation.
+    In validation rework, do not just rerun the same failing validation command and create the same correction again. First restore the missing export, fallback behavior, or directly named assertion path from the issue brief/correction; then rerun the exact focused validation command.
+    A single conflict-marker scan with `grep` is allowed only when it searches for `<<<<<<<`, `=======`, and `>>>>>>>` across explicit issue-brief/preflight files.
+    Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` after naming the exact conflict files, validation commands, and same-branch push target.
+    Resolve only the named conflict files and directly required helper/test files; do not do unrelated feature work or broad rediscovery.
+    Do not reason through every conflict before editing. Take unresolved files in `git status --short` order; read one conflicted file, resolve and `git add` it, then append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "integration-conflict-slice"` before moving to the next file.
+    If you cannot confidently resolve the first current conflicted file from the file itself and directly named helper paths, create an Orocsy blocker/correction immediately instead of reading broader context.
+    After the conflict fix, run focused validation, commit, push to the existing PR branch, and request fresh review with `gh pr comment <pr-number> --body '@codex review'`.
+    Never create a duplicate PR, move Linear to a terminal state, or merge the PR automatically.
+    If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     """
     |> String.trim()
   end
@@ -507,6 +568,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
 
       "fresh_implementation" ->
+        Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
+
+      "integration_check" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
 
       _mode ->
@@ -543,14 +607,19 @@ defmodule SymphonyElixir.Codex.AppServer do
     base_paths =
       (review_rework_feedback_paths(preflight) ++
          review_rework_requirement_paths(preflight) ++
-         review_rework_issue_brief_paths(preflight, workspace))
+         review_rework_issue_brief_paths(preflight, workspace) ++
+         review_rework_referenced_api_route_paths(preflight, workspace) ++
+         review_rework_correction_paths(workspace) ++
+         review_rework_validation_metadata_paths(workspace))
       |> Enum.uniq()
 
     counterpart_paths = review_rework_counterpart_paths(workspace, base_paths)
+    route_helper_paths = review_rework_route_helper_paths(workspace, base_paths ++ counterpart_paths)
 
     (base_paths ++
        counterpart_paths ++
-       review_rework_local_import_paths(workspace, base_paths ++ counterpart_paths))
+       route_helper_paths ++
+       review_rework_local_import_paths(workspace, base_paths ++ counterpart_paths ++ route_helper_paths))
     |> Enum.uniq()
   end
 
@@ -600,6 +669,126 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp review_rework_issue_brief_paths(_preflight, _workspace), do: []
 
+  defp review_rework_referenced_api_route_paths(%{} = preflight, workspace) when is_binary(workspace) do
+    preflight
+    |> review_rework_reference_text(workspace)
+    |> api_route_paths_from_text()
+    |> Enum.flat_map(&next_app_api_route_candidates/1)
+    |> Enum.filter(&local_workspace_file?(workspace, &1))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_referenced_api_route_paths(_preflight, _workspace), do: []
+
+  defp review_rework_correction_paths(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+    |> Path.wildcard()
+    |> Enum.flat_map(&review_rework_correction_file_paths(workspace, &1))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_correction_paths(_workspace), do: []
+
+  defp review_rework_correction_file_paths(workspace, path) do
+    with true <- File.regular?(path),
+         {:ok, content} <- File.read(path),
+         {:ok, %{} = correction} <- Jason.decode(content),
+         true <- runtime_correction?(correction) do
+      correction
+      |> correction_reference_text()
+      |> paths_from_review_rework_text()
+      |> Enum.filter(&local_workspace_file?(workspace, &1))
+    else
+      _ -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp runtime_correction?(%{"source" => source}) when is_binary(source) do
+    String.starts_with?(source, "symphony.runtime.")
+  end
+
+  defp runtime_correction?(_correction), do: false
+
+  defp correction_reference_text(correction) when is_map(correction) do
+    [
+      Map.get(correction, "summary"),
+      Map.get(correction, "findings"),
+      Map.get(correction, "required_corrections"),
+      Map.get(correction, "resolution_summary")
+    ]
+    |> string_values()
+    |> Enum.join("\n")
+  end
+
+  defp correction_reference_text(_correction), do: ""
+
+  defp api_route_paths_from_text(text) when is_binary(text) do
+    ~r{(?:^|[\s`"'(])(/api/[A-Za-z0-9_\-./\[\]]+)}
+    |> Regex.scan(text, capture: :all_but_first)
+    |> Enum.flat_map(fn
+      [path] -> [path |> String.trim_trailing(".") |> normalize_api_route_path()]
+      _ -> []
+    end)
+    |> Enum.filter(&api_route_path?/1)
+    |> Enum.uniq()
+  end
+
+  defp api_route_paths_from_text(_text), do: []
+
+  defp normalize_api_route_path(path) when is_binary(path) do
+    path
+    |> String.split(~r/[?#]/, parts: 2)
+    |> List.first()
+    |> String.trim_trailing("/")
+  end
+
+  defp normalize_api_route_path(_path), do: ""
+
+  defp api_route_path?(path) when is_binary(path) do
+    path != "/api" and String.starts_with?(path, "/api/")
+  end
+
+  defp api_route_path?(_path), do: false
+
+  defp next_app_api_route_candidates(route_path) when is_binary(route_path) do
+    segments =
+      route_path
+      |> String.trim_leading("/")
+      |> String.split("/", trim: true)
+
+    case segments do
+      ["api" | _rest] ->
+        route_dir = Path.join(["src", "app" | segments])
+
+        Enum.map([".ts", ".tsx", ".js", ".jsx"], fn ext ->
+          Path.join(route_dir, "route#{ext}")
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp next_app_api_route_candidates(_route_path), do: []
+
+  defp review_rework_validation_metadata_paths(workspace) when is_binary(workspace) do
+    [
+      "package.json",
+      "vitest.config.ts",
+      "vitest.config.mts",
+      "vitest.config.cts",
+      "vitest.config.js",
+      "vitest.config.mjs",
+      "vitest.config.cjs"
+    ]
+    |> Enum.filter(&local_workspace_file?(workspace, &1))
+  end
+
+  defp review_rework_validation_metadata_paths(_workspace), do: []
+
   defp requirement_path_sources(requirements) when is_map(requirements) do
     [
       Map.get(requirements, "write_scope"),
@@ -638,13 +827,33 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp paths_from_review_rework_text(_text), do: []
 
   defp review_rework_local_import_paths(workspace, source_paths) when is_binary(workspace) do
-    source_paths
-    |> Enum.filter(&review_rework_code_file?/1)
-    |> Enum.flat_map(&local_import_paths_from_file(workspace, &1))
-    |> Enum.uniq()
+    source_paths = Enum.map(source_paths, &normalize_requirement_path/1)
+
+    workspace
+    |> collect_review_rework_local_import_paths(source_paths, 2, MapSet.new(source_paths))
+    |> MapSet.difference(MapSet.new(source_paths))
+    |> MapSet.to_list()
   end
 
   defp review_rework_local_import_paths(_workspace, _source_paths), do: []
+
+  defp collect_review_rework_local_import_paths(_workspace, _source_paths, 0, seen), do: seen
+
+  defp collect_review_rework_local_import_paths(workspace, source_paths, depth, seen) do
+    next_paths =
+      source_paths
+      |> Enum.filter(&review_rework_code_file?/1)
+      |> Enum.flat_map(&local_import_paths_from_file(workspace, &1))
+      |> Enum.reject(&MapSet.member?(seen, &1))
+      |> Enum.uniq()
+
+    collect_review_rework_local_import_paths(
+      workspace,
+      next_paths,
+      depth - 1,
+      Enum.into(next_paths, seen)
+    )
+  end
 
   defp review_rework_counterpart_paths(workspace, paths) when is_binary(workspace) do
     paths
@@ -655,6 +864,50 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_counterpart_paths(_workspace, _paths), do: []
+
+  defp review_rework_route_helper_paths(workspace, paths) when is_binary(workspace) do
+    paths
+    |> Enum.flat_map(&route_helper_path_candidates/1)
+    |> Enum.filter(&local_workspace_path?(workspace, &1))
+    |> Enum.map(&normalize_requirement_path/1)
+    |> Enum.uniq()
+  end
+
+  defp review_rework_route_helper_paths(_workspace, _paths), do: []
+
+  defp route_helper_path_candidates(path) when is_binary(path) do
+    path = normalize_requirement_path(path)
+    basename = Path.basename(path)
+
+    cond do
+      String.starts_with?(path, "src/app/") and basename in ["route.ts", "route.tsx"] ->
+        dir = Path.dirname(path)
+
+        [
+          Path.join(dir, "handler.ts"),
+          Path.join(dir, "handler.tsx"),
+          Path.join(dir, "handler.test.ts"),
+          Path.join(dir, "handler.test.tsx"),
+          Path.join(dir, "handler.spec.ts"),
+          Path.join(dir, "handler.spec.tsx"),
+          Path.join(dir, "route.test.ts"),
+          Path.join(dir, "route.test.tsx"),
+          Path.join(dir, "route.spec.ts"),
+          Path.join(dir, "route.spec.tsx"),
+          Path.join(dir, "view.ts"),
+          Path.join(dir, "view.tsx"),
+          Path.join(dir, "view.test.ts"),
+          Path.join(dir, "view.test.tsx"),
+          Path.join(dir, "view.spec.ts"),
+          Path.join(dir, "view.spec.tsx")
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp route_helper_path_candidates(_path), do: []
 
   defp counterpart_path_candidates(path) when is_binary(path) do
     path = normalize_requirement_path(path)
@@ -788,7 +1041,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp import_specifiers_from_content(source_dir, content) do
-    ~r/(?:from\s+|import\s*\(\s*|require\(\s*)["'](\.{1,2}\/[^"']+)["']/
+    ~r/(?:from\s+|import\s*\(\s*|require\(\s*)["']((?:\.{1,2}|@|~)\/[^"']+)["']/
     |> Regex.scan(content, capture: :all_but_first)
     |> Enum.flat_map(fn
       [specifier] -> [{source_dir, specifier}]
@@ -797,33 +1050,142 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp resolve_local_import_path(workspace, {source_dir, specifier}) do
-    base =
-      specifier
-      |> Path.expand(Path.join("/", source_dir))
-      |> String.trim_leading("/")
-
-    candidates =
-      if Path.extname(base) == "" do
-        [
-          base,
-          "#{base}.ts",
-          "#{base}.tsx",
-          "#{base}.js",
-          "#{base}.jsx",
-          "#{base}.mjs",
-          "#{base}.cjs",
-          Path.join(base, "index.ts"),
-          Path.join(base, "index.tsx"),
-          Path.join(base, "index.js"),
-          Path.join(base, "index.jsx")
-        ]
-      else
-        [base]
-      end
-
-    candidates
-    |> Enum.filter(&local_workspace_file?(workspace, &1))
+    specifier
+    |> local_import_base_candidates(workspace, source_dir)
+    |> Enum.flat_map(&import_path_candidates/1)
+    |> Enum.filter(&(local_workspace_file?(workspace, &1) or missing_local_import_candidate?(workspace, &1)))
     |> Enum.map(&normalize_requirement_path/1)
+  end
+
+  defp missing_local_import_candidate?(workspace, path) do
+    local_workspace_path?(workspace, path) and
+      review_rework_supported_file?(path) and
+      not local_workspace_file?(workspace, path)
+  end
+
+  defp local_import_base_candidates(specifier, workspace, source_dir)
+       when is_binary(specifier) and is_binary(source_dir) do
+    cond do
+      String.starts_with?(specifier, ["./", "../"]) ->
+        [
+          specifier
+          |> Path.expand(Path.join("/", source_dir))
+          |> String.trim_leading("/")
+        ]
+
+      String.starts_with?(specifier, ["@/", "~/"]) ->
+        workspace_alias_import_base_candidates(workspace, specifier)
+
+      true ->
+        []
+    end
+  end
+
+  defp local_import_base_candidates(_specifier, _workspace, _source_dir), do: []
+
+  defp workspace_alias_import_base_candidates(workspace, specifier) do
+    configured = configured_alias_import_base_candidates(workspace, specifier)
+
+    case configured do
+      [] -> fallback_alias_import_base_candidates(specifier)
+      _ -> configured
+    end
+  end
+
+  defp configured_alias_import_base_candidates(workspace, specifier) do
+    ["tsconfig.json", "jsconfig.json"]
+    |> Enum.flat_map(&alias_import_base_candidates_from_config(workspace, &1, specifier))
+    |> Enum.uniq()
+  end
+
+  defp alias_import_base_candidates_from_config(workspace, config_file, specifier) do
+    config_path = Path.join(workspace, config_file)
+
+    with true <- File.regular?(config_path),
+         {:ok, content} <- File.read(config_path),
+         {:ok, %{"compilerOptions" => compiler_options}} <- Jason.decode(content),
+         %{} = paths <- Map.get(compiler_options, "paths") do
+      base_url = Map.get(compiler_options, "baseUrl", ".")
+
+      paths
+      |> Enum.flat_map(fn
+        {alias_pattern, target_patterns} when is_binary(alias_pattern) and is_list(target_patterns) ->
+          alias_target_base_candidates(alias_pattern, target_patterns, specifier, base_url)
+
+        _ ->
+          []
+      end)
+      |> Enum.uniq()
+    else
+      _ -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp alias_target_base_candidates(alias_pattern, target_patterns, specifier, base_url) do
+    case alias_pattern_match(alias_pattern, specifier) do
+      {:ok, wildcard} ->
+        target_patterns
+        |> Enum.filter(&is_binary/1)
+        |> Enum.map(&String.replace(&1, "*", wildcard))
+        |> Enum.map(&normalize_alias_target_path(base_url, &1))
+
+      :error ->
+        []
+    end
+  end
+
+  defp alias_pattern_match(alias_pattern, specifier) do
+    case String.split(alias_pattern, "*", parts: 2) do
+      [prefix, suffix] ->
+        if String.starts_with?(specifier, prefix) and String.ends_with?(specifier, suffix) do
+          wildcard = String.replace_prefix(specifier, prefix, "")
+          wildcard = if suffix == "", do: wildcard, else: String.replace_suffix(wildcard, suffix, "")
+
+          {:ok, wildcard}
+        else
+          :error
+        end
+
+      [exact] ->
+        if exact == specifier, do: {:ok, ""}, else: :error
+    end
+  end
+
+  defp normalize_alias_target_path(base_url, target_path) do
+    [base_url, target_path]
+    |> Path.join()
+    |> Path.expand("/")
+    |> String.trim_leading("/")
+  end
+
+  defp fallback_alias_import_base_candidates(specifier) do
+    path = String.replace(specifier, ~r/^[@~]\//, "")
+
+    [path, Path.join("src", path)]
+    |> Enum.map(&normalize_alias_target_path(".", &1))
+    |> Enum.uniq()
+  end
+
+  defp import_path_candidates(base) do
+    if Path.extname(base) == "" do
+      [
+        base,
+        "#{base}.ts",
+        "#{base}.tsx",
+        "#{base}.js",
+        "#{base}.jsx",
+        "#{base}.mjs",
+        "#{base}.cjs",
+        Path.join(base, "index.ts"),
+        Path.join(base, "index.tsx"),
+        Path.join(base, "index.js"),
+        Path.join(base, "index.jsx")
+      ]
+    else
+      [base]
+    end
   end
 
   defp local_workspace_file?(workspace, path) do
@@ -831,6 +1193,13 @@ defmodule SymphonyElixir.Codex.AppServer do
     expanded_path = Path.expand(path, expanded_workspace)
 
     String.starts_with?(expanded_path, expanded_workspace <> "/") and File.regular?(expanded_path)
+  end
+
+  defp local_workspace_path?(workspace, path) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_path = Path.expand(path, expanded_workspace)
+
+    String.starts_with?(expanded_path, expanded_workspace <> "/")
   end
 
   defp normalize_requirement_path(path) when is_binary(path) do
@@ -1186,7 +1555,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          fresh_checkpoint_present_at_turn_start: false
        })
        when is_binary(workspace) do
-    technical_miu_trace_event?(workspace)
+    fresh_implementation_checkpoint_ready?(workspace)
   end
 
   defp fresh_checkpoint_stop_reached?(_command_guard), do: false
@@ -1289,10 +1658,21 @@ defmodule SymphonyElixir.Codex.AppServer do
         :ok
 
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
-        if gh_api_pattern?(match) and handoff_gh_api_allowed?(command_for_patterns, workspace) do
-          :ok
-        else
-          {:error, command, match}
+        cond do
+          gh_api_pattern?(match) and handoff_gh_api_allowed?(command_for_patterns, workspace) ->
+            :ok
+
+          grep_pattern?(match) and scoped_conflict_marker_scan_allowed?(command_for_patterns, workspace) ->
+            :ok
+
+          grep_pattern?(match) and scoped_file_grep_allowed?(command_for_patterns, workspace) ->
+            :ok
+
+          review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
+            :ok
+
+          true ->
+            {:error, command, match}
         end
 
       true ->
@@ -1317,6 +1697,179 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp scoped_conflict_marker_scan_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
+         true <- conflict_marker_grep_command?(command),
+         {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      allowed_paths =
+        preflight
+        |> review_rework_allowed_read_paths(workspace)
+        |> MapSet.new()
+
+      command_paths =
+        command
+        |> paths_from_review_rework_text()
+        |> Enum.uniq()
+
+      command_paths != [] and
+        Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scoped_conflict_marker_scan_allowed?(_command, _workspace), do: false
+
+  defp scoped_file_grep_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
+         true <- file_scoped_grep_command?(command),
+         {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      allowed_paths =
+        preflight
+        |> review_rework_allowed_read_paths(workspace)
+        |> MapSet.new()
+
+      command_paths =
+        command
+        |> paths_from_review_rework_text()
+        |> Enum.uniq()
+
+      command_paths != [] and
+        Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scoped_file_grep_allowed?(_command, _workspace), do: false
+
+  defp review_rework_missing_referenced_read_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    with true <- dispatch_preflight_mode(workspace) == "review_rework",
+         true <- simple_file_read_command?(command),
+         {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      allowed_paths =
+        preflight
+        |> review_rework_allowed_read_paths(workspace)
+        |> MapSet.new()
+
+      reference_text = review_rework_reference_text(preflight, workspace)
+
+      command_paths =
+        command
+        |> paths_from_review_rework_text()
+        |> Enum.uniq()
+
+      command_paths != [] and
+        Enum.all?(command_paths, fn path ->
+          MapSet.member?(allowed_paths, path) or
+            missing_referenced_workspace_path?(workspace, path, reference_text)
+        end)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_missing_referenced_read_allowed?(_command, _workspace), do: false
+
+  defp simple_file_read_command?(command) when is_binary(command) do
+    read_command =
+      Regex.match?(~r/(^|\s|["'])sed\s+-n\s+\S+\s+/, command) or
+        Regex.match?(~r/(^|\s|["'])(cat|head|tail|nl)\s+/, command)
+
+    read_command and
+      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+  end
+
+  defp simple_file_read_command?(_command), do: false
+
+  defp missing_referenced_workspace_path?(workspace, path, reference_text)
+       when is_binary(workspace) and is_binary(path) and is_binary(reference_text) do
+    local_workspace_path?(workspace, path) and
+      review_rework_supported_file?(path) and
+      not local_workspace_file?(workspace, path) and
+      path_referenced_by_review_text?(path, reference_text)
+  end
+
+  defp missing_referenced_workspace_path?(_workspace, _path, _reference_text), do: false
+
+  defp path_referenced_by_review_text?(path, reference_text) do
+    path
+    |> semantic_path_tokens()
+    |> Enum.any?(&String.contains?(reference_text, &1))
+  end
+
+  defp semantic_path_tokens(path) when is_binary(path) do
+    path
+    |> Path.rootname()
+    |> String.downcase()
+    |> String.split(~r{[./\-_]+}, trim: true)
+    |> Enum.reject(&(&1 in ["src", "app", "api", "lib", "test", "tests", "route", "handler", "index"]))
+    |> Enum.filter(&(String.length(&1) >= 4))
+    |> Enum.uniq()
+  end
+
+  defp semantic_path_tokens(_path), do: []
+
+  defp review_rework_reference_text(preflight, workspace) do
+    [
+      inspect(preflight),
+      review_rework_issue_brief_content(preflight, workspace)
+    ]
+    |> Enum.join("\n")
+    |> String.downcase()
+  end
+
+  defp review_rework_issue_brief_content(
+         %{"requirements" => %{"issue_brief" => %{"path" => path}}},
+         workspace
+       )
+       when is_binary(path) and is_binary(workspace) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_path = Path.expand(path, expanded_workspace)
+
+    with true <- String.starts_with?(expanded_path, expanded_workspace <> "/"),
+         true <- File.regular?(expanded_path),
+         {:ok, content} <- File.read(expanded_path) do
+      content
+    else
+      _ -> ""
+    end
+  rescue
+    _error -> ""
+  end
+
+  defp review_rework_issue_brief_content(_preflight, _workspace), do: ""
+
+  defp conflict_marker_grep_command?(command) when is_binary(command) do
+    String.contains?(command, "grep") and
+      String.contains?(command, "-n") and
+      String.contains?(command, "<<<<<<<") and
+      String.contains?(command, "=======") and
+      String.contains?(command, ">>>>>>>")
+  end
+
+  defp conflict_marker_grep_command?(_command), do: false
+
+  defp file_scoped_grep_command?(command) when is_binary(command) do
+    Regex.match?(~r/(^|\s|["'])grep\s+/, command) and
+      String.contains?(command, "-n") and
+      not Regex.match?(~r/(^|\s)-[^-\s]*[Rr][^-\s]*(\s|$)/, command) and
+      not Regex.match?(~r/(^|\s)--recursive(\s|=|$)/, command) and
+      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+  end
+
+  defp file_scoped_grep_command?(_command), do: false
+
+  defp grep_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "grep")
+  defp grep_pattern?(_pattern), do: false
 
   defp command_for_forbidden_patterns(command) when is_binary(command) do
     if delivery_event_append_command?(command) do
@@ -1403,14 +1956,30 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> File.stream!()
     |> Enum.any?(fn line ->
       case Jason.decode(String.trim(line)) do
-        {:ok, %{"event" => "tool.finished", "status" => "passed"}} -> true
-        {:ok, %{"event" => "gate.post-miu", "status" => "passed"}} -> true
-        _ -> false
+        {:ok, %{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}} ->
+          meaningful_git_progress?(workspace)
+
+        {:ok, %{"event" => "tool.finished", "status" => "passed"}} ->
+          true
+
+        {:ok, %{"event" => "gate.post-miu", "status" => "passed"}} ->
+          true
+
+        _ ->
+          false
       end
     end)
   rescue
     _error -> false
   end
+
+  defp fresh_implementation_checkpoint_ready?(workspace) when is_binary(workspace) do
+    technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
+  rescue
+    _error -> false
+  end
+
+  defp fresh_implementation_checkpoint_ready?(_workspace), do: false
 
   defp technical_miu_trace_event?(workspace) when is_binary(workspace) do
     workspace
@@ -1472,6 +2041,78 @@ defmodule SymphonyElixir.Codex.AppServer do
       _ -> :missing
     end
   end
+
+  defp meaningful_git_progress?(workspace) when is_binary(workspace) do
+    meaningful_git_dirty_paths(workspace) != [] or git_ahead_of_base?(workspace)
+  rescue
+    _error -> false
+  end
+
+  defp meaningful_git_progress?(_workspace), do: false
+
+  defp meaningful_git_dirty_paths(workspace) do
+    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
+      {status, 0} ->
+        status
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&porcelain_status_paths/1)
+        |> Enum.reject(&generated_runtime_path?/1)
+
+      {_error, _exit_code} ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp git_ahead_of_base?(workspace) do
+    ["origin/main", "main"]
+    |> Enum.filter(&git_ref_exists?(workspace, &1))
+    |> case do
+      [] ->
+        false
+
+      base_refs ->
+        args = ["log", "-1", "--format=%H", "HEAD"] ++ Enum.flat_map(base_refs, &[~s(--not), &1])
+
+        case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+          {output, 0} -> String.trim(output) != ""
+          {_error, _exit_code} -> false
+        end
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_ref_exists?(workspace, ref) do
+    case System.cmd("git", ["rev-parse", "--verify", "--quiet", ref], cd: workspace, stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _exit_code} -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp generated_runtime_path?(path) when is_binary(path) do
+    String.starts_with?(path, [".orocsy/", ".codex/"])
+  end
+
+  defp generated_runtime_path?(_path), do: false
+
+  defp porcelain_status_paths(line) when byte_size(line) >= 4 do
+    path =
+      line
+      |> String.slice(3..-1//1)
+      |> String.replace_prefix(~s("), "")
+      |> String.replace_suffix(~s("), "")
+
+    case path do
+      "" -> []
+      path -> [path |> String.split(" -> ") |> List.last()]
+    end
+  end
+
+  defp porcelain_status_paths(_line), do: []
 
   defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->

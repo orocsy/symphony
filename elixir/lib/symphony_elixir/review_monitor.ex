@@ -138,6 +138,8 @@ defmodule SymphonyElixir.ReviewMonitor do
          pr_url: nil,
          head_ref: nil,
          head_sha: nil,
+         mergeable: nil,
+         mergeable_state: nil,
          feedback: [],
          feedback_source: :none
        }}
@@ -175,6 +177,7 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp inspect_issue_branch(repo, branch) do
     with {:ok, pr} <- fetch_open_pull_request(repo, branch),
+         {:ok, pr} <- hydrate_pull_request_detail(repo, pr),
          {:ok, comments} <- fetch_pull_comments(repo, pr),
          {:ok, reviews} <- fetch_pull_reviews(repo, pr),
          {:ok, current_feedback, feedback_source} <- fetch_current_feedback(repo, pr, comments, reviews) do
@@ -186,6 +189,8 @@ defmodule SymphonyElixir.ReviewMonitor do
          pr_url: pr_url(pr),
          head_ref: head_ref(pr),
          head_sha: head_sha(pr),
+         mergeable: pr_mergeable(pr),
+         mergeable_state: pr_mergeable_state(pr),
          feedback: current_feedback,
          feedback_source: feedback_source
        }}
@@ -200,6 +205,8 @@ defmodule SymphonyElixir.ReviewMonitor do
       pr_url: nil,
       head_ref: nil,
       head_sha: nil,
+      mergeable: nil,
+      mergeable_state: nil,
       feedback: [],
       feedback_source: :no_pr
     }
@@ -280,7 +287,7 @@ defmodule SymphonyElixir.ReviewMonitor do
   def codex_review_request_pending?(repo, pr, feedback)
       when is_binary(repo) and is_map(pr) and is_list(feedback) do
     with {:ok, comments} <- fetch_issue_comments(repo, pr) do
-      {:ok, review_request_pending_after_feedback?(comments, feedback)}
+      {:ok, review_request_pending_after_feedback?(comments, feedback, pr)}
     end
   end
 
@@ -290,11 +297,19 @@ defmodule SymphonyElixir.ReviewMonitor do
           {:ok, boolean()} | {:error, term()}
   def clean_codex_review_after_latest_request?(repo, pr) when is_binary(repo) and is_map(pr) do
     with {:ok, comments} <- fetch_issue_comments(repo, pr) do
-      {:ok, not is_nil(latest_clean_codex_review_after_latest_request_at(comments))}
+      {:ok, not is_nil(latest_clean_codex_review_after_latest_request_at(comments, pr))}
     end
   end
 
   def clean_codex_review_after_latest_request?(_repo, _pr), do: {:ok, false}
+
+  @spec request_codex_review(String.t() | nil, map() | nil, String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def request_codex_review(repo, pr, body) when is_binary(repo) and is_map(pr) and is_binary(body) do
+    create_issue_comment(repo, pr, body)
+  end
+
+  def request_codex_review(_repo, _pr, _body), do: {:error, :invalid_codex_review_request}
 
   @spec review_feedback_after_latest_codex_request?(String.t() | nil, map() | nil, list()) ::
           {:ok, boolean()} | {:error, term()}
@@ -358,6 +373,61 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
+  defp hydrate_pull_request_detail(_repo, nil), do: {:ok, nil}
+
+  defp hydrate_pull_request_detail(repo, pr) when is_map(pr) do
+    case pr_number(pr) do
+      nil ->
+        {:ok, pr}
+
+      number ->
+        case github_api("repos/#{repo}/pulls/#{number}") do
+          {:ok, detail} when is_map(detail) ->
+            {:ok, hydrate_pull_request_head_commit(repo, Map.merge(pr, detail))}
+
+          _ ->
+            {:ok, pr}
+        end
+    end
+  end
+
+  defp hydrate_pull_request_detail(_repo, pr), do: {:ok, pr}
+
+  defp hydrate_pull_request_head_commit(repo, pr) when is_binary(repo) and is_map(pr) do
+    case head_sha(pr) do
+      sha when is_binary(sha) and sha != "" ->
+        case github_api("repos/#{repo}/commits/#{sha}") do
+          {:ok, commit} when is_map(commit) ->
+            case commit_payload_committed_at(commit) do
+              committed_at when is_binary(committed_at) and committed_at != "" ->
+                Map.put(pr, "head_committed_at", committed_at)
+
+              _ ->
+                pr
+            end
+
+          _ ->
+            pr
+        end
+
+      _ ->
+        pr
+    end
+  rescue
+    _error -> pr
+  end
+
+  defp hydrate_pull_request_head_commit(_repo, pr), do: pr
+
+  defp commit_payload_committed_at(commit) when is_map(commit) do
+    get_in(commit, ["commit", "committer", "date"]) ||
+      get_in(commit, ["commit", "author", "date"]) ||
+      commit["committed_at"] ||
+      commit["created_at"]
+  end
+
+  defp commit_payload_committed_at(_commit), do: nil
+
   defp fetch_pull_comments(_repo, nil), do: {:ok, []}
 
   defp fetch_pull_comments(repo, pr) do
@@ -418,7 +488,7 @@ defmodule SymphonyElixir.ReviewMonitor do
     if review_state_issue?(issue, monitor) do
       case fetch_issue_comments(repo, pr) do
         {:ok, comments} ->
-          if codex_review_handoff_present?(comments) do
+          if codex_review_handoff_present?(comments, pr) do
             :ok
           else
             request_missing_codex_review(issue, monitor, repo, pr)
@@ -447,12 +517,19 @@ defmodule SymphonyElixir.ReviewMonitor do
     |> String.downcase()
   end
 
-  defp codex_review_handoff_present?(comments) when is_list(comments) do
-    not is_nil(latest_codex_review_request_at(comments)) or
-      not is_nil(latest_clean_codex_review_after_latest_request_at(comments))
+  defp codex_review_handoff_present?(comments, pr) when is_list(comments) do
+    codex_review_request_after_head?(comments, pr) or
+      not is_nil(latest_clean_codex_review_after_latest_request_at(comments, pr))
   end
 
-  defp codex_review_handoff_present?(_comments), do: false
+  defp codex_review_handoff_present?(_comments, _pr), do: false
+
+  defp codex_review_request_after_head?(comments, pr) do
+    case latest_codex_review_request_at(comments) do
+      %DateTime{} = request_at -> review_request_after_head?(request_at, pr)
+      _ -> false
+    end
+  end
 
   defp request_missing_codex_review(%Issue{} = issue, monitor, repo, pr) do
     body = missing_codex_review_request_body(issue, pr)
@@ -495,8 +572,11 @@ defmodule SymphonyElixir.ReviewMonitor do
     if review_threads_enabled?() do
       case fetch_pull_review_threads(repo, pr) do
         {:ok, threads} ->
+          feedback =
+            active_review_thread_feedback(threads) ++ current_head_reviews(pr, reviews)
+
           repo
-          |> feedback_not_cleared_by_codex_clean_review(pr, active_review_thread_feedback(threads), :review_threads)
+          |> feedback_not_cleared_by_codex_clean_review(pr, feedback, :review_threads)
 
         {:error, reason} ->
           Logger.debug("Review monitor falling back to REST review feedback for #{repo}##{pr_number(pr)}: #{inspect(reason)}")
@@ -579,7 +659,7 @@ defmodule SymphonyElixir.ReviewMonitor do
       end
 
     feedback =
-      case latest_clean_codex_review_after_latest_request_at(comments) do
+      case latest_clean_codex_review_after_latest_request_at(comments, pr) do
         %DateTime{} = clean_at ->
           Enum.filter(feedback, fn item ->
             case review_feedback_created_at(item) do
@@ -597,8 +677,9 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp feedback_not_cleared_by_codex_clean_review(_repo, _pr, feedback, source), do: {:ok, feedback, source}
 
-  defp review_request_pending_after_feedback?(comments, feedback) do
+  defp review_request_pending_after_feedback?(comments, feedback, pr) do
     with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
+         true <- review_request_after_head?(request_at, pr),
          feedback_at <- latest_review_feedback_at(feedback) do
       case feedback_at do
         %DateTime{} = feedback_at ->
@@ -611,6 +692,15 @@ defmodule SymphonyElixir.ReviewMonitor do
       _ -> false
     end
   end
+
+  defp review_request_after_head?(%DateTime{} = request_at, pr) when is_map(pr) do
+    case head_committed_at(pr) do
+      %DateTime{} = head_at -> DateTime.compare(request_at, head_at) == :gt
+      _ -> true
+    end
+  end
+
+  defp review_request_after_head?(_request_at, _pr), do: true
 
   defp review_feedback_after_latest_request?(comments, feedback) do
     with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
@@ -656,6 +746,25 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp latest_clean_codex_review_after_latest_request_at(_comments), do: nil
+
+  defp latest_clean_codex_review_after_latest_request_at(comments, pr) when is_list(comments) do
+    with %DateTime{} = clean_at <- latest_clean_codex_review_after_latest_request_at(comments),
+         true <- review_request_after_head?(clean_at, pr) do
+      clean_at
+    else
+      _ -> nil
+    end
+  end
+
+  defp latest_clean_codex_review_after_latest_request_at(_comments, _pr), do: nil
+
+  defp head_committed_at(%{} = pr) do
+    pr
+    |> Map.get("head_committed_at", Map.get(pr, :head_committed_at))
+    |> datetime_from_iso8601()
+  end
+
+  defp head_committed_at(_pr), do: nil
 
   defp clean_codex_review_comment?(%{"body" => body}) when is_binary(body) do
     body
@@ -727,10 +836,50 @@ defmodule SymphonyElixir.ReviewMonitor do
 
     reviews
     |> Enum.filter(&(is_current_head_review?(&1, head_sha) and feedback_review?(&1)))
-    |> Enum.map(&%{type: :review, payload: &1})
+    |> Enum.map(&%{type: :review, payload: review_feedback_payload(&1, head_sha)})
   end
 
   defp current_head_reviews(_pr, _reviews), do: []
+
+  defp review_feedback_payload(review, head_sha) when is_map(review) do
+    review
+    |> Map.merge(review_body_location(review["body"], head_sha))
+  end
+
+  defp review_feedback_payload(review, _head_sha), do: review
+
+  defp review_body_location(body, head_sha) when is_binary(body) do
+    case Regex.run(github_blob_line_regex(head_sha), body, capture: :all_but_first) do
+      [path, line] ->
+        %{
+          "path" => path,
+          "line" => String.to_integer(line),
+          "html_url" => review_body_first_blob_url(body, head_sha)
+        }
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp review_body_location(_body, _head_sha), do: %{}
+
+  defp github_blob_line_regex(head_sha) when is_binary(head_sha) and head_sha != "" do
+    ~r{https://github\.com/[^/\s]+/[^/\s]+/blob/#{Regex.escape(head_sha)}/([^#\s]+)#L(\d+)(?:-L\d+)?}
+  end
+
+  defp github_blob_line_regex(_head_sha) do
+    ~r{https://github\.com/[^/\s]+/[^/\s]+/blob/[^/\s]+/([^#\s]+)#L(\d+)(?:-L\d+)?}
+  end
+
+  defp review_body_first_blob_url(body, head_sha) when is_binary(body) do
+    case Regex.run(~r{https://github\.com/[^)\s]+/blob/#{Regex.escape(to_string(head_sha))}/[^)\s]+#L\d+(?:-L\d+)?}, body) do
+      [url] -> url
+      _ -> nil
+    end
+  end
+
+  defp review_body_first_blob_url(_body, _head_sha), do: nil
 
   defp is_current_head_comment?(comment, head_sha) when is_map(comment) and is_binary(head_sha) do
     comment["commit_id"] == head_sha
@@ -759,10 +908,18 @@ defmodule SymphonyElixir.ReviewMonitor do
       |> Map.get("state", "")
       |> String.upcase()
 
-    MapSet.member?(@review_feedback_states, state)
+    MapSet.member?(@review_feedback_states, state) or
+      (state == "COMMENTED" and body_level_review_feedback?(review))
   end
 
   defp feedback_review?(_review), do: false
+
+  defp body_level_review_feedback?(%{"body" => body, "commit_id" => head_sha})
+       when is_binary(body) and is_binary(head_sha) do
+    Regex.match?(github_blob_line_regex(head_sha), body)
+  end
+
+  defp body_level_review_feedback?(_review), do: false
 
   defp build_feedback(repo, pr, feedback) do
     %{
@@ -1024,6 +1181,20 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp head_sha(pr) when is_map(pr), do: get_in(pr, ["head", "sha"])
   defp head_sha(_pr), do: nil
+
+  defp pr_mergeable(%{"mergeable" => mergeable}) when is_boolean(mergeable), do: mergeable
+  defp pr_mergeable(%{mergeable: mergeable}) when is_boolean(mergeable), do: mergeable
+  defp pr_mergeable(_pr), do: nil
+
+  defp pr_mergeable_state(pr) when is_map(pr) do
+    (pr["mergeable_state"] || pr[:mergeable_state] || pr["mergeStateStatus"] || pr[:mergeStateStatus])
+    |> case do
+      state when is_binary(state) -> String.trim(state)
+      _ -> nil
+    end
+  end
+
+  defp pr_mergeable_state(_pr), do: nil
 
   defp issue_context(%Issue{identifier: identifier}) when is_binary(identifier), do: identifier
   defp issue_context(%Issue{id: id}) when is_binary(id), do: id

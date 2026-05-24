@@ -15,12 +15,13 @@ defmodule SymphonyElixir.DispatchPreflight do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements),
-         :ok <- maybe_switch_to_review_head(workspace, inspection) do
+         mode <- preflight_mode(requirements, inspection),
+         :ok <- maybe_switch_to_review_head(workspace, inspection, mode) do
       preflight =
-        if review_feedback?(inspection) do
-          review_rework_preflight(workspace, issue, requirements, inspection)
-        else
-          fresh_implementation_preflight(workspace, issue, requirements, inspection)
+        case mode do
+          "review_rework" -> review_rework_preflight(workspace, issue, requirements, inspection)
+          "integration_check" -> integration_check_preflight(workspace, issue, requirements, inspection)
+          _ -> fresh_implementation_preflight(workspace, issue, requirements, inspection)
         end
 
       :ok = write_preflight(workspace, preflight)
@@ -61,6 +62,9 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       {:ok, %{"mode" => "fresh_implementation"} = preflight} ->
         fresh_prompt_context(preflight)
+
+      {:ok, %{"mode" => "integration_check"} = preflight} ->
+        integration_prompt_context(preflight)
 
       _ ->
         ""
@@ -159,8 +163,8 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp issue_brief_candidate_paths(_workspace, _requirements), do: []
 
-  defp maybe_switch_to_review_head(workspace, %{feedback: feedback, head_ref: branch})
-       when is_binary(workspace) and is_list(feedback) and feedback != [] and is_binary(branch) and branch != "" do
+  defp maybe_switch_to_review_head(workspace, %{head_ref: branch}, mode)
+       when is_binary(workspace) and mode in ["review_rework", "integration_check"] and is_binary(branch) and branch != "" do
     if clean_worktree?(workspace) and safe_branch_name?(branch) do
       _ = git_command(workspace, ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"])
 
@@ -175,7 +179,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     :ok
   end
 
-  defp maybe_switch_to_review_head(_workspace, _inspection), do: :ok
+  defp maybe_switch_to_review_head(_workspace, _inspection, _mode), do: :ok
 
   defp clean_worktree?(workspace) do
     case git_command(workspace, ["status", "--porcelain"]) do
@@ -220,6 +224,75 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp review_feedback?(%{feedback: feedback}) when is_list(feedback), do: feedback != []
   defp review_feedback?(_inspection), do: false
 
+  defp preflight_mode(requirements, inspection) do
+    cond do
+      review_feedback?(inspection) ->
+        "review_rework"
+
+      integration_check_mergeability?(requirements, inspection) ->
+        "integration_check"
+
+      integration_check_review?(requirements, inspection) ->
+        "integration_check"
+
+      true ->
+        "fresh_implementation"
+    end
+  end
+
+  defp integration_check_mergeability?(requirements, inspection) do
+    integration_check_requirements?(requirements) and mergeability_conflict?(inspection)
+  end
+
+  defp integration_check_review?(requirements, inspection) do
+    integration_check_requirements?(requirements) and review_pr_present?(inspection)
+  end
+
+  defp integration_check_requirements?(requirements) when is_map(requirements) do
+    ticket_type = requirements["ticket_type"] |> to_string() |> String.downcase()
+    title = requirements["title"] |> to_string() |> String.downcase()
+
+    write_scope =
+      requirements
+      |> Map.get("write_scope", [])
+      |> Enum.map(&to_string/1)
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    ticket_type == "integration-check" or
+      String.contains?(title, "integration check") or
+      String.contains?(write_scope, ["merge conflict", "final pr handoff"])
+  end
+
+  defp integration_check_requirements?(_requirements), do: false
+
+  defp mergeability_conflict?(inspection) when is_map(inspection) do
+    state =
+      inspection
+      |> map_value([:mergeable_state, "mergeable_state"])
+      |> to_string()
+      |> String.downcase()
+
+    mergeable = map_value(inspection, [:mergeable, "mergeable"])
+
+    state in ["dirty", "conflicting", "conflict", "merge_conflict"] or
+      (mergeable == false and state in ["dirty", "conflicting"])
+  end
+
+  defp mergeability_conflict?(_inspection), do: false
+
+  defp review_pr_present?(inspection) when is_map(inspection) do
+    Enum.any?([:pr, :pr_number, :pr_url, :head_ref, :head_sha], fn key ->
+      present_review_value?(Map.get(inspection, key))
+    end)
+  end
+
+  defp review_pr_present?(_inspection), do: false
+
+  defp present_review_value?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_review_value?(nil), do: false
+  defp present_review_value?(value), do: value not in [false, [], %{}]
+
   defp review_rework_preflight(workspace, issue, requirements, inspection) do
     feedback = Map.get(inspection, :feedback, [])
 
@@ -247,6 +320,40 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
+  defp integration_check_preflight(workspace, issue, requirements, inspection) do
+    %{
+      "schema_version" => 1,
+      "mode" => "integration_check",
+      "created_at" => now_iso8601(),
+      "issue" => issue_value(issue, :identifier),
+      "state" => issue_value(issue, :state),
+      "branch" => Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name),
+      "checkpoint_event" => "technical-miu-trace",
+      "first_task" => integration_check_first_task(inspection),
+      "requirements" => compact_requirements(requirements),
+      "toolchain" => toolchain_snapshot(workspace),
+      "review" => %{
+        "pr_number" => Map.get(inspection, :pr_number),
+        "pr_url" => Map.get(inspection, :pr_url),
+        "head_ref" => Map.get(inspection, :head_ref),
+        "head_sha" => Map.get(inspection, :head_sha),
+        "mergeable" => Map.get(inspection, :mergeable),
+        "mergeable_state" => Map.get(inspection, :mergeable_state),
+        "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
+        "feedback_count" => 0,
+        "feedback" => []
+      }
+    }
+  end
+
+  defp integration_check_first_task(inspection) do
+    if mergeability_conflict?(inspection) do
+      "Resolve only the existing PR mergeability conflict on the integration branch, run the declared validation, push the same PR branch, and request a fresh Codex review. Do not merge the PR automatically."
+    else
+      "Validate the current pushed integration handoff, avoid product edits unless validation or current-head review reveals a scoped blocker, request or confirm a clean Codex review, and leave the PR unmerged."
+    end
+  end
+
   defp fresh_implementation_preflight(workspace, issue, requirements, inspection) do
     %{
       "schema_version" => 1,
@@ -256,13 +363,16 @@ defmodule SymphonyElixir.DispatchPreflight do
       "state" => issue_value(issue, :state),
       "branch" => requirements["branch"] || issue_value(issue, :branch_name),
       "checkpoint_event" => "technical-miu-trace",
-      "first_task" => "Start with the first MIU and the first declared write-scope path only; make a scoped code/test change or record an explicit blocker before broad project scanning.",
+      "first_task" =>
+        "Start with the first MIU and the first declared write-scope path only; make a scoped code/test change and then record technical-miu-trace, or record an explicit blocker before broad project scanning. Trace-only/read-only MIU notes are not durable progress.",
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
       "review" => %{
         "pr_number" => Map.get(inspection, :pr_number),
         "pr_url" => Map.get(inspection, :pr_url),
         "head_sha" => Map.get(inspection, :head_sha),
+        "mergeable" => Map.get(inspection, :mergeable),
+        "mergeable_state" => Map.get(inspection, :mergeable_state),
         "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
         "feedback_count" => 0,
         "feedback" => []
@@ -357,7 +467,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Preflight file: `#{@preflight_path}`
     - Branch: `#{preflight["branch"] || "unknown"}`
     - Base/PR target branch: `#{base_branch}`
-    - Worker-required checkpoint: `#{preflight["checkpoint_event"]}` after writing a real Technical MIU trace or scoped blocker.
+    - Worker-required checkpoint: `#{preflight["checkpoint_event"]}` after a scoped code/test change, or a scoped blocker if the edit target is missing.
     - Runtime preflight is not worker progress and is not proof that implementation, validation, push, or handoff is complete.
     - First task: #{preflight["first_task"]}
     - First MIU: #{first_item(requirements["mius"])}
@@ -369,7 +479,42 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
     - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
 
-    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. In a fresh implementation first turn, stop after the scoped checkpoint and `technical-miu-trace`; the next handoff-recovery turn handles focused validation, commit, push, PR review request, and Linear handoff. Do not create/update a PR, request review, or update Linear handoff from the first implementation turn.
+    Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. In a fresh implementation first turn, stop after the scoped code/test checkpoint and `technical-miu-trace`, or after recording a blocker; `technical-miu-trace` alone is not durable progress. The next handoff-recovery turn handles focused validation, commit, push, PR review request, and Linear handoff. Do not create/update a PR, request review, or update Linear handoff from the first implementation turn.
+    """
+    |> String.trim()
+  end
+
+  defp integration_prompt_context(preflight) do
+    requirements = preflight["requirements"] || %{}
+    review = preflight["review"] || %{}
+    base_branch = requirements["base_branch"] || "main"
+
+    """
+    Runtime dispatch preflight:
+
+    - Mode: integration check
+    - Preflight file: `#{@preflight_path}`
+    - Branch: `#{preflight["branch"] || "unknown"}`
+    - Base/PR target branch: `#{base_branch}`
+    - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
+    - PR mergeability: `#{review["mergeable_state"] || review["mergeable"] || "unknown"}`
+    - Reviewed head: `#{short_sha(review["head_sha"])}`
+    - Worker-required checkpoint: `#{preflight["checkpoint_event"]}` after listing the exact merge-conflict/code paths being changed, or the validation-only handoff checkpoint if the PR is already clean.
+    - Runtime preflight is not worker progress and is not proof that mergeability, validation, push, or handoff is complete.
+    - First task: #{preflight["first_task"]}
+    - Write-scope/conflict paths: #{format_inline_items(requirements["write_scope"] || [])}
+    - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
+    - Issue brief: #{format_issue_brief(requirements["issue_brief"])}
+    - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
+    - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
+
+    Integration check limits:
+    - Stay on the existing PR head branch and push back to that same branch.
+    - Use `git fetch origin #{base_branch}` and a bounded merge/rebase conflict check only to expose current merge conflicts.
+    - Resolve only the listed conflict/write-scope paths and directly required helper/test paths.
+    - If the PR is already mergeable/clean and no current-head review feedback is listed, validate and request/confirm review without product edits; only change code after a concrete validation or review blocker.
+    - Do not create a new branch or PR, do not broaden into unrelated feature work, and never merge the PR automatically.
+    - After the conflict fix, run focused validation, then commit, push, and request a fresh Codex review.
     """
     |> String.trim()
   end
@@ -707,6 +852,14 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp issue_value(_issue, _key), do: ""
+
+  defp map_value(%{} = map, keys) when is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      Map.get(map, key)
+    end)
+  end
+
+  defp map_value(_map, _keys), do: nil
 
   defp short_sha(sha) when is_binary(sha) and byte_size(sha) >= 10, do: binary_part(sha, 0, 10)
   defp short_sha(sha) when is_binary(sha) and sha != "", do: sha

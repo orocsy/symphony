@@ -188,12 +188,12 @@ defmodule SymphonyElixir.PromptBuilder do
     - If `.codex/agentic/issue-briefs/#{safe_issue_identifier(issue_value(issue, :identifier))}.md` exists, read that focused brief before broad rediscovery.
     - First substantive progress guard: before optional skills, broad docs, recursive listings, or scanning more than eight implementation files, produce one real checkpoint:
       - Rework/existing PR: inspect only the current PR review threads for this branch, classify current-head feedback, then append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. After that, edit only the referenced in-scope files or record a blocker; do not rediscover the whole project.
-      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from `origin/main` if needed, read the issue brief plus only the first target file/test, then make a scoped code/test edit or write the Technical MIU trace with exact files/tests. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` before any wider context read.
+      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from `origin/main` if needed, read the issue brief plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
       - Blocked issue: create an Orocsy inbox correction with the exact blocker and stop.
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
     - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
     - If any required command fails because a binary is missing, PATH differs, credentials are absent, network/provider access fails, or approval/input is required, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
-    - Implement one MIU at a time. In a fresh implementation first turn, stop after one scoped code/test/doc edit or blocker plus `technical-miu-trace`; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff.
+    - Implement one MIU at a time. In a fresh implementation first turn, stop after one scoped code/test/doc edit plus `technical-miu-trace`, or after recording a blocker; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff.
     - For Rework or an existing PR, fetch only current PR review threads/comments for this branch, classify findings, fix accepted in-scope current-code findings, validate, push, request review again, and never move Linear to a terminal state until a fresh review scan is clean.
     - Never merge automatically from inside the worker.
     """
@@ -225,6 +225,15 @@ defmodule SymphonyElixir.PromptBuilder do
         |> Enum.reject(&(&1 == ""))
         |> Enum.join("\n\n")
 
+      {:ok, %{"mode" => "integration_check"}} ->
+        [
+          DispatchPreflight.prompt_context(workspace),
+          integration_check_micro_prompt(),
+          prompt
+        ]
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.join("\n\n")
+
       _ ->
         case DispatchPreflight.prompt_context(workspace) do
           "" -> prompt
@@ -248,6 +257,21 @@ defmodule SymphonyElixir.PromptBuilder do
     - After a code/test edit, run focused validation, then commit, push the same branch, and request fresh Codex review; the runtime captures validation output, so do not edit `.orocsy/delivery/state/dispatch-preflight.json`.
     - Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review; Symphony's review monitor owns review/rework transitions after the new review result exists.
     - If the listed feedback is already resolved or outdated at the current head, record that classification, update the handoff state, and stop without editing.
+    """
+    |> String.trim()
+  end
+
+  defp integration_check_micro_prompt do
+    """
+    Integration check execution contract:
+
+    - Treat PR mergeability conflict resolution as the first task; it supersedes pushed-handoff waiting.
+    - Start from `git status --short --branch`, then fetch the PR target branch and expose conflicts with a bounded merge/rebase check.
+    - Before broad reads, append a `technical-miu-trace` event naming only the conflicted/write-scope paths, validation commands, and same-branch push target.
+    - Resolve only the in-scope conflict files and directly required helper/test files from the issue brief.
+    - Run the focused validation named by the preflight/brief, then commit, push to the existing PR branch, and request `@codex review`.
+    - Do not create a new branch, open a duplicate PR, update unrelated product code, move Linear to a terminal state, or merge the PR automatically.
+    - If GitHub/Linear/network/validation blocks completion, record an Orocsy blocker with the exact command and next action.
     """
     |> String.trim()
   end
@@ -414,7 +438,9 @@ defmodule SymphonyElixir.PromptBuilder do
     - This is retry attempt ##{attempt} because the issue is still active after an interrupted or failed agent turn.
     - Resume from the current workspace state; inspect `git status --short --branch`, recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
     - If the workspace is dirty or ahead and recent `tool.finished`, `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope` events passed, treat that as a dirty handoff checkpoint.
-    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Inspect the focused diff, run the smallest validation needed for the dirty file, then stage, commit, push, and request/update PR review.
+    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read, then run the smallest validation needed for the dirty files before making any additional product edit.
+    - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
+    - After focused validation passes, immediately `git add -A`, commit, push the existing branch to its configured PR head, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
     - If product changes, validation, or gates already exist, enter handoff-recovery mode and only complete the pending commit, push, PR review request, or Linear update.
     - Before broad rediscovery, record real progress: a current PR review classification, scoped file/test change, validation/gate result after a change, handoff event, or explicit blocker correction. Do not rely on `first-turn-miu-handoff`; it only proves the worker is alive.

@@ -8,6 +8,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
 
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
+  @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
 
   @type worker_host :: String.t() | nil
 
@@ -188,8 +189,12 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Stopping agent run for #{issue_context(issue)} after open Orocsy blocking correction; returning control to orchestrator")
         {:done, issue}
 
-      review_rework_pushed_handoff?(workspace) ->
-        Logger.info("Stopping agent run for #{issue_context(issue)} after review-rework pushed validated handoff; returning control to orchestrator")
+      pushed_handoff_stop?(workspace) ->
+        Logger.info("Stopping agent run for #{issue_context(issue)} after pushed validated handoff; returning control to orchestrator")
+        {:done, issue}
+
+      review_classification_handoff_stop?(workspace) ->
+        Logger.info("Stopping agent run for #{issue_context(issue)} after no-code review classification handoff; returning control to orchestrator")
         {:done, issue}
 
       true ->
@@ -197,9 +202,9 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp review_rework_pushed_handoff?(workspace) do
+  defp pushed_handoff_stop?(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => "review_rework"}} ->
+      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check"] ->
         workspace
         |> PromptBuilder.workspace_recovery_checkpoint()
         |> String.starts_with?("Pushed validated handoff checkpoint:")
@@ -209,9 +214,88 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
+    with {:ok, %{"mode" => "review_rework"}} <- DispatchPreflight.read(workspace),
+         {:ok, classification} <- read_review_classification_handoff(workspace) do
+      no_code_review_classification?(classification) and resolved_review_classification?(classification)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_classification_handoff_stop?(_workspace), do: false
+
+  defp read_review_classification_handoff(workspace) when is_binary(workspace) do
+    path = Path.join(workspace, @review_classification_path)
+
+    cond do
+      File.regular?(path) ->
+        path
+        |> File.read!()
+        |> Jason.decode()
+
+      true ->
+        {:error, :missing_review_classification_handoff}
+    end
+  rescue
+    error -> {:error, {:review_classification_handoff_read_failed, Exception.message(error)}}
+  end
+
+  defp no_code_review_classification?(classification) when is_map(classification) do
+    code_edit =
+      (classification["code_edit"] || "")
+      |> to_string()
+      |> String.downcase()
+
+    code_edit in ["none", "no_code_change", "not_run_no_code_change"]
+  end
+
+  defp no_code_review_classification?(_classification), do: false
+
+  defp resolved_review_classification?(%{"classification" => classification} = payload)
+       when is_binary(classification) do
+    normalized = normalize_review_classification(classification)
+
+    normalized in ["already_resolved_in_current_head", "stale_resolved", "resolved"] and
+      payload
+      |> Map.get("feedback", [])
+      |> feedback_classification_resolved?()
+  end
+
+  defp resolved_review_classification?(_payload), do: false
+
+  defp feedback_classification_resolved?([]), do: true
+
+  defp feedback_classification_resolved?(feedback) when is_list(feedback) do
+    Enum.all?(feedback, fn
+      %{"classification" => classification} ->
+        normalize_review_classification(classification) in [
+          "stale_resolved",
+          "already_resolved",
+          "already_resolved_in_current_head",
+          "resolved",
+          "outdated"
+        ]
+
+      _ ->
+        false
+    end)
+  end
+
+  defp feedback_classification_resolved?(_feedback), do: false
+
+  defp normalize_review_classification(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> String.downcase()
+  end
+
   defp fresh_implementation_checkpoint_present?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "fresh_implementation"}} <- DispatchPreflight.read(workspace) do
-      technical_miu_trace_event?(workspace)
+      technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
     else
       _ -> false
     end
@@ -237,6 +321,78 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp technical_miu_trace_event?(_workspace), do: false
 
+  defp meaningful_git_progress?(workspace) when is_binary(workspace) do
+    meaningful_git_dirty_paths(workspace) != [] or git_ahead_of_base?(workspace)
+  rescue
+    _error -> false
+  end
+
+  defp meaningful_git_progress?(_workspace), do: false
+
+  defp meaningful_git_dirty_paths(workspace) do
+    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
+      {status, 0} ->
+        status
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&porcelain_status_paths/1)
+        |> Enum.reject(&generated_runtime_path?/1)
+
+      {_error, _exit_code} ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp git_ahead_of_base?(workspace) do
+    ["origin/main", "main"]
+    |> Enum.filter(&git_ref_exists?(workspace, &1))
+    |> case do
+      [] ->
+        false
+
+      base_refs ->
+        args = ["log", "-1", "--format=%H", "HEAD"] ++ Enum.flat_map(base_refs, &[~s(--not), &1])
+
+        case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+          {output, 0} -> String.trim(output) != ""
+          {_error, _exit_code} -> false
+        end
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_ref_exists?(workspace, ref) do
+    case System.cmd("git", ["rev-parse", "--verify", "--quiet", ref], cd: workspace, stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _exit_code} -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp generated_runtime_path?(path) when is_binary(path) do
+    String.starts_with?(path, [".orocsy/", ".codex/"])
+  end
+
+  defp generated_runtime_path?(_path), do: false
+
+  defp porcelain_status_paths(line) when byte_size(line) >= 4 do
+    path =
+      line
+      |> String.slice(3..-1//1)
+      |> String.replace_prefix(~s("), "")
+      |> String.replace_suffix(~s("), "")
+
+    case path do
+      "" -> []
+      path -> [path |> String.split(" -> ") |> List.last()]
+    end
+  end
+
+  defp porcelain_status_paths(_line), do: []
+
   defp build_turn_prompt(issue, opts, workspace, 1, _max_turns) do
     PromptBuilder.build_prompt(issue, Keyword.put(opts, :workspace, workspace))
   end
@@ -252,7 +408,9 @@ defmodule SymphonyElixir.AgentRunner do
       - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
       - Resume from the current workspace and workpad state instead of restarting from scratch.
       - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Inspect the focused diff, run the smallest focused validation for the dirty file, then stage, commit, push, and request/update PR review before any broad scans or validation reruns.
+      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read, then run the smallest focused validation for the dirty files before any additional product edit, broad scan, or validation rerun.
+      - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
+      - After focused validation passes, immediately stage, commit, push the existing branch, and request/update PR review.
       - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.
       - Do not move review-rework issues to Done/Closed/terminal states from a continuation turn; a fresh review request is not the same thing as a clean review result.
       - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
