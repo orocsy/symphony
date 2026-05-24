@@ -80,6 +80,7 @@ defmodule SymphonyElixir.AgentRunner do
   if Mix.env() == :test do
     def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
     def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
+    def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -216,7 +217,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"}} <- DispatchPreflight.read(workspace),
-         {:ok, classification} <- read_review_classification_handoff(workspace) do
+         {:ok, classification} <- read_review_classification_handoff(workspace),
+         {:ok, head_sha} <- current_head_sha(workspace),
+         true <- classification_head_matches?(classification, head_sha) do
       no_code_review_classification?(classification) and resolved_review_classification?(classification)
     else
       _ -> false
@@ -285,6 +288,28 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp feedback_classification_resolved?(_feedback), do: false
+
+  defp current_head_sha(workspace) when is_binary(workspace) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true) do
+      {output, 0} ->
+        case String.trim(output) do
+          "" -> {:error, :missing_head_sha}
+          head_sha -> {:ok, head_sha}
+        end
+
+      {output, exit_code} ->
+        {:error, {:git_head_failed, exit_code, String.trim(output)}}
+    end
+  rescue
+    error -> {:error, {:git_head_exception, Exception.message(error)}}
+  end
+
+  defp classification_head_matches?(classification, head_sha) when is_map(classification) and is_binary(head_sha) do
+    classification_head = classification["head"] || classification["head_sha"]
+    is_binary(classification_head) and String.trim(classification_head) == head_sha
+  end
+
+  defp classification_head_matches?(_classification, _head_sha), do: false
 
   defp normalize_review_classification(value) do
     value

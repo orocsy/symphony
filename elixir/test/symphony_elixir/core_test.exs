@@ -9329,6 +9329,100 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "no-code review classification handoff requires current workspace head" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-classification-current-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      issue = %Issue{
+        id: "issue-review-classification-current-head",
+        identifier: "COD-205",
+        title: "Analytics review rework",
+        description: "Review feedback was classified as already resolved.",
+        state: "Rework",
+        branch_name: "orocsy/cod-205-analytics-miu-flow-instrumentation",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {stale_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      stale_head = String.trim(stale_head)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nFresh review feedback arrived.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Advance head"], cd: workspace, stderr_to_stdout: true)
+      {current_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      current_head = String.trim(current_head)
+      assert stale_head != current_head
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework"}, pretty: true) <> "\n"
+      )
+
+      classification_path = Path.join(state_dir, "review-feedback-classified.json")
+
+      stale_classification = %{
+        "checkpoint" => "review-feedback-classified",
+        "issue" => "COD-205",
+        "pr" => 55,
+        "head" => stale_head,
+        "branch" => "orocsy/cod-205-analytics-miu-flow-instrumentation",
+        "classification" => "already_resolved_in_current_head",
+        "feedback" => [
+          %{
+            "path" => "src/app/api/swipes/handler.ts",
+            "line" => 167,
+            "classification" => "stale_resolved",
+            "reason" => "Older feedback was resolved before the current head."
+          }
+        ],
+        "code_edit" => "none",
+        "validation" => "not_run_no_code_change",
+        "push" => "not_run_no_code_change",
+        "review_request" => "not_requested_no_code_change"
+      }
+
+      File.write!(classification_path, Jason.encode!(stale_classification, pretty: true) <> "\n")
+
+      refute AgentRunner.review_classification_handoff_stop_for_test(workspace)
+      assert :not_ready = Orchestrator.complete_review_classification_handoff_for_test(issue)
+
+      File.write!(
+        classification_path,
+        Jason.encode!(Map.put(stale_classification, "head", current_head), pretty: true) <> "\n"
+      )
+
+      assert AgentRunner.review_classification_handoff_stop_for_test(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator pauses pushed handoff when local handoff already requested review" do
     test_root =
       Path.join(

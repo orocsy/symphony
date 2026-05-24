@@ -983,6 +983,8 @@ defmodule SymphonyElixir.Orchestrator do
     with true <- File.regular?(path),
          {:ok, classification} <- read_review_classification_handoff(workspace),
          true <- no_code_review_classification?(classification) and resolved_review_classification?(classification),
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]),
+         true <- classification_head_matches?(classification, String.trim(head_sha)),
          %DateTime{} = observed_at <- file_mtime_datetime(path),
          true <- datetime_at_or_after?(observed_at, started_at) do
       [observed_at]
@@ -1436,7 +1438,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp classification_head_matches?(classification, head_sha) when is_map(classification) and is_binary(head_sha) do
     classification_head = classification["head"] || classification["head_sha"]
-    not is_binary(classification_head) or String.trim(classification_head) in ["", head_sha]
+    is_binary(classification_head) and String.trim(classification_head) == head_sha
   end
 
   defp classification_head_matches?(_classification, _head_sha), do: false
@@ -3932,7 +3934,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp pushed_validated_handoff_stop?(_workspace), do: false
 
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
-    with {:ok, classification} <- read_review_classification_handoff(workspace) do
+    with {:ok, classification} <- read_review_classification_handoff(workspace),
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]),
+         true <- classification_head_matches?(classification, String.trim(head_sha)) do
       no_code_review_classification?(classification) and resolved_review_classification?(classification)
     else
       _ -> false
