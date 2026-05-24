@@ -518,7 +518,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     Integration check limits:
     - Stay on the configured integration branch or discovered PR head branch and push back to that same branch.
-    - If PR is unknown, use bounded read-only GitHub PR lookup for the configured branch before deciding whether a same-branch PR handoff is missing.
+    - If PR is unknown, use bounded read-only GitHub PR lookup for the configured branch before deciding whether a same-branch PR handoff is missing; prefer `gh pr list`/`gh pr view`, or use `gh api --method GET` for REST lookup.
     - Use `git fetch origin #{base_branch}` and a bounded merge/rebase conflict check only to expose current merge conflicts.
     - Resolve only the listed conflict/write-scope paths and directly required helper/test paths.
     - If the PR is already mergeable/clean and no current-head review feedback is listed, validate and request/confirm review without product edits; only change code after a concrete validation or review blocker.

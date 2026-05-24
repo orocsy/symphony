@@ -547,7 +547,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Do not load Codex skills, plugins, apps, MCP tools, prior session JSONL, broad project docs, historical tickets, or unrelated issue history.
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Start from `git status --short --branch`, then use the issue brief/preflight paths and bounded git conflict commands to expose current merge conflicts.
-    If the preflight PR is unknown, use bounded read-only `gh pr view`/`gh pr list` for the configured integration branch before deciding whether a same-branch PR handoff is missing.
+    If the preflight PR is unknown, use bounded read-only `gh pr view`/`gh pr list` for the configured integration branch before deciding whether a same-branch PR handoff is missing. If you use `gh api` for PR lookup, it must include `--method GET`; never pass `-f`, `-F`, `--field`, or `--raw-field` without `--method GET`.
     If no PR exists for the configured integration branch after bounded lookup, create exactly one PR for that branch only when the branch contains the intended handoff commits; do not create a new branch.
     If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only `git diff --stat` plus focused diffs for the dirty files, run the exact focused validation from the brief/correction, then stage, commit, push the existing PR branch, and request fresh review.
     In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
@@ -1662,6 +1662,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
+          gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
+            :ok
+
           gh_api_pattern?(match) and handoff_gh_api_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -1912,6 +1915,36 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp handoff_gh_api_allowed?(_command, _workspace), do: false
+
+  defp integration_check_readonly_gh_api_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    dispatch_preflight_mode(workspace) == "integration_check" and
+      Regex.match?(~r/(^|[\s'"])gh\s+api(\s|$)/, command) and
+      readonly_gh_api_method?(command) and
+      handoff_gh_api_command?(command)
+  end
+
+  defp integration_check_readonly_gh_api_allowed?(_command, _workspace), do: false
+
+  defp readonly_gh_api_method?(command) when is_binary(command) do
+    normalized = String.replace(command, ~r/\s+/, " ")
+
+    cond do
+      Regex.match?(~r/(?:^|[\s'"])gh\s+api\s+graphql(\s|$)/, normalized) ->
+        false
+
+      Regex.match?(~r/\s(?:--method|-X)\s+(?:POST|PUT|PATCH|DELETE)(?:\s|$)/i, normalized) ->
+        false
+
+      Regex.match?(~r/\s(?:-f|-F|--field|--raw-field)\s+/, normalized) ->
+        Regex.match?(~r/\s--method\s+GET(?:\s|$)/, normalized)
+
+      true ->
+        true
+    end
+  end
+
+  defp readonly_gh_api_method?(_command), do: false
 
   defp handoff_gh_api_command?(command) do
     normalized = String.replace(command, ~r/\s+/, " ")
