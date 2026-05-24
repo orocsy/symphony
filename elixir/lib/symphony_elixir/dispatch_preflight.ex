@@ -358,7 +358,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         "Validate the current pushed integration handoff, avoid product edits unless validation or current-head review reveals a scoped blocker, request or confirm a clean Codex review, and leave the PR unmerged."
 
       true ->
-        "Inspect only the configured integration branch and bounded PR state, create or update the final integration PR only if no PR exists for that branch, run declared validation, request or confirm Codex review, and leave the PR unmerged."
+        "Inspect only the configured integration branch, record handoff.integration-check-started after branch/status confirmation, inspect bounded PR state, create or update the final integration PR only if no PR exists for that branch, run declared validation, request or confirm Codex review, and leave the PR unmerged."
     end
   end
 

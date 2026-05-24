@@ -3521,6 +3521,8 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "do not just rerun the same failing validation"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "dirty handoff recovery"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "validation fails and names the exact broken file"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "handoff.integration-check-started"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "before any `gh pr`"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
