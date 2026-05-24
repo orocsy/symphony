@@ -1263,9 +1263,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp complete_inspected_review_classification_handoff(%Issue{} = issue, candidate, inspection) do
     case pushed_handoff_head_status(candidate, inspection) do
       :current ->
-        case pushed_review_feedback_status(inspection) do
-          :clean -> complete_clean_review_classification_handoff(issue, candidate, inspection)
-          :has_review_feedback -> complete_feedback_review_classification_handoff(issue, candidate, inspection)
+        if integration_check_mergeability_rework_needed?(issue, inspection) do
+          Logger.info(
+            "No-code review classification handoff PR still has merge conflicts; dispatching integration check: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"} mergeable_state=#{inspect(map_value(inspection, [:mergeable_state, "mergeable_state"]))}"
+          )
+
+          :not_ready
+        else
+          case pushed_review_feedback_status(inspection) do
+            :clean -> complete_clean_review_classification_handoff(issue, candidate, inspection)
+            :has_review_feedback -> complete_feedback_review_classification_handoff(issue, candidate, inspection)
+          end
         end
 
       {:stale, _reason} ->

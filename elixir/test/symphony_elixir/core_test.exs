@@ -9500,6 +9500,167 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "no-code review classification handoff does not complete dirty integration PR" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-classification-dirty-integration-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-review-classification-dirty-integration",
+        identifier: "COD-208",
+        title: "Analytics Integration Check And Final PR Handoff",
+        description: """
+        ## Ticket Type
+        integration-check
+
+        ## Integration Branch
+        orocsy/feature-analytics-observability-integration
+        """,
+        state: "Rework",
+        branch_name: "orocsy/feature-analytics-observability-integration",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nReview feedback already resolved.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Resolve review feedback"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-analytics-observability-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      head_sha = String.trim(head_sha)
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "review-feedback-classified.json"),
+        Jason.encode!(
+          %{
+            "checkpoint" => "review-feedback-classified",
+            "issue" => "COD-208",
+            "pr" => 58,
+            "head" => head_sha,
+            "branch" => "orocsy/feature-analytics-observability-integration",
+            "classification" => "already_resolved_in_current_head",
+            "feedback" => [
+              %{
+                "path" => "src/app/api/cards/route.ts",
+                "line" => 44,
+                "classification" => "stale_resolved",
+                "reason" => "Current head already includes the review fix."
+              }
+            ],
+            "code_edit" => "none",
+            "validation" => "not_run_no_code_change",
+            "push" => "not_run_no_code_change",
+            "review_request" => "not_requested_no_code_change"
+          },
+          pretty: true
+        ) <> "\n"
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 58,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/58",
+                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/58" ->
+            {:ok,
+             %{
+               "number" => 58,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/58",
+               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "mergeable" => false,
+               "mergeable_state" => "dirty"
+             }}
+
+          endpoint == "repos/acme/nutribuddy/pulls/58/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/58/reviews" ->
+            {:ok, []}
+
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/58/comments?") ->
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review",
+                 "created_at" => "2026-05-24T05:00:00Z"
+               },
+               %{
+                 "body" => "Codex Review: Didn't find any major issues.",
+                 "created_at" => "2026-05-24T05:05:00Z"
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => head_sha,
+                 "reviewThreads" => %{
+                   "nodes" => [],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert :not_ready = Orchestrator.complete_review_classification_handoff_for_test(issue)
+      refute_receive {:memory_tracker_state_update, "issue-review-classification-dirty-integration", "Human Review"}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "no-code review classification handoff requires current workspace head" do
     test_root =
       Path.join(
