@@ -3110,6 +3110,51 @@ defmodule SymphonyElixir.CoreTest do
              )
   end
 
+  test "review request pending expires after configured stale timeout" do
+    Application.put_env(:symphony_elixir, :codex_review_request_stale_after_ms, 1)
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/4/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review\n\nFresh review requested during a quota outage.",
+               "created_at" => "2026-05-15T09:24:37Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :codex_review_request_stale_after_ms)
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+    end)
+
+    feedback = [
+      %{
+        type: :thread,
+        payload: %{
+          "comments" => %{
+            "nodes" => [
+              %{"body" => "Old current-head feedback.", "createdAt" => "2026-05-15T09:20:00Z"}
+            ]
+          }
+        }
+      }
+    ]
+
+    assert {:ok, false} =
+             SymphonyElixir.ReviewMonitor.codex_review_request_pending?(
+               "acme/nutribuddy",
+               %{"number" => 4},
+               feedback
+             )
+  end
+
   test "review monitor confirms clean Codex result only after a review request" do
     Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
       cond do

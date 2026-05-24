@@ -680,6 +680,7 @@ defmodule SymphonyElixir.ReviewMonitor do
   defp review_request_pending_after_feedback?(comments, feedback, pr) do
     with %DateTime{} = request_at <- latest_codex_review_request_at(comments),
          true <- review_request_after_head?(request_at, pr),
+         false <- stale_codex_review_request?(request_at),
          feedback_at <- latest_review_feedback_at(feedback) do
       case feedback_at do
         %DateTime{} = feedback_at ->
@@ -691,6 +692,33 @@ defmodule SymphonyElixir.ReviewMonitor do
     else
       _ -> false
     end
+  end
+
+  defp stale_codex_review_request?(%DateTime{} = request_at) do
+    case review_request_stale_after_ms() do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        DateTime.diff(DateTime.utc_now(), request_at, :millisecond) >= timeout_ms
+
+      _ ->
+        false
+    end
+  end
+
+  defp stale_codex_review_request?(_request_at), do: false
+
+  defp review_request_stale_after_ms do
+    case Application.get_env(:symphony_elixir, :codex_review_request_stale_after_ms, :config) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        timeout_ms
+
+      :config ->
+        Config.settings!().review_monitor.request_stale_after_ms
+
+      _ ->
+        nil
+    end
+  rescue
+    _error -> nil
   end
 
   defp review_request_after_head?(%DateTime{} = request_at, pr) when is_map(pr) do

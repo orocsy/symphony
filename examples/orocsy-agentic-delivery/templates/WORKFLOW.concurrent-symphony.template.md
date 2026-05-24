@@ -23,6 +23,7 @@ review_monitor:
     - Human Review
     - In Review
   rework_state: Rework
+  request_stale_after_ms: 600000
 hooks:
   timeout_ms: 300000
   after_create: |
