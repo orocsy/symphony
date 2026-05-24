@@ -3910,14 +3910,14 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_comment, "issue-cod-153-missing-first-event-loop", body}
       assert body =~ "worker_prompt_defect"
       assert body =~ "no dirty files"
-      assert body =~ "runtime-preflight-worker-progress-contract-v18"
+      assert body =~ "runtime-preflight-worker-progress-contract-v19"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       classified = correction_path |> File.read!() |> Jason.decode!()
       assert classified["status"] == "open"
       assert classified["classification"] == "worker_prompt_defect"
       assert classified["classification_summary"] =~ "repeated runtime progress retries"
-      assert classified["classification_summary"] =~ "runtime-preflight-worker-progress-contract-v18"
+      assert classified["classification_summary"] =~ "runtime-preflight-worker-progress-contract-v19"
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
@@ -3986,7 +3986,7 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-cod-153-stale-worker-prompt-defect", body}
       assert body =~ "resolved stale `worker_prompt_defect`"
-      assert body =~ "runtime-preflight-worker-progress-contract-v18"
+      assert body =~ "runtime-preflight-worker-progress-contract-v19"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
@@ -4082,7 +4082,7 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-cod-152-mixed-stale-worker-prompt-defect", body}
       assert body =~ "resolved stale `worker_prompt_defect`"
-      assert body =~ "runtime-preflight-worker-progress-contract-v18"
+      assert body =~ "runtime-preflight-worker-progress-contract-v19"
 
       resolved_corrections =
         workspace
@@ -4095,7 +4095,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert Enum.all?(
                resolved_corrections,
-               &String.contains?(&1["resolution_summary"], "runtime-preflight-worker-progress-contract-v18")
+               &String.contains?(&1["resolution_summary"], "runtime-preflight-worker-progress-contract-v19")
              )
 
       refute Workspace.blocking_correction_in_workspace?(workspace)
@@ -4166,7 +4166,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v18."
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v19."
                )
 
       progress_ts = DateTime.add(DateTime.utc_now(), 120, :second) |> DateTime.to_iso8601()
@@ -4293,8 +4293,16 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v18."
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v19."
                )
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      correction_json = correction_path |> File.read!() |> Jason.decode!()
+
+      File.write!(
+        correction_path,
+        Jason.encode!(Map.put(correction_json, "created_at", "2026-05-15T09:30:00Z"), pretty: true)
+      )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -4381,12 +4389,27 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+      refute_receive {:memory_tracker_state_update, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", _state}, 50
+      refute_receive {:memory_tracker_comment, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", _body}, 50
+
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      File.write!(
+        correction_path,
+        Jason.encode!(Map.put(parked, "created_at", "2026-05-15T09:20:00Z"), pretty: true)
+      )
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
       assert_receive {:memory_tracker_state_update, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", "Rework"}
       assert_receive {:memory_tracker_comment, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", body}
       assert body =~ "fresh Codex review feedback arrived"
       assert body =~ "pull/4"
 
-      correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
       assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_fresh_review_feedback"
@@ -4452,7 +4475,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v18."
+                 "worker_prompt_defect: repeated review-rework runtime progress retries did not complete the dirty handoff under runtime-preflight-worker-progress-contract-v19."
                )
 
       dirty_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
@@ -4567,7 +4590,7 @@ defmodule SymphonyElixir.CoreTest do
                Workspace.classify_blocking_corrections_in_workspace(
                  workspace,
                  "worker_prompt_defect",
-                 "worker_prompt_defect: repeated runtime progress retries produced no branch, file, or commit progress under runtime-preflight-worker-progress-contract-v18."
+                 "worker_prompt_defect: repeated runtime progress retries produced no branch, file, or commit progress under runtime-preflight-worker-progress-contract-v19."
                )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
@@ -4806,6 +4829,8 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Toolchain preflight:"
       assert prompt =~ "Validation command guidance:"
       assert prompt =~ "Review rework execution contract"
+      assert prompt =~ "your first terminal action must be exactly"
+      assert prompt =~ ~s(--tool "review-feedback-classified")
       refute prompt =~ "You are an agent for this repository."
     after
       File.rm_rf(test_root)
