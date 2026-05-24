@@ -248,10 +248,11 @@ defmodule SymphonyElixir.PromptBuilder do
 
     - Treat this as a bounded PR review fix, not a fresh implementation turn.
     - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff, run the smallest validation needed for that diff, then commit, push, and request fresh review.
+    - If no dirty/local handoff checkpoint appears above, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. The current-head review feedback is already in this prompt, so classify it from the prompt before reading code.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first code/test edit unless the listed feedback path is one of those files.
     - Do not run `rg`, `grep`, `find`, `ls`, `git ls-files`, `gh api`, shell pipelines, or chained shell commands in review-rework mode; the current-head feedback body and target file path are already in this prompt.
-    - Start from the listed review feedback path. Read one short `sed -n` range around that path only, then edit only directly related code/tests or record a blocker.
-    - Before the first code/test edit, do not run `sed`, `cat`, `head`, `tail`, or `nl` on files outside the listed feedback path.
+    - After the `review-feedback-classified` checkpoint, start from the listed review feedback path. Read one short `sed -n` range around that path only, then edit only directly related code/tests or record a blocker.
+    - Before the `review-feedback-classified` checkpoint and first code/test edit, do not run `sed`, `cat`, `head`, `tail`, or `nl` on any file. After the checkpoint, do not run those commands on files outside the listed feedback path.
     - In this turn, either make the scoped edit and focused test update, or write an explicit Orocsy blocker/correction. Do not stop after analysis.
     - If validation, git push, GitHub, Linear, PATH, auth, or approval fails, record the exact command/failure and next action in an Orocsy blocker/correction before stopping.
     - After a code/test edit, run focused validation, then commit, push the same branch, and request fresh Codex review; the runtime captures validation output, so do not edit `.orocsy/delivery/state/dispatch-preflight.json`.

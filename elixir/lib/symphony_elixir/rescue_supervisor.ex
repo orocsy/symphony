@@ -10,7 +10,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   @hydrated_retry_loop_limit 2
   @review_rework_loop_limit 2
-  @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v18"
+  @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
   def run_once(issues) when is_list(issues) do
@@ -148,7 +148,7 @@ defmodule SymphonyElixir.RescueSupervisor do
         resolve_worker_prompt_defect_after_later_progress(issue, workspace, corrections)
 
       current_worker_prompt_defect_correction?(corrections) and
-          fresh_review_feedback_after_latest_codex_request?(issue) ->
+          fresh_review_feedback_after_latest_codex_request_and_corrections?(issue, corrections) ->
         resolve_worker_prompt_defect_after_fresh_review_feedback(issue, workspace, corrections)
 
       current_worker_prompt_defect_correction?(corrections) ->
@@ -404,6 +404,70 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp fresh_review_feedback_after_latest_codex_request?(_inspection), do: false
+
+  defp fresh_review_feedback_after_latest_codex_request_and_corrections?(%Issue{} = issue, corrections) do
+    case inspect_review_if_enabled(issue) do
+      {:ok, %{feedback: feedback} = inspection} when is_list(feedback) and feedback != [] ->
+        fresh_review_feedback_after_latest_codex_request?(inspection) and
+          review_feedback_after_latest_correction?(feedback, corrections)
+
+      {:ok, _inspection} ->
+        false
+
+      {:error, reason} ->
+        Logger.debug("Rescue supervisor could not inspect correction-relative fresh review feedback for #{issue.identifier}: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp fresh_review_feedback_after_latest_codex_request_and_corrections?(_issue, _corrections), do: false
+
+  defp review_feedback_after_latest_correction?(feedback, corrections) when is_list(feedback) and is_list(corrections) do
+    with %DateTime{} = feedback_at <- latest_review_feedback_at(feedback),
+         %DateTime{} = correction_at <- latest_correction_created_at(corrections) do
+      datetime_after?(feedback_at, correction_at)
+    else
+      _ -> false
+    end
+  end
+
+  defp review_feedback_after_latest_correction?(_feedback, _corrections), do: false
+
+  defp latest_review_feedback_at(feedback) when is_list(feedback) do
+    feedback
+    |> Enum.flat_map(fn item ->
+      case review_feedback_created_at(item) do
+        %DateTime{} = datetime -> [datetime]
+        _ -> []
+      end
+    end)
+    |> latest_datetime()
+  end
+
+  defp latest_review_feedback_at(_feedback), do: nil
+
+  defp review_feedback_created_at(%{type: :thread, payload: thread}) do
+    thread
+    |> thread_latest_comment()
+    |> created_at()
+  end
+
+  defp review_feedback_created_at(%{type: :comment, payload: comment}), do: created_at(comment)
+
+  defp review_feedback_created_at(%{type: :review, payload: review}) do
+    created_at(review) || datetime_from_iso8601(review["submitted_at"])
+  end
+
+  defp review_feedback_created_at(_feedback), do: nil
+
+  defp thread_latest_comment(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    List.last(comments) || %{}
+  end
+
+  defp thread_latest_comment(_thread), do: %{}
+
+  defp created_at(%{} = payload), do: datetime_from_iso8601(payload["createdAt"] || payload["created_at"])
+  defp created_at(_payload), do: nil
 
   defp codex_review_request_pending?(%{repo: repo, pr: pr, feedback: feedback})
        when feedback != [] do
@@ -693,7 +757,9 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp datetime_at_or_after?(_datetime, _reference), do: false
 
   defp latest_datetime(datetimes) do
-    Enum.max_by(datetimes, &DateTime.to_unix(&1, :microsecond), fn -> nil end)
+    datetimes
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
   defp runtime_progress_correction?(corrections) do
