@@ -482,9 +482,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp integration_check_base_instructions do
     """
-    You are a Symphony integration-check worker for one existing pull request.
-    Use the current prompt, focused issue brief, PR branch, and named conflict paths only.
-    Resolve the PR mergeability blocker, validate, push the same branch, and record a blocker if any external step fails.
+    You are a Symphony integration-check worker for one integration branch and final PR handoff.
+    Use the current prompt, focused issue brief, configured integration branch or PR branch, and named conflict paths only.
+    Resolve PR mergeability blockers or validate the handoff, push the same branch, and record a blocker if any external step fails.
     """
     |> String.trim()
   end
@@ -543,10 +543,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     """
     Symphony integration-check micro-worker.
 
-    This thread exists only to make the existing PR branch mergeable against its target branch.
+    This thread exists only to make the configured integration branch or existing PR branch mergeable and ready for final PR handoff.
     Do not load Codex skills, plugins, apps, MCP tools, prior session JSONL, broad project docs, historical tickets, or unrelated issue history.
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Start from `git status --short --branch`, then use the issue brief/preflight paths and bounded git conflict commands to expose current merge conflicts.
+    If the preflight PR is unknown, use bounded read-only `gh pr view`/`gh pr list` for the configured integration branch before deciding whether a same-branch PR handoff is missing.
+    If no PR exists for the configured integration branch after bounded lookup, create exactly one PR for that branch only when the branch contains the intended handoff commits; do not create a new branch.
     If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only `git diff --stat` plus focused diffs for the dirty files, run the exact focused validation from the brief/correction, then stage, commit, push the existing PR branch, and request fresh review.
     In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
     If no unmerged files remain and the issue brief has a `Current Validation Rework` section or an open correction names validation failures, treat the turn as validation rework: inspect and edit only the named in-scope helper/test files before rerunning validation.

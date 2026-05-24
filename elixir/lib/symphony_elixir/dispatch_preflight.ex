@@ -235,6 +235,9 @@ defmodule SymphonyElixir.DispatchPreflight do
       integration_check_review?(requirements, inspection) ->
         "integration_check"
 
+      integration_check_requirements?(requirements) ->
+        "integration_check"
+
       true ->
         "fresh_implementation"
     end
@@ -347,10 +350,15 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp integration_check_first_task(inspection) do
-    if mergeability_conflict?(inspection) do
-      "Resolve only the existing PR mergeability conflict on the integration branch, run the declared validation, push the same PR branch, and request a fresh Codex review. Do not merge the PR automatically."
-    else
-      "Validate the current pushed integration handoff, avoid product edits unless validation or current-head review reveals a scoped blocker, request or confirm a clean Codex review, and leave the PR unmerged."
+    cond do
+      mergeability_conflict?(inspection) ->
+        "Resolve only the existing PR mergeability conflict on the integration branch, run the declared validation, push the same PR branch, and request a fresh Codex review. Do not merge the PR automatically."
+
+      review_pr_present?(inspection) ->
+        "Validate the current pushed integration handoff, avoid product edits unless validation or current-head review reveals a scoped blocker, request or confirm a clean Codex review, and leave the PR unmerged."
+
+      true ->
+        "Inspect only the configured integration branch and bounded PR state, create or update the final integration PR only if no PR exists for that branch, run declared validation, request or confirm Codex review, and leave the PR unmerged."
     end
   end
 
@@ -509,11 +517,12 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
 
     Integration check limits:
-    - Stay on the existing PR head branch and push back to that same branch.
+    - Stay on the configured integration branch or discovered PR head branch and push back to that same branch.
+    - If PR is unknown, use bounded read-only GitHub PR lookup for the configured branch before deciding whether a same-branch PR handoff is missing.
     - Use `git fetch origin #{base_branch}` and a bounded merge/rebase conflict check only to expose current merge conflicts.
     - Resolve only the listed conflict/write-scope paths and directly required helper/test paths.
     - If the PR is already mergeable/clean and no current-head review feedback is listed, validate and request/confirm review without product edits; only change code after a concrete validation or review blocker.
-    - Do not create a new branch or PR, do not broaden into unrelated feature work, and never merge the PR automatically.
+    - Do not create a new branch or duplicate PR, do not broaden into unrelated feature work, and never merge the PR automatically.
     - After the conflict fix, run focused validation, then commit, push, and request a fresh Codex review.
     """
     |> String.trim()
