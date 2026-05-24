@@ -5270,6 +5270,91 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight routes integration handoff without discovered PR to integration check mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-preflight-no-pr-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-208-no-pr-preflight",
+        identifier: "COD-208",
+        title: "Analytics Integration Check And Final PR Handoff",
+        state: "In Progress",
+        branch_name: "orocsy/cod-208-analytics-integration-check-and-final-pr-handoff",
+        description: "Integration handoff issue with focused brief in workspace."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), """
+      # COD-208 Issue Brief
+
+      ## Ticket Type
+      integration-check
+
+      ## Integration Branch
+      orocsy/feature-analytics-observability-integration
+
+      ## Write Scope
+      - Merge conflict resolution for the analytics integration branch.
+      - Final PR validation notes only.
+
+      ### MIU 1 - Analytics integration handoff
+      Validate the analytics integration branch and complete final PR handoff.
+
+      ## Validation
+      ```bash
+      pnpm typecheck
+      ```
+      """)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "integration_check"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
+      assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert get_in(preflight, ["review", "pr_number"]) == nil
+      assert get_in(preflight, ["review", "feedback_source"]) == "no_pr"
+      assert preflight["first_task"] =~ "configured integration branch"
+      assert preflight["first_task"] =~ "create or update the final integration PR"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Mode: integration check"
+      assert prompt =~ "PR: unknown"
+      assert prompt =~ "If PR is unknown"
+      refute prompt =~ "Mode: fresh implementation"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps truncated multibyte review feedback valid UTF-8" do
     test_root =
       Path.join(
