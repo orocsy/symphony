@@ -589,9 +589,27 @@ defmodule SymphonyElixir.Orchestrator do
         not handoff_recovery_progress_observed?(running_entry) and
         not pushed_handoff_wait_checkpoint?
 
-    cond do
+    first_event_budget_exceeded? =
       is_integer(first_event_max_tokens) and first_event_max_tokens > 0 and
-        first_event_progress_tokens >= first_event_max_tokens and no_first_event? ->
+        first_event_progress_tokens >= first_event_max_tokens and no_first_event?
+
+    review_request_wait_checkpoint? =
+      first_event_budget_exceeded? and review_request_wait_checkpoint?(running_entry)
+
+    cond do
+      review_request_wait_checkpoint? ->
+        identifier = Map.get(running_entry, :identifier, issue_id)
+        session_id = running_entry_session_id(running_entry)
+
+        Logger.info(
+          "Issue reached pending Codex review checkpoint before first durable event guard: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} codex_total_tokens=#{total_tokens} first_event_progress_tokens=#{first_event_progress_tokens}; stopping worker without correction"
+        )
+
+        state
+        |> terminate_running_issue(issue_id, false)
+        |> complete_issue(issue_id)
+
+      first_event_budget_exceeded? ->
         identifier = Map.get(running_entry, :identifier, issue_id)
         session_id = running_entry_session_id(running_entry)
 
@@ -3966,6 +3984,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pushed_handoff_wait_checkpoint?(_running_entry), do: false
+
+  defp review_request_wait_checkpoint?(%{issue: %Issue{} = issue, workspace_path: workspace})
+       when is_binary(workspace) do
+    with {:ok, %{"mode" => "review_rework"}} <- DispatchPreflight.read(workspace),
+         %{enabled: true} = monitor <- handoff_review_monitor(workspace) do
+      review_request_pending_for_issue?(issue, monitor)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_request_wait_checkpoint?(_running_entry), do: false
 
   defp workflow_blocked_by_open_correction?(issue_or_running_entry, metadata \\ %{})
 
