@@ -1668,6 +1668,9 @@ defmodule SymphonyElixir.Codex.AppServer do
           gh_api_pattern?(match) and handoff_gh_api_allowed?(command_for_patterns, workspace) ->
             :ok
 
+          grep_pattern?(match) and integration_check_show_ref_filter_allowed?(command_for_patterns, workspace) ->
+            :ok
+
           grep_pattern?(match) and scoped_conflict_marker_scan_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -1703,6 +1706,24 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp integration_check_show_ref_filter_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    with true <- dispatch_preflight_mode(workspace) == "integration_check",
+         true <- show_ref_grep_command?(command),
+         {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      allowed_refs = integration_check_allowed_ref_names(preflight)
+      requested_refs = show_ref_grep_ref_names(command)
+
+      requested_refs != [] and Enum.all?(requested_refs, &MapSet.member?(allowed_refs, &1))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp integration_check_show_ref_filter_allowed?(_command, _workspace), do: false
 
   defp scoped_conflict_marker_scan_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
     with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
@@ -1864,6 +1885,38 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp conflict_marker_grep_command?(_command), do: false
 
+  defp show_ref_grep_command?(command) when is_binary(command) do
+    normalized = String.replace(command, ~r/\s+/, " ")
+
+    Regex.match?(~r/(^|[\s'"])git\s+show-ref\s+--heads\s+--remotes\s*\|\s*grep\s+-E\s+["']?refs\/\(heads\|remotes\/origin\)\/\(?[^"']+["']?/, normalized) and
+      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, normalized)
+  end
+
+  defp show_ref_grep_command?(_command), do: false
+
+  defp show_ref_grep_ref_names(command) when is_binary(command) do
+    ~r/refs\/\(heads\|remotes\/origin\)\/\(?([^"']+)/
+    |> Regex.scan(command, capture: :all_but_first)
+    |> Enum.flat_map(fn [refs] ->
+      refs
+      |> String.trim()
+      |> String.trim_trailing(")")
+      |> String.trim_trailing("$")
+      |> String.split("|", trim: true)
+    end)
+    |> Enum.map(fn ref ->
+      ref
+      |> String.trim()
+      |> String.trim_leading("^")
+      |> String.trim_trailing("$")
+      |> String.trim_trailing(")")
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp show_ref_grep_ref_names(_command), do: []
+
   defp file_scoped_grep_command?(command) when is_binary(command) do
     Regex.match?(~r/(^|\s|["'])grep\s+/, command) and
       String.contains?(command, "-n") and
@@ -1876,6 +1929,30 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp grep_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "grep")
   defp grep_pattern?(_pattern), do: false
+
+  defp integration_check_allowed_ref_names(preflight) when is_map(preflight) do
+    requirements =
+      case preflight do
+        %{"requirements" => requirements} when is_map(requirements) -> requirements
+        _ -> %{}
+      end
+
+    [
+      "main",
+      "master",
+      preflight["branch"],
+      get_in(preflight, ["review", "head_ref"]),
+      requirements["base_branch"],
+      requirements["branch"],
+      requirements["integration_branch"]
+    ]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
+  end
+
+  defp integration_check_allowed_ref_names(_preflight), do: MapSet.new()
 
   defp command_for_forbidden_patterns(command) when is_binary(command) do
     if delivery_event_append_command?(command) do

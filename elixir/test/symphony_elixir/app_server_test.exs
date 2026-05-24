@@ -1488,6 +1488,178 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows integration-check branch ref filter for configured branches before progress" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-show-ref-filter-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INTEGRATION-SHOW-REF")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-INTEGRATION-SHOW-REF",
+          "branch" => "orocsy/feature-analytics-observability-integration",
+          "requirements" => %{
+            "ticket_type" => "integration-check",
+            "branch" => "orocsy/cod-208-analytics-integration-check-and-final-pr-handoff",
+            "integration_branch" => "orocsy/feature-analytics-observability-integration",
+            "write_scope" => ["Final PR validation notes only"]
+          },
+          "review" => %{"pr_number" => nil, "pr_url" => nil}
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-integration-show-ref"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-integration-show-ref"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc git show-ref --heads --remotes | grep -E refs/(heads|remotes/origin)/(main|orocsy/feature-analytics-observability-integration|orocsy/cod-208-analytics-integration-check-and-final-pr-handoff)"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-integration-show-ref",
+        identifier: "MT-INTEGRATION-SHOW-REF",
+        title: "Integration check branch ref filter",
+        description: "Integration-check branch ref lookup can filter configured refs before progress",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-INTEGRATION-SHOW-REF",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate integration handoff", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks integration-check branch ref filter for unrelated branches" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-show-ref-filter-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INTEGRATION-SHOW-REF-BLOCK")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-INTEGRATION-SHOW-REF-BLOCK",
+          "branch" => "orocsy/feature-analytics-observability-integration",
+          "requirements" => %{
+            "ticket_type" => "integration-check",
+            "branch" => "orocsy/cod-208-analytics-integration-check-and-final-pr-handoff",
+            "integration_branch" => "orocsy/feature-analytics-observability-integration",
+            "write_scope" => ["Final PR validation notes only"]
+          },
+          "review" => %{"pr_number" => nil, "pr_url" => nil}
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-integration-show-ref-block"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-integration-show-ref-block"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc git show-ref --heads --remotes | grep -E refs/(heads|remotes/origin)/(main|orocsy/unrelated-workstream)"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-integration-show-ref-block",
+        identifier: "MT-INTEGRATION-SHOW-REF-BLOCK",
+        title: "Integration check branch ref filter block",
+        description: "Integration-check branch ref lookup cannot inspect unrelated branches",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-INTEGRATION-SHOW-REF-BLOCK",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Validate integration handoff", issue)
+
+      assert command ==
+               "/bin/zsh -lc git show-ref --heads --remotes | grep -E refs/(heads|remotes/origin)/(main|orocsy/unrelated-workstream)"
+
+      assert pattern =~ "grep"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows read-only GitHub API review inspection after durable progress" do
     test_root =
       Path.join(
