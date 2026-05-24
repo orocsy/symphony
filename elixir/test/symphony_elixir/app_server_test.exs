@@ -570,6 +570,7 @@ defmodule SymphonyElixir.AppServerTest do
       codex_binary = Path.join(test_root, "fake-codex")
 
       File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(workspace, "src/app"))
 
       File.write!(
         preflight_file,
@@ -998,6 +999,8 @@ defmodule SymphonyElixir.AppServerTest do
         Jason.encode!(%{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}) <> "\n"
       )
 
+      write_fresh_checkpoint_git_progress!(workspace, "docs/TECHNICAL_DESIGN.md")
+
       File.write!(codex_binary, """
       #!/bin/sh
       count=0
@@ -1175,7 +1178,8 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-fresh-checkpoint-stop"}}}'
-            mkdir -p .orocsy/delivery/events
+            mkdir -p .orocsy/delivery/events src/app
+            printf '%s\\n' 'export default function Page() { return "checkpoint"; }' > src/app/page.tsx
             printf '%s\\n' '{"event":"tool.finished","status":"passed","tool":"technical-miu-trace"}' >> .orocsy/delivery/events/events.jsonl
             printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"pnpm exec playwright test tests/e2e/auth-migration.spec.ts --project chrome"}}}'
             ;;
@@ -1187,6 +1191,15 @@ defmodule SymphonyElixir.AppServerTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.mkdir_p!(Path.join(workspace, "src/app"))
+      File.write!(Path.join(workspace, "src/app/page.tsx"), "export default function Page() { return \"baseline\"; }\n")
+      assert {_output, 0} = System.cmd("git", ["add", "src/app/page.tsx"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -1251,6 +1264,8 @@ defmodule SymphonyElixir.AppServerTest do
         events_file,
         Jason.encode!(%{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}) <> "\n"
       )
+
+      write_fresh_checkpoint_git_progress!(workspace, "docs/TECHNICAL_DESIGN.md")
 
       File.write!(codex_binary, """
       #!/bin/sh
@@ -1622,6 +1637,8 @@ defmodule SymphonyElixir.AppServerTest do
         events_file,
         Jason.encode!(%{"event" => "tool.finished", "status" => "passed", "tool" => "technical-miu-trace"}) <> "\n"
       )
+
+      write_fresh_checkpoint_git_progress!(workspace, "src/app/page.tsx")
 
       File.write!(codex_binary, """
       #!/bin/sh
@@ -1999,6 +2016,383 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows sibling Next route helper reads for review rework routes" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-route-helper-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-ROUTE-HELPER-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      route_dir = Path.join(workspace, "src/app/api/recipe-chats/[chatId]/messages")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(route_dir)
+      File.write!(Path.join(route_dir, "route.ts"), "export { POST } from './handler';\n")
+      File.write!(Path.join(route_dir, "handler.ts"), "export function POST() {}\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-ROUTE-HELPER-READ",
+          "branch" => "orocsy/mt-review-route-helper-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/app/api/recipe-chats/[chatId]/messages/route.ts", "line" => 8}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-route-helper-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-route-helper-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,70p'\\'' '\\''src/app/api/recipe-chats/[chatId]/messages/handler.ts'\\''\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-route-helper-read",
+        identifier: "MT-REVIEW-ROUTE-HELPER-READ",
+        title: "Review rework route helper read",
+        description: "Sibling route helper reads should be allowed for route review feedback",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-ROUTE-HELPER-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows missing sibling Next route helper test reads for review rework routes" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-route-helper-test-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-ROUTE-HELPER-TEST-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      route_dir = Path.join(workspace, "src/app/api/recipe-chats/[chatId]/messages")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(route_dir)
+      File.write!(Path.join(route_dir, "route.ts"), "export { POST } from './handler';\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-ROUTE-HELPER-TEST-READ",
+          "branch" => "orocsy/mt-review-route-helper-test-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/app/api/recipe-chats/[chatId]/messages/route.ts", "line" => 30}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-route-helper-test-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-route-helper-test-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,220p'\\'' '\\''src/app/api/recipe-chats/[chatId]/messages/handler.test.ts'\\''\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-route-helper-test-read",
+        identifier: "MT-REVIEW-ROUTE-HELPER-TEST-READ",
+        title: "Review rework route helper test read",
+        description: "Sibling route helper test reads should be allowed for route review feedback",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-ROUTE-HELPER-TEST-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows transitive local import reads during review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-transitive-import-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-TRANSITIVE-IMPORT-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      guest_limit_file = Path.join(workspace, "src/lib/domain/guest-limit.ts")
+      domain_index_file = Path.join(workspace, "src/lib/domain/index.ts")
+      schemas_index_file = Path.join(workspace, "src/lib/schemas/index.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(guest_limit_file))
+      File.mkdir_p!(Path.dirname(schemas_index_file))
+      File.write!(guest_limit_file, "import type { GuestLimitState } from './index';\n")
+      File.write!(domain_index_file, "import type { guestLimitStateSchema } from '../schemas';\n")
+      File.write!(schemas_index_file, "export const guestLimitStateSchema = {};\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-TRANSITIVE-IMPORT-READ",
+          "branch" => "orocsy/mt-review-transitive-import-read",
+          "requirements" => %{
+            "write_scope" => [
+              "src/lib/domain/guest-limit.ts"
+            ]
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeDeck.tsx",
+                "line" => 274,
+                "body" => "Preserve unlocked swipe state when migration omits guestLimit."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-transitive-import-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-transitive-import-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,220p'\\'' src/lib/schemas.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-transitive-import-read",
+        identifier: "MT-REVIEW-TRANSITIVE-IMPORT-READ",
+        title: "Review rework transitive import read",
+        description: "Second-hop local support imports and missing extension candidates should stay inside the read-only guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-TRANSITIVE-IMPORT-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows tsconfig alias import reads during review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-alias-import-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-ALIAS-IMPORT-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      tsconfig_file = Path.join(workspace, "tsconfig.json")
+      recipe_chats_file = Path.join(workspace, "src/lib/server/recipe-chats.ts")
+      recipe_chat_ids_file = Path.join(workspace, "src/lib/domain/recipe-chat-ids.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(recipe_chats_file))
+      File.mkdir_p!(Path.dirname(recipe_chat_ids_file))
+
+      File.write!(
+        tsconfig_file,
+        Jason.encode!(%{"compilerOptions" => %{"paths" => %{"@/*" => ["./src/*"]}}})
+      )
+
+      File.write!(
+        recipe_chats_file,
+        "import { createRecipeChatId } from '@/lib/domain/recipe-chat-ids';\n"
+      )
+
+      File.write!(
+        recipe_chat_ids_file,
+        "export function createRecipeChatId(): string { return 'chat_test'; }\n"
+      )
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-ALIAS-IMPORT-READ",
+          "branch" => "orocsy/mt-review-alias-import-read",
+          "requirements" => %{
+            "write_scope" => [
+              "src/lib/server/recipe-chats.ts"
+            ]
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/lib/server/recipe-chats.ts",
+                "line" => 524,
+                "body" => "Create post-signup chats with authenticated ownership."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-alias-import-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-alias-import-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,120p'\\'' src/lib/domain/recipe-chat-ids.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-alias-import-read",
+        identifier: "MT-REVIEW-ALIAS-IMPORT-READ",
+        title: "Review rework alias import read",
+        description: "Project alias support imports should stay inside the read-only guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-ALIAS-IMPORT-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks shell-wrapped reads outside review feedback paths" do
     test_root =
       Path.join(
@@ -2160,6 +2554,633 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
     after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows missing referenced support file reads in review rework mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-missing-referenced-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-MISSING-REFERENCED-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      profile_file = Path.join(workspace, "src/features/profile/index.tsx")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(profile_file))
+      File.write!(profile_file, "export function activeAuthProvider() { return 'custom-email-token'; }\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-MISSING-REFERENCED-READ",
+          "branch" => "orocsy/mt-review-missing-referenced-read",
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/features/profile/index.tsx",
+                "line" => 143,
+                "body" => "Honor AUTH_PROVIDER_MODE=fake and NEXT_PUBLIC_AUTH_PROVIDER when choosing the signup provider."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-missing-referenced-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-missing-referenced-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,180p'\\'' src/lib/auth/provider-config.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-missing-referenced-read",
+        identifier: "MT-REVIEW-MISSING-REFERENCED-READ",
+        title: "Review rework missing referenced read",
+        description: "Missing support paths named by review concepts should fail in-shell, not at the guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-MISSING-REFERENCED-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows reads of existing api route files referenced by review endpoints" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-referenced-api-route-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-REFERENCED-API-ROUTE-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      profile_file = Path.join(workspace, "src/features/profile/index.tsx")
+      route_file = Path.join(workspace, "src/app/api/auth/email-token/signup/route.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(profile_file))
+      File.mkdir_p!(Path.dirname(route_file))
+      File.write!(profile_file, "export function activeAuthProvider() { return 'custom-email-token'; }\n")
+      File.write!(route_file, "export async function POST() { return Response.json({ ok: true }); }\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-REFERENCED-API-ROUTE-READ",
+          "branch" => "orocsy/mt-review-referenced-api-route-read",
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/features/profile/index.tsx",
+                "line" => 146,
+                "body" => "In fake mode this client submits /api/auth/email-token/signup, which returns AUTH_PROVIDER_DISABLED."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-referenced-api-route-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-referenced-api-route-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,220p'\\'' src/app/api/auth/email-token/signup/route.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-referenced-api-route-read",
+        identifier: "MT-REVIEW-REFERENCED-API-ROUTE-READ",
+        title: "Review rework referenced api route read",
+        description: "Endpoint URLs named by review feedback should allow the matching Next route read",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-REFERENCED-API-ROUTE-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows package metadata reads for review rework validation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-package-validation-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PACKAGE-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.write!(Path.join(workspace, "package.json"), ~s({"scripts":{"typecheck":"tsc --noEmit"}}\n))
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PACKAGE-READ",
+          "branch" => "orocsy/mt-review-package-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/profile/index.tsx", "line" => 147}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-package-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-package-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,120p'\\'' package.json\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-package-read",
+        identifier: "MT-REVIEW-PACKAGE-READ",
+        title: "Review rework package validation read",
+        description: "package.json reads should be allowed only as validation metadata",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PACKAGE-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows vitest config reads for review rework validation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-vitest-validation-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-VITEST-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.write!(Path.join(workspace, "vitest.config.ts"), "export default {};\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-VITEST-READ",
+          "branch" => "orocsy/mt-review-vitest-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/profile/index.tsx", "line" => 147}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-vitest-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-vitest-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,220p'\\'' vitest.config.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-vitest-read",
+        identifier: "MT-REVIEW-VITEST-READ",
+        title: "Review rework vitest validation read",
+        description: "Vitest config reads should be allowed only as validation metadata",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-VITEST-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows review rework reads for validation files named by runtime corrections" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-correction-validation-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-CORRECTION-VALIDATION-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      correction_file = Path.join(inbox_dir, "correction_validation_read.json")
+      profile_file = Path.join(workspace, "src/features/profile/index.tsx")
+      failing_test_file = Path.join(workspace, "tests/unit/swipe-deck.test.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+      File.mkdir_p!(Path.dirname(profile_file))
+      File.mkdir_p!(Path.dirname(failing_test_file))
+      File.write!(profile_file, "export function activeAuthProvider() { return 'custom-email-token'; }\n")
+      File.write!(failing_test_file, "test('swipe deck auth fallback', () => expect(true).toBe(true));\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-CORRECTION-VALIDATION-READ",
+          "branch" => "orocsy/mt-review-correction-validation-read",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/profile/index.tsx", "line" => 139}
+            ]
+          }
+        })
+      )
+
+      File.write!(
+        correction_file,
+        Jason.encode!(%{
+          "source" => "symphony.runtime.permission",
+          "status" => "resolved",
+          "findings" => [
+            "pnpm test failed in tests/unit/swipe-deck.test.ts before the worker could inspect the failing assertion."
+          ]
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-correction-validation-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-correction-validation-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''230,285p'\\'' tests/unit/swipe-deck.test.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-correction-validation-read",
+        identifier: "MT-REVIEW-CORRECTION-VALIDATION-READ",
+        title: "Review rework correction validation read",
+        description: "Runtime correction evidence should allow a read-only failing test inspection",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-CORRECTION-VALIDATION-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Continue validation rework", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows scoped conflict marker grep during integration check" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-check-conflict-grep-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INTEGRATION-CONFLICT-GREP")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-INTEGRATION-CONFLICT-GREP",
+          "branch" => "orocsy/mt-integration-conflict-grep",
+          "requirements" => %{
+            "write_scope" => [
+              "src/app/api/recipe-chats/route.ts",
+              "tests/integration/recipe-chat-routes.test.ts"
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-integration-conflict-grep"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-integration-conflict-grep"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc grep -R ^<<<<<<< ^======= ^>>>>>>> -n src/app/api/recipe-chats/route.ts tests/integration/recipe-chat-routes.test.ts"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-integration-conflict-grep",
+        identifier: "MT-INTEGRATION-CONFLICT-GREP",
+        title: "Integration conflict marker grep",
+        description: "Scoped conflict marker grep should be allowed during integration checks",
+        state: "Rework",
+        url: "https://example.org/issues/MT-INTEGRATION-CONFLICT-GREP",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Resolve integration conflicts", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows scoped file grep during integration check" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-check-file-grep-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INTEGRATION-FILE-GREP")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-integration-file-grep.trace")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-INTEGRATION-FILE-GREP",
+          "branch" => "orocsy/mt-integration-file-grep",
+          "requirements" => %{
+            "write_scope" => [
+              "src/lib/server/recipe-chats.ts"
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-integration-file-grep.trace}"
+      count=0
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-integration-file-grep"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-integration-file-grep"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc grep -n migrateRecipeChats\\\\\\\\|resetRecipeChats src/lib/server/recipe-chats.ts"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-integration-file-grep",
+        identifier: "MT-INTEGRATION-FILE-GREP",
+        title: "Integration scoped file grep",
+        description: "Scoped file grep should be allowed during integration checks",
+        state: "Rework",
+        url: "https://example.org/issues/MT-INTEGRATION-FILE-GREP",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Resolve integration validation", issue)
+
+      thread_start =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Current Validation Rework"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "do not just rerun the same failing validation"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "dirty handoff recovery"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "validation fails and names the exact broken file"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
     end
   end
@@ -4411,5 +5432,21 @@ defmodule SymphonyElixir.AppServerTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp write_fresh_checkpoint_git_progress!(workspace, relative_path) do
+    full_path = Path.join(workspace, relative_path)
+    File.mkdir_p!(Path.dirname(full_path))
+
+    assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+    assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+    assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+
+    File.write!(full_path, "baseline\n")
+    assert {_output, 0} = System.cmd("git", ["add", relative_path], cd: workspace, stderr_to_stdout: true)
+    assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+    assert {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+    File.write!(full_path, "checkpoint\n")
   end
 end

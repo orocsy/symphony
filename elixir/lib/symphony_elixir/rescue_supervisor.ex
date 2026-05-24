@@ -10,7 +10,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   @hydrated_retry_loop_limit 2
   @review_rework_loop_limit 2
-  @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v16"
+  @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v18"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
   def run_once(issues) when is_list(issues) do
@@ -232,7 +232,7 @@ defmodule SymphonyElixir.RescueSupervisor do
       {:ok, requirements} ->
         cond do
           hydrated_dispatch_preflight_before_corrections?(workspace, corrections) and
-              not workspace_has_uncommitted_or_unpushed_progress?(workspace) ->
+              not durable_workspace_progress_after_corrections?(workspace, corrections) ->
             classification = "worker_prompt_defect"
 
             summary =
@@ -245,7 +245,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
             [issue.id]
 
-          hydrated_retry_loop_exhausted?(workspace) and not workspace_has_uncommitted_or_unpushed_progress?(workspace) ->
+          hydrated_retry_loop_exhausted?(workspace) and not durable_workspace_progress_after_corrections?(workspace, corrections) ->
             classification = "worker_prompt_defect"
 
             summary =
@@ -457,12 +457,6 @@ defmodule SymphonyElixir.RescueSupervisor do
       end
     end)
   end
-
-  defp workspace_has_uncommitted_or_unpushed_progress?(workspace) when is_binary(workspace) do
-    git_dirty?(workspace) or git_ahead_of_upstream?(workspace)
-  end
-
-  defp workspace_has_uncommitted_or_unpushed_progress?(_workspace), do: false
 
   defp durable_workspace_progress_after_corrections?(workspace, corrections) when is_binary(workspace) do
     case latest_correction_created_at(corrections) do
@@ -702,35 +696,6 @@ defmodule SymphonyElixir.RescueSupervisor do
     Enum.max_by(datetimes, &DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
-  defp git_dirty?(workspace) do
-    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
-      {status, 0} -> String.trim(status) != ""
-      {_output, _exit_code} -> false
-    end
-  rescue
-    _error -> false
-  end
-
-  defp git_ahead_of_upstream?(workspace) do
-    with {upstream, 0} <-
-           System.cmd("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-             cd: workspace,
-             stderr_to_stdout: true
-           ),
-         upstream <- String.trim(upstream),
-         true <- upstream != "",
-         {count, 0} <- System.cmd("git", ["rev-list", "--count", "#{upstream}..HEAD"], cd: workspace, stderr_to_stdout: true) do
-      case Integer.parse(String.trim(count)) do
-        {value, _rest} -> value > 0
-        :error -> false
-      end
-    else
-      _ -> false
-    end
-  rescue
-    _error -> false
-  end
-
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->
       source = correction["source"] || ""
@@ -811,7 +776,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp worker_prompt_runtime_fix_summary do
-    "worker_prompt_defect_resolved_by_runtime_fix: #{@worker_prompt_fix_version} records dispatch preflight as runtime-only context, keeps review classification and technical MIU trace as worker-required checkpoints, ignores runtime preflight as durable worker progress, injects base-branch, issue-brief, dependency, toolchain, and validation guidance, blocks broad search/refetch/sideways file-read commands including real exec_command function-call events, treats successful focused validation function-call outputs as live durable progress, writes recent worker command/outcome evidence into runtime corrections, blocks review-rework Linear terminal state mutations until a fresh review scan is clean, and forces dirty review handoffs to validate the dirty diff instead of rediscovering paths with git ls-files."
+    "worker_prompt_defect_resolved_by_runtime_fix: #{@worker_prompt_fix_version} records dispatch preflight as runtime-only context, keeps review classification and technical MIU trace as worker-required checkpoints, ignores runtime preflight as durable worker progress, injects base-branch, issue-brief, dependency, toolchain, and validation guidance, blocks broad search/refetch/sideways file-read commands including real exec_command function-call events, treats successful focused validation function-call outputs as live durable progress, writes recent worker command/outcome evidence into runtime corrections, blocks review-rework Linear terminal state mutations until a fresh review scan is clean, forces dirty review handoffs to validate the dirty diff before additional edits, and only resolves hydrated no-progress retries when durable workspace progress is newer than the parked correction."
   end
 
   defp stale_worker_prompt_defect_resolved_comment(issue, corrections) do

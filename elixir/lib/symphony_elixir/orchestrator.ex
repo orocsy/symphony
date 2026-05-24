@@ -13,7 +13,10 @@ defmodule SymphonyElixir.Orchestrator do
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   @review_rework_first_event_max_tokens 45_000
+  @integration_check_first_event_max_tokens 2_000
+  @integration_check_no_progress_min_tokens 5_000
   @recent_codex_update_limit 8
+  @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @durable_progress_event_names [
@@ -170,8 +173,27 @@ defmodule SymphonyElixir.Orchestrator do
               end
 
             _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-              handle_agent_failure(state, issue_id, running_entry, reason)
+              cond do
+                workflow_blocked_by_open_correction?(running_entry) ->
+                  Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; open Orocsy correction blocks retry until resolved")
+
+                  state
+                  |> complete_issue(issue_id)
+                  |> release_issue_claim(issue_id)
+
+                normal_completion_handoff_stop?(running_entry) ->
+                  Logger.warning(
+                    "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} after pushed handoff checkpoint; blocking retry until review/Linear state changes"
+                  )
+
+                  state
+                  |> complete_issue(issue_id)
+                  |> release_issue_claim(issue_id)
+
+                true ->
+                  Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+                  handle_agent_failure(state, issue_id, running_entry, reason)
+              end
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -349,6 +371,11 @@ defmodule SymphonyElixir.Orchestrator do
     def complete_pushed_handoff_for_test(%Issue{} = issue) do
       maybe_complete_pushed_review_handoff(issue)
     end
+
+    @doc false
+    def complete_review_classification_handoff_for_test(%Issue{} = issue) do
+      maybe_complete_review_classification_handoff(issue)
+    end
   end
 
   @doc false
@@ -511,11 +538,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp reconcile_no_durable_progress_running_issues(%State{} = state) do
     codex_config = Config.settings!().codex
     timeout_ms = codex_config.durable_progress_timeout_ms
-    min_tokens = codex_config.durable_progress_min_tokens
     first_event_max_tokens = codex_config.durable_progress_first_event_max_tokens
 
     cond do
-      timeout_ms <= 0 or min_tokens <= 0 ->
+      timeout_ms <= 0 or codex_config.durable_progress_min_tokens <= 0 ->
         state
 
       map_size(state.running) == 0 ->
@@ -531,7 +557,7 @@ defmodule SymphonyElixir.Orchestrator do
             running_entry,
             now,
             timeout_ms,
-            min_tokens,
+            codex_config.durable_progress_min_tokens,
             first_event_max_tokens
           )
         end)
@@ -549,6 +575,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     elapsed_ms = runtime_elapsed_ms(running_entry, now)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    min_tokens = effective_no_durable_progress_min_tokens(running_entry, min_tokens)
     first_event_max_tokens = effective_first_event_max_tokens(running_entry, first_event_max_tokens)
     first_event_progress_tokens = first_event_progress_tokens(running_entry, total_tokens)
     durable_progress_guard_tokens = durable_progress_guard_tokens(running_entry, total_tokens)
@@ -582,6 +609,19 @@ defmodule SymphonyElixir.Orchestrator do
         reason = {:missing_first_durable_event, elapsed_ms, first_event_progress_tokens, first_event_max_tokens}
 
         park_running_issue(state, issue_id, running_entry, reason, failure)
+
+      is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
+        durable_progress_guard_tokens >= min_tokens and pushed_handoff_wait_checkpoint?(running_entry) ->
+        identifier = Map.get(running_entry, :identifier, issue_id)
+        session_id = running_entry_session_id(running_entry)
+
+        Logger.info(
+          "Issue reached pushed handoff review gate before no-durable-progress guard: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms}; stopping worker without correction"
+        )
+
+        state
+        |> terminate_running_issue(issue_id, false)
+        |> complete_issue(issue_id)
 
       is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
           durable_progress_guard_tokens >= min_tokens ->
@@ -648,7 +688,7 @@ defmodule SymphonyElixir.Orchestrator do
     observed_at =
       if File.dir?(workspace) do
         (runtime_validation_progress_times(running_entry) ++
-           durable_progress_observed_times(workspace, started_at, count_dispatch_preflight?))
+           durable_progress_observed_times(running_entry, workspace, started_at, count_dispatch_preflight?))
         |> latest_datetime()
       end
 
@@ -668,8 +708,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     File.dir?(workspace) and
       runtime_validation_progress_times(running_entry) ++
-        event_durable_progress_times(workspace, started_at, count_dispatch_preflight?) ++
-        git_substantive_progress_times(workspace, started_at) != []
+        substantive_first_progress_times(running_entry, workspace, started_at, count_dispatch_preflight?) != []
   rescue
     _error -> false
   end
@@ -723,7 +762,31 @@ defmodule SymphonyElixir.Orchestrator do
   defp generated_runtime_path?(_path), do: false
 
   defp durable_progress_observed_times(workspace, started_at, count_dispatch_preflight?) do
-    git_durable_progress_times(workspace, started_at) ++
+    review_classification_progress_times(workspace, started_at) ++
+      git_durable_progress_times(workspace, started_at) ++
+      event_durable_progress_times(workspace, started_at, count_dispatch_preflight?)
+  end
+
+  defp durable_progress_observed_times(running_entry, workspace, started_at, count_dispatch_preflight?) do
+    if integration_check_running_entry?(running_entry) do
+      integration_check_durable_progress_times(workspace, started_at, count_dispatch_preflight?)
+    else
+      durable_progress_observed_times(workspace, started_at, count_dispatch_preflight?)
+    end
+  end
+
+  defp substantive_first_progress_times(running_entry, workspace, started_at, count_dispatch_preflight?) do
+    if integration_check_running_entry?(running_entry) do
+      integration_check_durable_progress_times(workspace, started_at, count_dispatch_preflight?)
+    else
+      review_classification_progress_times(workspace, started_at) ++
+        event_durable_progress_times(workspace, started_at, count_dispatch_preflight?) ++
+        git_substantive_progress_times(workspace, started_at)
+    end
+  end
+
+  defp integration_check_durable_progress_times(workspace, started_at, count_dispatch_preflight?) do
+    git_committed_or_upstream_progress_times(workspace, started_at) ++
       event_durable_progress_times(workspace, started_at, count_dispatch_preflight?)
   end
 
@@ -733,6 +796,15 @@ defmodule SymphonyElixir.Orchestrator do
       git_ahead_commit_observed_at(workspace),
       git_upstream_progress_observed_at(workspace),
       git_issue_branch_observed_at(workspace)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&datetime_at_or_after?(&1, started_at))
+  end
+
+  defp git_committed_or_upstream_progress_times(workspace, started_at) do
+    [
+      git_ahead_commit_observed_at(workspace),
+      git_upstream_progress_observed_at(workspace)
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.filter(&datetime_at_or_after?(&1, started_at))
@@ -905,6 +977,26 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.flat_map(&durable_progress_event_file_times(&1, started_at, count_dispatch_preflight?))
   end
 
+  defp review_classification_progress_times(workspace, started_at) when is_binary(workspace) do
+    path = Path.join(workspace, @review_classification_path)
+
+    with true <- File.regular?(path),
+         {:ok, classification} <- read_review_classification_handoff(workspace),
+         true <- no_code_review_classification?(classification) and resolved_review_classification?(classification),
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]),
+         true <- classification_head_matches?(classification, String.trim(head_sha)),
+         %DateTime{} = observed_at <- file_mtime_datetime(path),
+         true <- datetime_at_or_after?(observed_at, started_at) do
+      [observed_at]
+    else
+      _ -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp review_classification_progress_times(_workspace, _started_at), do: []
+
   defp durable_progress_event_paths(workspace) do
     [
       Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
@@ -941,6 +1033,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp durable_progress_event?(%{"event" => "tool.finished", "tool" => "first-turn-miu-handoff"}, _count_dispatch_preflight?),
     do: false
 
+  defp durable_progress_event?(%{"event" => "tool.finished", "tool" => "technical-miu-trace"}, _count_dispatch_preflight?),
+    do: false
+
   defp durable_progress_event?(%{"event" => event} = decoded, _count_dispatch_preflight?) when is_binary(event) do
     event in @durable_progress_event_names or
       String.starts_with?(event, "eval.") or
@@ -951,10 +1046,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp durable_progress_event?(_decoded, _count_dispatch_preflight?), do: false
 
   defp effective_first_event_max_tokens(running_entry, configured) when is_integer(configured) and configured > 0 do
-    if review_rework_running_entry?(running_entry) do
-      min(configured, @review_rework_first_event_max_tokens)
-    else
-      configured
+    cond do
+      review_rework_running_entry?(running_entry) ->
+        min(configured, @review_rework_first_event_max_tokens)
+
+      integration_check_running_entry?(running_entry) ->
+        min(configured, @integration_check_first_event_max_tokens)
+
+      true ->
+        configured
     end
   end
 
@@ -991,6 +1091,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp count_dispatch_preflight_progress?(_running_entry), do: false
+
+  defp effective_no_durable_progress_min_tokens(running_entry, configured)
+       when is_integer(configured) and configured > 0 do
+    if integration_check_running_entry?(running_entry) do
+      min(configured, @integration_check_no_progress_min_tokens)
+    else
+      configured
+    end
+  end
+
+  defp effective_no_durable_progress_min_tokens(_running_entry, configured), do: configured
+
+  defp integration_check_running_entry?(%{workspace_path: workspace}) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "integration_check"}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp integration_check_running_entry?(_running_entry), do: false
 
   defp review_rework_running_entry?(%{workspace_path: workspace}) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
@@ -1082,7 +1204,7 @@ defmodule SymphonyElixir.Orchestrator do
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
       if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        case maybe_complete_pushed_review_handoff(issue) do
+        case maybe_complete_review_classification_handoff(issue) do
           {:completed, _handoff} ->
             complete_issue(state_acc, issue.id)
 
@@ -1090,12 +1212,458 @@ defmodule SymphonyElixir.Orchestrator do
             state_acc
 
           :not_ready ->
-            dispatch_issue(state_acc, issue)
+            case maybe_complete_pushed_review_handoff(issue) do
+              {:completed, _handoff} ->
+                complete_issue(state_acc, issue.id)
+
+              {:blocked, _reason} ->
+                state_acc
+
+              :not_ready ->
+                dispatch_issue(state_acc, issue)
+            end
         end
       else
         state_acc
       end
     end)
+  end
+
+  defp maybe_complete_review_classification_handoff(%Issue{} = issue) do
+    case review_classification_handoff_candidate(issue) do
+      {:ok, candidate} -> complete_review_classification_handoff(issue, candidate)
+      :not_ready -> :not_ready
+      {:error, reason} -> {:blocked, reason}
+    end
+  end
+
+  defp maybe_complete_review_classification_handoff(_issue), do: :not_ready
+
+  defp complete_review_classification_handoff(%Issue{} = issue, candidate) do
+    if Config.settings!().review_monitor.enabled do
+      case inspect_review_classification_handoff(issue, candidate) do
+        {:ok, inspection} ->
+          complete_inspected_review_classification_handoff(issue, candidate, inspection)
+
+        {:error, {:missing_pull_request, _candidate}} ->
+          :not_ready
+
+        {:error, reason} ->
+          park_review_classification_handoff_blocker(issue, candidate, reason)
+          {:blocked, reason}
+
+        {:blocked, reason} ->
+          {:blocked, reason}
+      end
+    else
+      :not_ready
+    end
+  end
+
+  defp complete_inspected_review_classification_handoff(%Issue{} = issue, candidate, inspection) do
+    case pushed_handoff_head_status(candidate, inspection) do
+      :current ->
+        if integration_check_mergeability_rework_needed?(issue, inspection) do
+          Logger.info(
+            "No-code review classification handoff PR still has merge conflicts; dispatching integration check: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"} mergeable_state=#{inspect(map_value(inspection, [:mergeable_state, "mergeable_state"]))}"
+          )
+
+          :not_ready
+        else
+          case pushed_review_feedback_status(inspection) do
+            :clean -> complete_clean_review_classification_handoff(issue, candidate, inspection)
+            :has_review_feedback -> complete_feedback_review_classification_handoff(issue, candidate, inspection)
+          end
+        end
+
+      {:stale, _reason} ->
+        :not_ready
+    end
+  end
+
+  defp complete_clean_review_classification_handoff(%Issue{} = issue, candidate, inspection) do
+    clean_review_status = clean_codex_review_status(inspection)
+
+    cond do
+      codex_review_request_pending?(inspection) ->
+        Logger.info(
+          "No-code review classification handoff is waiting for clean Codex review: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+        )
+
+        {:blocked, :review_pending}
+
+      clean_review_status == :confirmed ->
+        finish_clean_review_classification_handoff(issue, candidate, inspection)
+
+      clean_review_status == :missing ->
+        request_review_classification_codex_review(issue, candidate, inspection)
+
+      review_classification_review_request_recorded?(candidate.workspace) ->
+        Logger.info(
+          "No-code review classification handoff already requested Codex review and is waiting: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+        )
+
+        {:blocked, :review_pending}
+
+      true ->
+        reason = {:clean_codex_review_lookup_failed, clean_review_status}
+        park_review_classification_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+    end
+  end
+
+  defp complete_feedback_review_classification_handoff(%Issue{} = issue, candidate, inspection) do
+    cond do
+      codex_review_request_pending?(inspection) ->
+        Logger.info(
+          "No-code review classification handoff is waiting for fresh Codex review: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+        )
+
+        {:blocked, :review_pending}
+
+      review_classification_review_request_recorded?(candidate.workspace) ->
+        case review_feedback_after_latest_request_status(inspection) do
+          :feedback_after_request ->
+            :not_ready
+
+          :no_feedback_after_request ->
+            Logger.info(
+              "No-code review classification handoff already requested Codex review and no newer feedback has arrived: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+            )
+
+            {:blocked, :review_pending}
+
+          {:error, reason} ->
+            reason = {:review_feedback_after_latest_request_lookup_failed, reason}
+            park_review_classification_handoff_blocker(issue, candidate, reason)
+            {:blocked, reason}
+        end
+
+      true ->
+        request_review_classification_codex_review(issue, candidate, inspection)
+    end
+  end
+
+  defp review_classification_handoff_candidate(%Issue{} = issue) do
+    with {:ok, workspace} <- Workspace.path_for_issue(issue),
+         true <- File.dir?(workspace),
+         {:ok, classification} <- read_review_classification_handoff(workspace),
+         true <- no_code_review_classification?(classification),
+         true <- resolved_review_classification?(classification),
+         {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
+         {:ok, dirty_status} <- git_output(workspace, ["status", "--porcelain=v1"]),
+         true <- String.trim(dirty_status) == "",
+         {:ok, branch} <- git_output(workspace, ["branch", "--show-current"]),
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]),
+         head_sha = String.trim(head_sha),
+         true <- classification_head_matches?(classification, head_sha) do
+      {:ok,
+       %{
+         workspace: workspace,
+         classification: classification,
+         status: String.trim(status),
+         branch: first_present(classification["branch"], String.trim(branch)),
+         head_sha: head_sha,
+         pr_number: classification["pr"],
+         checkpoint: review_classification_checkpoint(classification, status)
+       }}
+    else
+      false -> :not_ready
+      "" -> :not_ready
+      {:error, :missing_review_classification_handoff} -> :not_ready
+      {:error, reason} -> {:error, reason}
+      _ -> :not_ready
+    end
+  rescue
+    error -> {:error, {:review_classification_handoff_candidate_failed, Exception.message(error)}}
+  end
+
+  defp read_review_classification_handoff(workspace) when is_binary(workspace) do
+    path = Path.join(workspace, @review_classification_path)
+
+    cond do
+      not File.regular?(path) ->
+        {:error, :missing_review_classification_handoff}
+
+      true ->
+        path
+        |> File.read!()
+        |> Jason.decode()
+    end
+  rescue
+    error -> {:error, {:review_classification_handoff_read_failed, Exception.message(error)}}
+  end
+
+  defp no_code_review_classification?(classification) when is_map(classification) do
+    code_edit =
+      (classification["code_edit"] || "")
+      |> to_string()
+      |> String.downcase()
+
+    code_edit in ["none", "no_code_change", "not_run_no_code_change"]
+  end
+
+  defp no_code_review_classification?(_classification), do: false
+
+  defp resolved_review_classification?(%{"classification" => classification} = payload)
+       when is_binary(classification) do
+    normalized = normalize_review_classification(classification)
+
+    normalized in ["already_resolved_in_current_head", "stale_resolved", "resolved"] and
+      payload
+      |> Map.get("feedback", [])
+      |> feedback_classification_resolved?()
+  end
+
+  defp resolved_review_classification?(_payload), do: false
+
+  defp feedback_classification_resolved?([]), do: true
+
+  defp feedback_classification_resolved?(feedback) when is_list(feedback) do
+    Enum.all?(feedback, fn
+      %{"classification" => classification} ->
+        normalize_review_classification(classification) in [
+          "stale_resolved",
+          "already_resolved",
+          "already_resolved_in_current_head",
+          "resolved",
+          "outdated"
+        ]
+
+      _ ->
+        false
+    end)
+  end
+
+  defp feedback_classification_resolved?(_feedback), do: false
+
+  defp normalize_review_classification(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp classification_head_matches?(classification, head_sha) when is_map(classification) and is_binary(head_sha) do
+    classification_head = classification["head"] || classification["head_sha"]
+    is_binary(classification_head) and String.trim(classification_head) == head_sha
+  end
+
+  defp classification_head_matches?(_classification, _head_sha), do: false
+
+  defp review_classification_checkpoint(classification, status) do
+    feedback_count =
+      classification
+      |> Map.get("feedback", [])
+      |> case do
+        feedback when is_list(feedback) -> length(feedback)
+        _ -> 0
+      end
+
+    """
+    No-code review classification checkpoint:
+
+    - Classification: #{classification["classification"] || "unknown"}
+    - Reviewed head: `#{short_sha(classification["head"] || classification["head_sha"])}`
+    - Feedback classified as resolved/stale: #{feedback_count}
+    - Git status: #{String.trim(status)}
+    - Next action: request or wait for a fresh Codex review without redispatching a product-code worker.
+    """
+    |> String.trim()
+  end
+
+  defp inspect_review_classification_handoff(%Issue{} = issue, %{branch: branch, workspace: workspace} = candidate) do
+    monitor = handoff_review_monitor(workspace)
+    issue = %{issue | branch_name: first_present(issue.branch_name, branch)}
+
+    case ReviewMonitor.inspect_issue(issue, monitor) do
+      {:ok, %{pr: nil}} ->
+        {:error, {:missing_pull_request, candidate}}
+
+      {:ok, inspection} ->
+        {:ok, Map.new(inspection)}
+
+      {:error, reason} ->
+        reason = {:review_classification_handoff_inspection_failed, reason}
+        park_review_classification_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+    end
+  end
+
+  defp review_classification_review_request_recorded?(workspace) do
+    pushed_handoff_review_request_recorded?(workspace)
+  end
+
+  defp request_review_classification_codex_review(%Issue{} = issue, candidate, inspection) do
+    repo = map_value(inspection, [:repo, "repo"])
+    pr = map_value(inspection, [:pr, "pr"])
+    body = review_classification_codex_review_body(issue, candidate, inspection)
+
+    case ReviewMonitor.request_codex_review(repo, pr, body) do
+      {:ok, _comment} ->
+        record_review_classification_request_event(candidate.workspace, issue, candidate, inspection)
+        _ = Tracker.create_comment(issue.id, review_classification_request_tracker_comment(issue, candidate, inspection))
+
+        Logger.info(
+          "Requested fresh Codex review directly for no-code review classification handoff: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+        )
+
+        {:blocked, :review_pending}
+
+      {:error, reason} ->
+        reason = {:codex_review_request_failed, reason}
+        park_review_classification_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+    end
+  end
+
+  defp review_classification_codex_review_body(%Issue{} = issue, candidate, inspection) do
+    """
+    @codex review
+
+    Requested by Symphony after #{issue.identifier || issue.id || "this issue"} classified the current PR feedback as already resolved at #{short_sha(candidate.head_sha)} on PR #{pr_label(inspection)}. Please re-check the current head so older unresolved review threads can be cleared or replaced with fresh feedback.
+    """
+    |> String.trim()
+  end
+
+  defp review_classification_request_tracker_comment(%Issue{} = issue, candidate, inspection) do
+    """
+    Symphony requested a fresh Codex PR review directly from the no-code review classification checkpoint, without starting another product-code worker.
+
+    - Issue: `#{issue.identifier}`
+    - Branch: `#{candidate.branch}`
+    - Commit: `#{short_sha(candidate.head_sha)}`
+    - PR: #{pr_label(inspection)}
+    - State kept: `#{issue.state}`
+    - Next action: wait for Codex review; if new current-head feedback appears after this request, Symphony will redispatch bounded review rework.
+    """
+    |> String.trim()
+  end
+
+  defp record_review_classification_request_event(workspace, %Issue{} = issue, candidate, inspection)
+       when is_binary(workspace) do
+    event_dir = Path.join(workspace, ".orocsy/delivery/events")
+    File.mkdir_p!(event_dir)
+
+    event = %{
+      "event" => "tool.finished",
+      "status" => "passed",
+      "tool" => "codex-review-requested",
+      "ts" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "issue" => issue.identifier,
+      "branch" => candidate.branch,
+      "head_sha" => candidate.head_sha,
+      "pr_number" => map_value(inspection, [:pr_number, "pr_number"]),
+      "pr_url" => map_value(inspection, [:pr_url, "pr_url"]),
+      "mode" => "direct-review-classification-request"
+    }
+
+    File.write!(Path.join(event_dir, "events.jsonl"), Jason.encode!(event) <> "\n", [:append])
+  rescue
+    error ->
+      Logger.debug("Unable to record review classification request event for #{issue_context(issue)}: #{Exception.message(error)}")
+  end
+
+  defp record_review_classification_request_event(_workspace, _issue, _candidate, _inspection), do: :ok
+
+  defp finish_clean_review_classification_handoff(%Issue{} = issue, candidate, inspection) do
+    with {:ok, target_state} <- handoff_review_state(),
+         :ok <- Tracker.update_issue_state(issue.id, target_state) do
+      _ = Tracker.create_comment(issue.id, review_classification_handoff_comment(issue, candidate, inspection, target_state))
+      record_review_classification_handoff_event(candidate.workspace, issue, candidate, inspection, target_state)
+
+      Logger.info(
+        "Completed no-code review classification handoff without Codex worker: #{issue_context(issue)} state=#{target_state} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+      )
+
+      {:completed,
+       %{
+         target_state: target_state,
+         workspace: candidate.workspace,
+         branch: candidate.branch,
+         head_sha: candidate.head_sha,
+         pr_number: inspection.pr_number,
+         pr_url: inspection.pr_url
+       }}
+    else
+      {:error, reason} ->
+        park_review_classification_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+    end
+  end
+
+  defp review_classification_handoff_comment(%Issue{} = issue, candidate, inspection, target_state) do
+    """
+    Symphony completed the no-code review classification handoff without starting another product-code worker because the current PR has a clean Codex result after the latest review request.
+
+    - Issue: `#{issue.identifier}`
+    - New state: `#{target_state}`
+    - Branch: `#{candidate.branch}`
+    - Commit: `#{short_sha(candidate.head_sha)}`
+    - PR: #{pr_label(inspection)}
+
+    Classification evidence:
+    #{candidate.checkpoint}
+    """
+    |> String.trim()
+  end
+
+  defp record_review_classification_handoff_event(workspace, %Issue{} = issue, candidate, inspection, target_state)
+       when is_binary(workspace) do
+    event_dir = Path.join(workspace, ".orocsy/delivery/events")
+    File.mkdir_p!(event_dir)
+
+    event = %{
+      "event" => "handoff.completed",
+      "status" => "passed",
+      "ts" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "issue" => issue.identifier,
+      "branch" => candidate.branch,
+      "head_sha" => candidate.head_sha,
+      "pr_number" => inspection.pr_number,
+      "pr_url" => inspection.pr_url,
+      "state" => target_state,
+      "mode" => "direct-review-classification-handoff"
+    }
+
+    File.write!(Path.join(event_dir, "events.jsonl"), Jason.encode!(event) <> "\n", [:append])
+  rescue
+    error ->
+      Logger.debug("Unable to record review classification handoff event for #{issue_context(issue)}: #{Exception.message(error)}")
+  end
+
+  defp park_review_classification_handoff_blocker(%Issue{} = issue, candidate, reason) do
+    failure = %{
+      action: :block,
+      kind: "handoff-review",
+      source_status: "blocked",
+      next_action: "retry",
+      summary:
+        "Symphony stopped before starting a Codex worker because this issue has a no-code review classification checkpoint, but the runtime could not inspect, request, or update the PR/Linear handoff state with bounded context.",
+      required_corrections: [
+        "Retry the no-code review classification handoff when GitHub and Linear are available.",
+        "Do not start a full Codex worker for this handoff-only checkpoint unless fresh current-head feedback arrives after the latest review request."
+      ]
+    }
+
+    correction_result =
+      Workspace.create_correction_in_workspace(
+        candidate.workspace,
+        issue,
+        %{
+          source: "symphony.runtime.review-classification-handoff",
+          source_status: failure.source_status,
+          summary: failure.summary,
+          findings: [inspect(reason)],
+          required_corrections: failure.required_corrections,
+          next_action: failure.next_action
+        }
+      )
+
+    case correction_result do
+      {:ok, correction} -> maybe_comment_runtime_failure(issue, correction, failure)
+      {:error, correction_reason} -> Logger.warning("Unable to write no-code review classification blocker for #{issue_context(issue)}: #{inspect(correction_reason)}")
+    end
   end
 
   defp maybe_complete_pushed_review_handoff(%Issue{} = issue) do
@@ -1132,64 +1700,86 @@ defmodule SymphonyElixir.Orchestrator do
   defp complete_inspected_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
     case pushed_handoff_head_status(candidate, inspection) do
       :current ->
-        case pushed_review_feedback_status(inspection) do
-          :clean ->
-            clean_review_status = clean_codex_review_status(inspection)
+        if integration_check_mergeability_rework_needed?(issue, inspection) do
+          Logger.info(
+            "Pushed handoff PR still has merge conflicts; dispatching integration check: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"} mergeable_state=#{inspect(map_value(inspection, [:mergeable_state, "mergeable_state"]))}"
+          )
 
-            cond do
-              codex_review_request_pending?(inspection) ->
-                Logger.info(
-                  "Pushed review handoff is waiting for clean Codex review before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
-                )
+          :not_ready
+        else
+          case pushed_review_feedback_status(inspection) do
+            :clean ->
+              clean_review_status = clean_codex_review_status(inspection)
 
-                {:blocked, :review_pending}
+              cond do
+                codex_review_request_pending?(inspection) ->
+                  Logger.info(
+                    "Pushed review handoff is waiting for clean Codex review before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                  )
 
-              clean_review_status == :missing ->
-                Logger.info(
-                  "Pushed review handoff needs a clean Codex review result before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
-                )
+                  {:blocked, :review_pending}
 
-                :not_ready
+                clean_review_status == :missing ->
+                  Logger.info(
+                    "Pushed review handoff needs a clean Codex review result before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                  )
 
-              clean_review_status == :confirmed ->
-                finish_clean_pushed_review_handoff(issue, candidate, inspection)
+                  :not_ready
 
-              true ->
-                reason = {:clean_codex_review_lookup_failed, clean_review_status}
-                park_pushed_handoff_blocker(issue, candidate, reason)
-                {:blocked, reason}
-            end
+                clean_review_status == :confirmed ->
+                  finish_clean_pushed_review_handoff(issue, candidate, inspection)
 
-          :has_review_feedback ->
-            cond do
-              codex_review_request_pending?(inspection) ->
-                Logger.info(
-                  "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
-                )
+                true ->
+                  reason = {:clean_codex_review_lookup_failed, clean_review_status}
+                  park_pushed_handoff_blocker(issue, candidate, reason)
+                  {:blocked, reason}
+              end
 
-                {:blocked, :review_pending}
+            :has_review_feedback ->
+              cond do
+                codex_review_request_pending?(inspection) ->
+                  Logger.info(
+                    "Pushed review handoff is waiting for fresh Codex review before redispatch: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                  )
 
-              pushed_handoff_review_request_recorded?(candidate.workspace) ->
-                case review_feedback_after_latest_request_status(inspection) do
-                  :feedback_after_request ->
-                    :not_ready
+                  {:blocked, :review_pending}
 
-                  :no_feedback_after_request ->
-                    Logger.info(
-                      "Pushed review handoff already requested Codex review and is waiting for review state to change: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
-                    )
+                pushed_handoff_codex_review_request_needed?(candidate, inspection) ->
+                  case request_pushed_handoff_codex_review(issue, candidate, inspection) do
+                    :ok ->
+                      Logger.info(
+                        "Requested fresh Codex review directly for pushed handoff: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                      )
 
-                    {:blocked, :review_pending}
+                      {:blocked, :review_pending}
 
-                  {:error, reason} ->
-                    reason = {:review_feedback_after_latest_request_lookup_failed, reason}
-                    park_pushed_handoff_blocker(issue, candidate, reason)
-                    {:blocked, reason}
-                end
+                    {:error, reason} ->
+                      park_pushed_handoff_blocker(issue, candidate, reason)
+                      {:blocked, reason}
+                  end
 
-              true ->
-                :not_ready
-            end
+                pushed_handoff_review_request_recorded?(candidate.workspace) ->
+                  case review_feedback_after_latest_request_status(inspection) do
+                    :feedback_after_request ->
+                      :not_ready
+
+                    :no_feedback_after_request ->
+                      Logger.info(
+                        "Pushed review handoff already requested Codex review and is waiting for review state to change: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                      )
+
+                      {:blocked, :review_pending}
+
+                    {:error, reason} ->
+                      reason = {:review_feedback_after_latest_request_lookup_failed, reason}
+                      park_pushed_handoff_blocker(issue, candidate, reason)
+                      {:blocked, reason}
+                  end
+
+                true ->
+                  :not_ready
+              end
+          end
         end
 
       {:stale, reason} ->
@@ -1197,6 +1787,37 @@ defmodule SymphonyElixir.Orchestrator do
         {:blocked, reason}
     end
   end
+
+  defp integration_check_mergeability_rework_needed?(%Issue{} = issue, inspection) when is_map(inspection) do
+    integration_check_issue?(issue) and mergeability_conflict?(inspection)
+  end
+
+  defp integration_check_mergeability_rework_needed?(_issue, _inspection), do: false
+
+  defp integration_check_issue?(%Issue{} = issue) do
+    text =
+      [issue.title, issue.description]
+      |> Enum.map(&to_string/1)
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    String.contains?(text, ["integration-check", "integration check", "final pr handoff", "merge conflict"])
+  end
+
+  defp mergeability_conflict?(inspection) when is_map(inspection) do
+    state =
+      inspection
+      |> map_value([:mergeable_state, "mergeable_state"])
+      |> to_string()
+      |> String.downcase()
+
+    mergeable = map_value(inspection, [:mergeable, "mergeable"])
+
+    state in ["dirty", "conflicting", "conflict", "merge_conflict"] or
+      (mergeable == false and state in ["dirty", "conflicting"])
+  end
+
+  defp mergeability_conflict?(_inspection), do: false
 
   defp pushed_handoff_head_status(%{head_sha: candidate_head}, inspection) do
     live_head = inspection_head_sha(inspection)
@@ -1262,7 +1883,8 @@ defmodule SymphonyElixir.Orchestrator do
          checkpoint: checkpoint,
          status: String.trim(status),
          branch: String.trim(branch),
-         head_sha: String.trim(head_sha)
+         head_sha: String.trim(head_sha),
+         head_committed_at: git_head_committed_at(workspace)
        }}
     else
       false -> :not_ready
@@ -1340,6 +1962,82 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp review_feedback_after_latest_request_status(_inspection), do: :no_feedback_after_request
+
+  defp pushed_handoff_codex_review_request_needed?(%{head_committed_at: %DateTime{} = head_at}, inspection) do
+    feedback = map_value(inspection, [:feedback, "feedback"])
+
+    case latest_review_feedback_at(feedback) do
+      %DateTime{} = feedback_at -> DateTime.compare(head_at, feedback_at) == :gt
+      _ -> false
+    end
+  end
+
+  defp pushed_handoff_codex_review_request_needed?(_candidate, _inspection), do: false
+
+  defp request_pushed_handoff_codex_review(%Issue{} = issue, candidate, inspection) do
+    repo = map_value(inspection, [:repo, "repo"])
+    pr = map_value(inspection, [:pr, "pr"])
+    body = pushed_handoff_codex_review_body(issue, candidate, inspection)
+
+    case ReviewMonitor.request_codex_review(repo, pr, body) do
+      {:ok, _comment} ->
+        record_review_request_event(candidate.workspace, issue, candidate, inspection)
+        _ = Tracker.create_comment(issue.id, direct_review_request_tracker_comment(issue, candidate, inspection))
+        :ok
+
+      {:error, reason} ->
+        {:error, {:codex_review_request_failed, reason}}
+    end
+  end
+
+  defp pushed_handoff_codex_review_body(%Issue{} = issue, candidate, inspection) do
+    """
+    @codex review
+
+    Requested by Symphony after pushed handoff commit #{short_sha(candidate.head_sha)} for #{issue.identifier || issue.id || "this issue"} on PR #{pr_label(inspection)}.
+    """
+    |> String.trim()
+  end
+
+  defp direct_review_request_tracker_comment(%Issue{} = issue, candidate, inspection) do
+    """
+    Symphony requested a fresh Codex PR review directly from the pushed handoff checkpoint, without starting another Codex worker.
+
+    - Issue: `#{issue.identifier}`
+    - Branch: `#{candidate.branch}`
+    - Commit: `#{short_sha(candidate.head_sha)}`
+    - PR: #{pr_label(inspection)}
+    - State kept: `#{issue.state}`
+    - Next action: wait for Codex review; if current-head feedback remains after this request, Symphony will keep the issue in rework.
+    """
+    |> String.trim()
+  end
+
+  defp record_review_request_event(workspace, %Issue{} = issue, candidate, inspection)
+       when is_binary(workspace) do
+    event_dir = Path.join(workspace, ".orocsy/delivery/events")
+    File.mkdir_p!(event_dir)
+
+    event = %{
+      "event" => "tool.finished",
+      "status" => "passed",
+      "tool" => "codex-review-requested",
+      "ts" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "issue" => issue.identifier,
+      "branch" => candidate.branch,
+      "head_sha" => candidate.head_sha,
+      "pr_number" => map_value(inspection, [:pr_number, "pr_number"]),
+      "pr_url" => map_value(inspection, [:pr_url, "pr_url"]),
+      "mode" => "direct-pushed-review-request"
+    }
+
+    File.write!(Path.join(event_dir, "events.jsonl"), Jason.encode!(event) <> "\n", [:append])
+  rescue
+    error ->
+      Logger.debug("Unable to record review request event for #{issue_context(issue)}: #{Exception.message(error)}")
+  end
+
+  defp record_review_request_event(_workspace, _issue, _candidate, _inspection), do: :ok
 
   defp pushed_handoff_review_request_recorded?(workspace) when is_binary(workspace) do
     workspace
@@ -1422,6 +2120,44 @@ defmodule SymphonyElixir.Orchestrator do
   rescue
     error -> {:error, {:git_exception, args, Exception.message(error)}}
   end
+
+  defp git_head_committed_at(workspace) when is_binary(workspace) do
+    case git_output(workspace, ["log", "-1", "--format=%cI", "HEAD"]) do
+      {:ok, output} -> output |> String.trim() |> datetime_from_iso8601()
+      _ -> nil
+    end
+  end
+
+  defp git_head_committed_at(_workspace), do: nil
+
+  defp latest_review_feedback_at(feedback) when is_list(feedback) do
+    feedback
+    |> Enum.map(&review_feedback_created_at/1)
+    |> Enum.reject(&is_nil/1)
+    |> latest_datetime()
+  end
+
+  defp latest_review_feedback_at(_feedback), do: nil
+
+  defp review_feedback_created_at(%{type: :thread, payload: thread}), do: thread |> thread_latest_comment() |> payload_created_at()
+  defp review_feedback_created_at(%{type: :comment, payload: comment}), do: payload_created_at(comment)
+  defp review_feedback_created_at(%{type: :review, payload: review}), do: payload_created_at(review)
+  defp review_feedback_created_at(%{"type" => "thread", "payload" => thread}), do: thread |> thread_latest_comment() |> payload_created_at()
+  defp review_feedback_created_at(%{"type" => "comment", "payload" => comment}), do: payload_created_at(comment)
+  defp review_feedback_created_at(%{"type" => "review", "payload" => review}), do: payload_created_at(review)
+  defp review_feedback_created_at(_feedback), do: nil
+
+  defp thread_latest_comment(%{"comments" => %{"nodes" => comments}}) when is_list(comments), do: List.last(comments) || %{}
+  defp thread_latest_comment(%{comments: %{nodes: comments}}) when is_list(comments), do: List.last(comments) || %{}
+  defp thread_latest_comment(_thread), do: %{}
+
+  defp payload_created_at(%{} = payload) do
+    payload
+    |> map_value([:createdAt, "createdAt", :created_at, "created_at", :submitted_at, "submitted_at"])
+    |> datetime_from_iso8601()
+  end
+
+  defp payload_created_at(_payload), do: nil
 
   defp first_present(primary, fallback) when is_binary(primary) do
     case String.trim(primary) do
@@ -1581,10 +2317,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp review_request_pending_for_issue?(%Issue{} = issue, monitor) do
     case ReviewMonitor.inspect_issue(issue, monitor) do
-      {:ok, %{repo: repo, pr: pr, feedback: feedback}} when is_list(feedback) and feedback != [] ->
+      {:ok, %{repo: repo, pr: pr, feedback: feedback}} when is_list(feedback) ->
         case ReviewMonitor.codex_review_request_pending?(repo, pr, feedback) do
           {:ok, true} ->
-            Logger.info("Review rework dispatch is waiting for fresh Codex review: #{issue_context(issue)}")
+            Logger.info("Review rework dispatch is waiting for pending Codex review: #{issue_context(issue)}")
 
             true
 
@@ -2302,7 +3038,7 @@ defmodule SymphonyElixir.Orchestrator do
       source_status: "blocked",
       next_action: "block",
       summary:
-        "Symphony stopped a Codex worker because it used #{first_event_progress_tokens} counted tokens before recording the first durable Orocsy progress event. Total reported tokens were #{total_tokens}, including #{cached_input_tokens} cached input tokens. Creating an issue branch or recording first-turn-miu-handoff only proves the worker is alive; workers must produce scoped file progress, a commit, a focused test/gate/eval result, review classification, or a blocker classification before the first-event token budget is exhausted.",
+        "Symphony stopped a Codex worker because it used #{first_event_progress_tokens} counted tokens before recording the first durable Orocsy progress event. Total reported tokens were #{total_tokens}, including #{cached_input_tokens} cached input tokens. Creating an issue branch or recording first-turn-miu-handoff/technical-miu-trace only proves the worker is alive; workers must produce scoped file progress, a commit, a focused test/gate/eval result, review classification, or a blocker classification before the first-event token budget is exhausted.",
       required_corrections: [
         "Inspect the worker log to confirm why it did not record real durable progress before broad context reads or implementation work.",
         "Shrink the first-turn prompt or workflow instructions, or make the worker record a blocker event when the issue shape is unclear.",
@@ -3186,9 +3922,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp normal_completion_handoff_stop?(%{workspace_path: workspace}) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check"] ->
-        workspace
-        |> PromptBuilder.workspace_recovery_checkpoint()
-        |> String.starts_with?("Pushed validated handoff checkpoint:")
+        pushed_validated_handoff_stop?(workspace) or review_classification_handoff_stop?(workspace)
 
       _ ->
         false
@@ -3198,6 +3932,38 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp normal_completion_handoff_stop?(_running_entry), do: false
+
+  defp pushed_validated_handoff_stop?(workspace) when is_binary(workspace) do
+    workspace
+    |> PromptBuilder.workspace_recovery_checkpoint()
+    |> String.starts_with?("Pushed validated handoff checkpoint:")
+  end
+
+  defp pushed_validated_handoff_stop?(_workspace), do: false
+
+  defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
+    with {:ok, classification} <- read_review_classification_handoff(workspace),
+         {:ok, dirty_status} <- git_output(workspace, ["status", "--porcelain=v1"]),
+         true <- String.trim(dirty_status) == "",
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]),
+         true <- classification_head_matches?(classification, String.trim(head_sha)) do
+      no_code_review_classification?(classification) and resolved_review_classification?(classification)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_classification_handoff_stop?(_workspace), do: false
+
+  defp pushed_handoff_wait_checkpoint?(%{workspace_path: workspace} = running_entry) when is_binary(workspace) do
+    normal_completion_handoff_stop?(running_entry) and pushed_handoff_review_request_recorded?(workspace)
+  rescue
+    _error -> false
+  end
+
+  defp pushed_handoff_wait_checkpoint?(_running_entry), do: false
 
   defp workflow_blocked_by_open_correction?(issue_or_running_entry, metadata \\ %{})
 
