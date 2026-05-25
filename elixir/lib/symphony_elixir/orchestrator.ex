@@ -1289,38 +1289,46 @@ defmodule SymphonyElixir.Orchestrator do
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
       if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        case maybe_complete_review_classification_handoff(issue) do
-          {:completed, _handoff} ->
-            complete_issue(state_acc, issue.id)
-
-          {:blocked, _reason} ->
-            state_acc
-
-          :not_ready ->
-            case maybe_complete_pushed_review_handoff(issue) do
-              {:completed, _handoff} ->
-                complete_issue(state_acc, issue.id)
-
-              {:blocked, _reason} ->
-                state_acc
-
-              :not_ready ->
-                case maybe_handle_orchestration_review_pending(issue) do
-                  {:completed, _handoff} ->
-                    complete_issue(state_acc, issue.id)
-
-                  {:blocked, _reason} ->
-                    state_acc
-
-                  :not_ready ->
-                    dispatch_issue(state_acc, issue)
-                end
-            end
+        case maybe_resolve_before_dispatch(state_acc, issue) do
+          {:resolved, state_acc} -> state_acc
+          {:blocked, state_acc} -> state_acc
+          :not_ready -> dispatch_issue(state_acc, issue)
         end
       else
         state_acc
       end
     end)
+  end
+
+  defp maybe_resolve_before_dispatch(%State{} = state, %Issue{} = issue) do
+    case maybe_complete_review_classification_handoff(issue) do
+      {:completed, _handoff} ->
+        {:resolved, complete_issue(state, issue.id)}
+
+      {:blocked, _reason} ->
+        {:blocked, state}
+
+      :not_ready ->
+        case maybe_complete_pushed_review_handoff(issue) do
+          {:completed, _handoff} ->
+            {:resolved, complete_issue(state, issue.id)}
+
+          {:blocked, _reason} ->
+            {:blocked, state}
+
+          :not_ready ->
+            case maybe_handle_orchestration_review_pending(issue) do
+              {:completed, _handoff} ->
+                {:resolved, complete_issue(state, issue.id)}
+
+              {:blocked, _reason} ->
+                {:blocked, state}
+
+              :not_ready ->
+                :not_ready
+            end
+        end
+    end
   end
 
   defp maybe_complete_review_classification_handoff(%Issue{} = issue) do
@@ -2930,6 +2938,22 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Retry blocked by open Orocsy correction for #{issue_context(issue)}; waiting for correction resolution")
         {:noreply, release_issue_claim(state, issue.id)}
 
+      true ->
+        case maybe_resolve_before_dispatch(state, issue) do
+          {:resolved, state} ->
+            {:noreply, release_issue_claim(state, issue.id)}
+
+          {:blocked, state} ->
+            {:noreply, release_issue_claim(state, issue.id)}
+
+          :not_ready ->
+            handle_unresolved_active_retry(state, issue, attempt, metadata)
+        end
+    end
+  end
+
+  defp handle_unresolved_active_retry(state, issue, attempt, metadata) do
+    cond do
       retry_candidate_issue?(issue, terminal_state_set()) and
         dispatch_slots_available?(issue, state) and
           worker_slots_available?(state, metadata[:worker_host]) ->
@@ -4282,7 +4306,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normal_completion_handoff_stop?(%{workspace_path: workspace}) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check"] ->
+      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
         pushed_validated_handoff_stop?(workspace) or review_classification_handoff_stop?(workspace)
 
       _ ->
