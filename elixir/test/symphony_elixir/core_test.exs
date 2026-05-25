@@ -3050,6 +3050,78 @@ defmodule SymphonyElixir.CoreTest do
     refute_receive {:memory_tracker_state_update, "issue-cod-187-missing-review-request", "Rework"}, 50
   end
 
+  test "review monitor advances clean Codex result from secondary review state" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review", "In Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-cod-205-clean-review",
+      identifier: "COD-205",
+      title: "Analytics MIU flow instrumentation",
+      state: "In Review",
+      branch_name: "orocsy/feature-analytics-observability-integration"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 56,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+               "head" => %{
+                 "sha" => "62857b0c9d03b9dfee2a06b3e73a7354ad343236",
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/56/comments" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/pulls/56/reviews" ->
+          {:ok, []}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/56/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review",
+               "created_at" => "2026-05-25T19:18:36Z"
+             },
+             %{
+               "body" => "Codex Review: Didn't find any major issues. Delightful!",
+               "created_at" => "2026-05-25T19:24:10Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:memory_tracker_state_update, "issue-cod-205-clean-review", "Human Review"}
+    assert_receive {:memory_tracker_comment, "issue-cod-205-clean-review", body}
+    assert body =~ "clean Codex review"
+    assert body =~ "pull/56"
+    refute_receive {:memory_tracker_state_update, "issue-cod-205-clean-review", "Rework"}, 50
+  end
+
   test "review request pending scans issue comment pages beyond the default first page" do
     parent = self()
 
@@ -7598,6 +7670,75 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_comment, "issue-validation-blocker-rescue", body}
       assert body =~ "validation blocker"
       assert body =~ "pnpm exec next build --webpack"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "validation_rework_needed"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "rescue resolves legacy validation command correction for bounded validation rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-legacy-validation-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-legacy-validation-rescue",
+        identifier: "MT-LEGACY-VALIDATION",
+        state: "Rework",
+        title: "Legacy validation correction rescue",
+        description: "Runtime should redispatch bounded validation rework.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      {:ok, correction} =
+        Workspace.create_correction_in_workspace(workspace, issue, %{
+          source: "validation",
+          source_status: "blocked",
+          summary: "pnpm typecheck fails on pre-existing generated Next cards route export",
+          findings: [
+            "Command: pnpm typecheck. Output: .next/types/app/api/cards/route.ts(14,13): error TS2344: exported handleCardsRequest is incompatible with Next route allowed exports."
+          ],
+          required_corrections: [
+            "Clean or regenerate .next route types or move handleCardsRequest out of src/app/api/cards/route.ts in a separate scoped fix, then rerun pnpm typecheck."
+          ],
+          next_action: "block"
+        })
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-legacy-validation-rescue", body}
+      assert body =~ "validation blocker"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
