@@ -35,7 +35,7 @@ defmodule SymphonyElixir.IssueRequirements do
         "shared_files" => section_list(description, "Shared Files"),
         "dependencies" => dependencies(description),
         "mius" => miu_list(description),
-        "validation" => validation(description),
+        "validation" => validation(description, workspace),
         "out_of_scope" => out_of_scope(description),
         "issue_brief" => issue_brief_reference(issue.identifier, workspace)
       }
@@ -138,13 +138,14 @@ defmodule SymphonyElixir.IssueRequirements do
     end
   end
 
-  defp validation(description) do
+  defp validation(description, workspace) do
     commands =
       validation_text(description)
       |> code_block_lines()
       |> Enum.concat(validation_text(description) |> bullet_lines())
       |> Enum.concat(section_text(description, "Required Tests") |> bullet_lines())
       |> Enum.filter(&String.contains?(&1, ["pnpm", "mix", "npm", "yarn", "cargo", "pytest"]))
+      |> Enum.map(&normalize_validation_command(&1, workspace))
       |> Enum.uniq()
 
     scenarios =
@@ -159,6 +160,63 @@ defmodule SymphonyElixir.IssueRequirements do
       "scenarios" => scenarios
     }
   end
+
+  defp normalize_validation_command(command, workspace) when is_binary(command) do
+    if vitest_package_test_script?(workspace) do
+      normalize_vitest_pnpm_test_command(command)
+    else
+      command
+    end
+  end
+
+  defp normalize_validation_command(command, _workspace), do: command
+
+  defp normalize_vitest_pnpm_test_command(command) when is_binary(command) do
+    normalized =
+      command
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    cond do
+      String.contains?(normalized, "--configLoader runner") ->
+        command
+
+      Regex.match?(~r/^(?:corepack\s+)?pnpm\s+test$/, normalized) ->
+        "#{pnpm_prefix(normalized)}pnpm test -- --configLoader runner"
+
+      match = Regex.run(~r/^(?:corepack\s+)?pnpm\s+test\s+--\s+(.+)$/, normalized, capture: :all_but_first) ->
+        [target] = match
+        "#{pnpm_prefix(normalized)}pnpm exec vitest run --configLoader runner #{String.trim(target)}"
+
+      match = Regex.run(~r/^(?:corepack\s+)?pnpm\s+test\s+(.+)$/, normalized, capture: :all_but_first) ->
+        [target] = match
+        "#{pnpm_prefix(normalized)}pnpm exec vitest run --configLoader runner #{String.trim(target)}"
+
+      true ->
+        command
+    end
+  end
+
+  defp normalize_vitest_pnpm_test_command(command), do: command
+
+  defp pnpm_prefix(command) when is_binary(command) do
+    if String.starts_with?(command, "corepack "), do: "corepack ", else: ""
+  end
+
+  defp vitest_package_test_script?(workspace) when is_binary(workspace) do
+    package_json = Path.join(workspace, "package.json")
+
+    with {:ok, content} <- File.read(package_json),
+         {:ok, %{"scripts" => %{"test" => test_script}}} <- Jason.decode(content) do
+      is_binary(test_script) and Regex.match?(~r/(^|\s)vitest(\s|$)/, test_script)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp vitest_package_test_script?(_workspace), do: false
 
   defp validation_text(description) do
     [
