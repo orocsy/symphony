@@ -271,6 +271,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - Immediately after confirming the current branch/status, and before any GitHub PR lookup, conflict scan, diff, or file read, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.integration-check-started --status passed --phase handoff --step "integration branch/status confirmed" --tool "integration-handoff-preflight"`.
     - Before broad reads, append a `technical-miu-trace` event naming only the conflicted/write-scope paths, validation commands, PR number or missing-PR finding, and same-branch push target.
     - Resolve only the in-scope conflict files and directly required helper/test files from the issue brief.
+    - For full-suite Vitest validation, if the preflight/brief declares `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying the declared `pnpm test`.
     - Run the focused validation named by the preflight/brief, then commit, push to the existing PR branch, and request `@codex review`.
     - Do not create a new branch, open a duplicate PR, update unrelated product code, move Linear to a terminal state, or merge the PR automatically.
     - If GitHub/Linear/network/validation blocks completion, record an Orocsy blocker with the exact command and next action.
