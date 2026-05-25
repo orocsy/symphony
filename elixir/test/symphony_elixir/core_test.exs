@@ -7689,6 +7689,75 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "rescue resolves exact test/spec candidate search permission correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-exact-test-candidate-search-permission-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-exact-test-candidate-search-permission-rescue",
+        identifier: "MT-EXACT-TEST-CANDIDATE-SEARCH",
+        state: "Rework",
+        title: "Exact test candidate search permission rescue",
+        description: "Runtime should resolve safe exact test/spec candidate rg permissions.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      {:ok, correction} =
+        Workspace.create_correction_in_workspace(workspace, issue, %{
+          source: "symphony.runtime.permission",
+          source_status: "blocked",
+          summary: "Symphony stopped because the Codex worker requested approval.",
+          findings: [
+            ~S|2026-05-25T16:29:37Z event=forbidden_command command=/bin/zsh -lc 'rg -n "handleCardsRequest" src/app/api/cards/handler.test.ts src/app/api/cards/route.test.ts src/app/api/cards/route.spec.ts tests/api/cards.test.ts'|,
+            "Guard reason: forbidden rg command"
+          ],
+          required_corrections: ["Review the requested approval/input."],
+          next_action: "block"
+        })
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-exact-test-candidate-search-permission-rescue", body}
+      assert body =~ "safe read-only permission correction"
+      assert body =~ "exact test/spec file paths"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "permission_guard_resolved_by_exact_test_search_policy"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "rescue resolves worker PR review polling permission correction" do
     test_root =
       Path.join(

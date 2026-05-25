@@ -1895,24 +1895,32 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
        when is_binary(workspace) and is_list(command_paths) do
     allowed_anchor? = Enum.any?(command_paths, &MapSet.member?(allowed_paths, &1))
-    bounded_exact_file_search? = length(command_paths) <= 6 and allowed_anchor?
+    bounded_search? = length(command_paths) in 1..6
+    bounded_exact_file_search? = bounded_search? and allowed_anchor?
+    bounded_exact_test_search? = bounded_search? and Enum.all?(command_paths, &exact_test_file_path?(workspace, &1))
 
-    command_paths != [] and
-      Enum.all?(command_paths, fn path ->
-        MapSet.member?(allowed_paths, path) or
-          (bounded_exact_file_search? and exact_existing_test_path?(workspace, path))
-      end)
+    bounded_exact_test_search? or
+      (command_paths != [] and
+         Enum.all?(command_paths, fn path ->
+           MapSet.member?(allowed_paths, path) or
+             (bounded_exact_file_search? and exact_test_file_path?(workspace, path))
+         end))
   end
 
   defp scoped_search_paths_allowed?(_workspace, _command_paths, _allowed_paths), do: false
 
-  defp exact_existing_test_path?(workspace, path) when is_binary(workspace) and is_binary(path) do
-    String.starts_with?(path, "tests/") and
+  defp exact_test_file_path?(workspace, path) when is_binary(workspace) and is_binary(path) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_path = Path.expand(path, expanded_workspace)
+
+    local_workspace_path?(workspace, path) and
+      String.starts_with?(expanded_path, expanded_workspace <> "/") and
       review_rework_supported_file?(path) and
-      local_workspace_file?(workspace, path)
+      (String.starts_with?(path, "tests/") or
+         Regex.match?(~r/(^|\/)[^\/]+\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/, path))
   end
 
-  defp exact_existing_test_path?(_workspace, _path), do: false
+  defp exact_test_file_path?(_workspace, _path), do: false
 
   defp review_rework_missing_referenced_read_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
