@@ -1801,10 +1801,17 @@ defmodule SymphonyElixir.Orchestrator do
 
                 clean_review_status == :missing ->
                   Logger.info(
-                    "Pushed review handoff needs a clean Codex review result before completing: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+                    "Pushed review handoff has no clean Codex review result yet; requesting review without redispatching a worker: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
                   )
 
-                  :not_ready
+                  case request_pushed_handoff_codex_review(issue, candidate, inspection) do
+                    :ok ->
+                      {:blocked, :review_pending}
+
+                    {:error, reason} ->
+                      park_pushed_handoff_blocker(issue, candidate, reason)
+                      {:blocked, reason}
+                  end
 
                 clean_review_status == :confirmed ->
                   finish_clean_pushed_review_handoff(issue, candidate, inspection)

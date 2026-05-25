@@ -11009,7 +11009,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "orchestrator does not complete clean pushed handoff without a clean Codex review result" do
+  test "orchestrator requests review for clean pushed handoff without redispatching a worker" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -11092,6 +11092,13 @@ defmodule SymphonyElixir.CoreTest do
         end
       end)
 
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :github_api_post_runner, fn endpoint, fields ->
+        send(parent, {:github_post, endpoint, fields})
+        {:ok, %{"id" => 123, "body" => fields["body"]}}
+      end)
+
       Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
         {:ok,
          %{
@@ -11111,11 +11118,25 @@ defmodule SymphonyElixir.CoreTest do
 
       on_exit(fn ->
         Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_api_post_runner)
         Application.delete_env(:symphony_elixir, :github_graphql_runner)
       end)
 
-      assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
+      assert {:blocked, :review_pending} = Orchestrator.complete_pushed_handoff_for_test(issue)
+
+      assert_receive {:github_post, "repos/acme/nutribuddy/issues/18/comments", %{"body" => body}}
+      short_sha = String.slice(handoff_sha, 0, 10)
+      assert body =~ "@codex review"
+      assert body =~ short_sha
+
+      assert_receive {:memory_tracker_comment, "issue-direct-clean-handoff-review-missing", tracker_body}
+      assert tracker_body =~ "without starting another Codex worker"
+      assert tracker_body =~ short_sha
       refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-missing", "Human Review"}, 50
+
+      events = File.read!(Path.join(event_dir, "events.jsonl"))
+      assert events =~ ~s("tool":"codex-review-requested")
+      assert events =~ "direct-pushed-review-request"
     after
       File.rm_rf(test_root)
     end

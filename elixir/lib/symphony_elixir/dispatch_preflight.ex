@@ -355,10 +355,10 @@ defmodule SymphonyElixir.DispatchPreflight do
         "Resolve only the existing PR mergeability conflict on the integration branch, run the declared validation, push the same PR branch, and request a fresh Codex review. Do not merge the PR automatically."
 
       review_pr_present?(inspection) ->
-        "Validate the current pushed integration handoff, avoid product edits unless validation or current-head review reveals a scoped blocker, request or confirm a clean Codex review, and leave the PR unmerged."
+        "Validate the current pushed integration handoff, avoid product edits unless validation or current-head review reveals a scoped blocker, request Codex review only after a new fix or validation handoff, and leave clean-review waiting to Symphony's review monitor."
 
       true ->
-        "Inspect only the configured integration branch, record handoff.integration-check-started after branch/status confirmation, inspect bounded PR state, create or update the final integration PR only if no PR exists for that branch, run declared validation, request or confirm Codex review, and leave the PR unmerged."
+        "Inspect only the configured integration branch, record handoff.integration-check-started after branch/status confirmation, inspect bounded PR state, create or update the final integration PR only if no PR exists for that branch, run declared validation, request Codex review only after a new fix or validation handoff, and leave clean-review waiting to Symphony's review monitor."
     end
   end
 
