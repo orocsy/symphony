@@ -235,7 +235,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       integration_check_review?(requirements, inspection) ->
         "integration_check"
 
-      integration_check_requirements?(requirements) ->
+      explicit_integration_check_requirements?(requirements) ->
         "integration_check"
 
       true ->
@@ -248,10 +248,17 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp integration_check_review?(requirements, inspection) do
-    integration_check_requirements?(requirements) and review_pr_present?(inspection)
+    explicit_integration_check_requirements?(requirements) and review_pr_present?(inspection)
   end
 
   defp integration_check_requirements?(requirements) when is_map(requirements) do
+    explicit_integration_check_requirements?(requirements) or
+      incidental_merge_conflict_requirement?(requirements)
+  end
+
+  defp integration_check_requirements?(_requirements), do: false
+
+  defp explicit_integration_check_requirements?(requirements) when is_map(requirements) do
     ticket_type = requirements["ticket_type"] |> to_string() |> String.downcase()
     title = requirements["title"] |> to_string() |> String.downcase()
 
@@ -264,10 +271,22 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     ticket_type == "integration-check" or
       String.contains?(title, "integration check") or
-      String.contains?(write_scope, ["merge conflict", "final pr handoff"])
+      String.contains?(title, "final pr handoff") or
+      String.contains?(write_scope, "final pr handoff")
   end
 
-  defp integration_check_requirements?(_requirements), do: false
+  defp explicit_integration_check_requirements?(_requirements), do: false
+
+  defp incidental_merge_conflict_requirement?(requirements) when is_map(requirements) do
+    requirements
+    |> Map.get("write_scope", [])
+    |> Enum.map(&to_string/1)
+    |> Enum.join("\n")
+    |> String.downcase()
+    |> String.contains?("merge conflict")
+  end
+
+  defp incidental_merge_conflict_requirement?(_requirements), do: false
 
   defp mergeability_conflict?(inspection) when is_map(inspection) do
     state =
