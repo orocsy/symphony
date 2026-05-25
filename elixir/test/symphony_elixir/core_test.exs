@@ -3416,6 +3416,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
@@ -3509,6 +3510,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
@@ -3641,6 +3643,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
         workspace_root: workspace_root,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
@@ -3762,6 +3765,130 @@ defmodule SymphonyElixir.CoreTest do
       assert classified["classification_summary"] =~ "hydrated dispatch preflight"
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "classified handoff correction resolves when dirty progress is fresh before correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-fresh-dirty-handoff-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-cod-208-fresh-dirty-handoff",
+        identifier: "COD-208",
+        title: "Analytics Integration Check And Final PR Handoff",
+        state: "Rework",
+        branch_name: "orocsy/feature-analytics-observability-integration",
+        description: """
+        ## Ticket Type
+        integration-check
+
+        ## Integration Branch
+        orocsy/feature-analytics-observability-integration
+
+        ## Write Scope
+        - Merge conflict resolution for the analytics integration branch.
+        """
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      dirty_path = Path.join(workspace, "tests/unit/recipe-chat-page-view.test.ts")
+      File.mkdir_p!(Path.dirname(dirty_path))
+      File.write!(dirty_path, "fresh dirty handoff progress\n")
+
+      fresh_progress_time =
+        DateTime.utc_now()
+        |> DateTime.add(-5, :second)
+        |> DateTime.to_naive()
+        |> NaiveDateTime.to_erl()
+
+      File.touch!(dirty_path, fresh_progress_time)
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "branch" => issue.branch_name,
+          "event" => "dispatch.preflight",
+          "issue" => issue.identifier,
+          "mode" => "integration_check",
+          "required_worker_event" => "technical-miu-trace",
+          "source" => "symphony.runtime.dispatch-preflight",
+          "status" => "passed",
+          "tool" => "dispatch-preflight",
+          "ts" => DateTime.utc_now() |> DateTime.add(-20, :second) |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.no-durable-progress-handoff",
+                 source_status: "retryable",
+                 summary: "Worker hit the no durable progress handoff guard after local progress.",
+                 findings: ["no-durable-progress"],
+                 next_action: "retry"
+               })
+
+      assert :ok =
+               Workspace.classify_blocking_corrections_in_workspace(
+                 workspace,
+                 "worker_prompt_defect",
+                 "worker_prompt_defect: runtime progress correction happened after hydrated dispatch preflight, so requirements hydration is not new retry evidence under runtime-preflight-worker-progress-contract-v19."
+               )
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-cod-208-fresh-dirty-handoff", body}
+      assert body =~ "retry_dirty_handoff_recovery"
+      assert body =~ "dirty-handoff recovery prompt"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "retry_dirty_handoff_recovery"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
       File.rm_rf(test_root)
     end
@@ -8719,6 +8846,70 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "If a dirty/local handoff checkpoint appears above"
       assert prompt =~ "src/features/swipe/SwipeDeck.tsx"
       refute prompt =~ "Ticket MT-203"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder preserves local handoff checkpoint in integration check preflight prompts" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-local-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+
+      feedback_path = Path.join(workspace, "tests/unit/recipe-chat-page-view.test.ts")
+      File.mkdir_p!(Path.dirname(feedback_path))
+      File.write!(feedback_path, "export const integrationFix = false;\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/recipe-chat-page-view.test.ts"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add integration test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(feedback_path, "export const integrationFix = true;\n")
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "branch" => "orocsy/feature-analytics-observability-integration",
+          "checkpoint_event" => "technical-miu-trace",
+          "first_task" => "Validate the dirty integration handoff.",
+          "issue" => "COD-208"
+        })
+      )
+
+      issue = %Issue{
+        identifier: "COD-208",
+        title: "Recover integration handoff",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/COD-208",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Local handoff recovery checkpoint:")
+      assert prompt =~ "Runtime dispatch preflight:"
+      assert prompt =~ "If a dirty/local handoff checkpoint appears above"
+      assert prompt =~ "tests/unit/recipe-chat-page-view.test.ts"
+      assert prompt =~ "Ticket COD-208"
+      assert length(String.split(prompt, "Local handoff recovery checkpoint:")) == 2
     after
       File.rm_rf(workspace)
     end

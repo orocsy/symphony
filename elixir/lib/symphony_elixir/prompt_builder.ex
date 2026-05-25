@@ -232,10 +232,13 @@ defmodule SymphonyElixir.PromptBuilder do
         |> Enum.join("\n\n")
 
       {:ok, %{"mode" => "integration_check"}} ->
+        checkpoint = workspace_recovery_checkpoint(workspace)
+
         [
+          checkpoint,
           DispatchPreflight.prompt_context(workspace),
           integration_check_micro_prompt(),
-          prompt
+          strip_leading_checkpoint(prompt, checkpoint)
         ]
         |> Enum.reject(&(&1 == ""))
         |> Enum.join("\n\n")
@@ -268,11 +271,26 @@ defmodule SymphonyElixir.PromptBuilder do
     |> String.trim()
   end
 
+  defp strip_leading_checkpoint(prompt, "") when is_binary(prompt), do: prompt
+
+  defp strip_leading_checkpoint(prompt, checkpoint) when is_binary(prompt) and is_binary(checkpoint) do
+    if String.starts_with?(prompt, checkpoint) do
+      prompt
+      |> String.replace_prefix(checkpoint, "")
+      |> String.trim_leading()
+    else
+      prompt
+    end
+  end
+
+  defp strip_leading_checkpoint(prompt, _checkpoint), do: prompt
+
   defp integration_check_micro_prompt do
     """
     Integration check execution contract:
 
     - Treat PR mergeability conflict resolution as the first task; it supersedes pushed-handoff waiting.
+    - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff, run the smallest validation needed for that diff, then commit, push, and request fresh review before any broad rediscovery.
     - Start from `git status --short --branch`, then fetch the PR target branch and expose conflicts with a bounded merge/rebase check.
     - Immediately after confirming the current branch/status, and before any GitHub PR lookup, conflict scan, diff, or file read, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.integration-check-started --status passed --phase handoff --step "integration branch/status confirmed" --tool "integration-handoff-preflight"`.
     - Before broad reads, append a `technical-miu-trace` event naming only the conflicted/write-scope paths, validation commands, PR number or missing-PR finding, and same-branch push target.
