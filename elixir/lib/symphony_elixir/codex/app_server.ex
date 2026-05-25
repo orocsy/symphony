@@ -98,6 +98,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+        session_policies = with_symlinked_vitest_writable_roots(session_policies, expanded_workspace)
+
         {:ok,
          %{
            port: port,
@@ -331,6 +333,37 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp session_policies(workspace, worker_host) when is_binary(worker_host) do
     Config.codex_runtime_settings(workspace, remote: true)
+  end
+
+  defp with_symlinked_vitest_writable_roots(%{turn_sandbox_policy: policy} = session_policies, workspace)
+       when is_binary(workspace) do
+    %{session_policies | turn_sandbox_policy: maybe_allow_symlinked_vite_temp(policy, workspace)}
+  end
+
+  defp with_symlinked_vitest_writable_roots(session_policies, _workspace), do: session_policies
+
+  defp maybe_allow_symlinked_vite_temp(%{"type" => "workspaceWrite", "writableRoots" => roots} = policy, workspace)
+       when is_list(roots) and is_binary(workspace) do
+    with true <- symlinked_node_modules?(workspace),
+         true <- package_test_script_vitest?(workspace),
+         {:ok, vite_temp_root} <- ensure_symlinked_vite_temp_root(workspace) do
+      Map.put(policy, "writableRoots", Enum.uniq(roots ++ [vite_temp_root]))
+    else
+      _ -> policy
+    end
+  end
+
+  defp maybe_allow_symlinked_vite_temp(policy, _workspace), do: policy
+
+  defp ensure_symlinked_vite_temp_root(workspace) when is_binary(workspace) do
+    vite_temp = Path.join([workspace, "node_modules", ".vite-temp"])
+
+    with :ok <- File.mkdir_p(vite_temp),
+         {:ok, canonical_vite_temp} <- PathSafety.canonicalize(vite_temp) do
+      {:ok, canonical_vite_temp}
+    end
+  rescue
+    _error -> :error
   end
 
   defp do_start_session(port, workspace, session_policies) do
