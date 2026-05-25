@@ -1858,8 +1858,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> paths_from_review_rework_text()
         |> Enum.uniq()
 
-      command_paths != [] and
-        Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+      scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
     else
       _ -> false
     end
@@ -1883,8 +1882,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> paths_from_review_rework_text()
         |> Enum.uniq()
 
-      command_paths != [] and
-        Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+      scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
     else
       _ -> false
     end
@@ -1893,6 +1891,28 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scoped_file_rg_allowed?(_command, _workspace), do: false
+
+  defp scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
+       when is_binary(workspace) and is_list(command_paths) do
+    allowed_anchor? = Enum.any?(command_paths, &MapSet.member?(allowed_paths, &1))
+    bounded_exact_file_search? = length(command_paths) <= 6 and allowed_anchor?
+
+    command_paths != [] and
+      Enum.all?(command_paths, fn path ->
+        MapSet.member?(allowed_paths, path) or
+          (bounded_exact_file_search? and exact_existing_test_path?(workspace, path))
+      end)
+  end
+
+  defp scoped_search_paths_allowed?(_workspace, _command_paths, _allowed_paths), do: false
+
+  defp exact_existing_test_path?(workspace, path) when is_binary(workspace) and is_binary(path) do
+    String.starts_with?(path, "tests/") and
+      review_rework_supported_file?(path) and
+      local_workspace_file?(workspace, path)
+  end
+
+  defp exact_existing_test_path?(_workspace, _path), do: false
 
   defp review_rework_missing_referenced_read_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
@@ -2058,10 +2078,30 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp file_scoped_rg_command?(_command), do: false
 
   defp broad_search_path_token?(command) when is_binary(command) do
-    Regex.match?(~r/(^|\s)(?:\.\/)?(?:src|app|apps|packages|lib|tests)\/?(?=\s|$)/, command)
+    command
+    |> search_path_tokens()
+    |> Enum.any?(fn path ->
+      normalized = normalize_requirement_path(path)
+      root = normalized |> String.split("/", parts: 2) |> List.first()
+
+      root in ["src", "app", "apps", "packages", "lib", "tests"] and
+        not review_rework_supported_file?(normalized)
+    end)
   end
 
   defp broad_search_path_token?(_command), do: false
+
+  defp search_path_tokens(command) when is_binary(command) do
+    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)/
+    |> Regex.scan(command, capture: :all_but_first)
+    |> Enum.flat_map(fn
+      [path] when is_binary(path) -> [normalize_requirement_path(path)]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp search_path_tokens(_command), do: []
 
   defp grep_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "grep")
   defp grep_pattern?(_pattern), do: false
