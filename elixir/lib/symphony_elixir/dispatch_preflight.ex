@@ -168,7 +168,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp issue_brief_candidate_paths(_workspace, _requirements), do: []
 
   defp maybe_switch_to_review_head(workspace, %{head_ref: branch}, mode)
-       when is_binary(workspace) and mode in ["review_rework", "integration_check"] and is_binary(branch) and branch != "" do
+       when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] and is_binary(branch) and branch != "" do
     if clean_worktree?(workspace) and safe_branch_name?(branch) do
       _ = git_command(workspace, ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"])
 
@@ -378,7 +378,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "created_at" => now_iso8601(),
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
-      "branch" => current_branch(workspace) || requirements["branch"] || issue_value(issue, :branch_name),
+      "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
       "checkpoint_event" => "gate.post-miu",
       "first_task" =>
         "Recover the existing dirty/local handoff only: inspect git status and focused dirty diffs, run the smallest validation for those files, then commit, push, and request/update Codex review. Do not restart fresh implementation or broaden project discovery.",
@@ -396,6 +396,22 @@ defmodule SymphonyElixir.DispatchPreflight do
         "feedback" => Enum.map(Map.get(inspection, :feedback, []), &feedback_summary/1)
       }
     }
+  end
+
+  defp handoff_recovery_branch(workspace, issue, requirements, inspection) do
+    review_head = Map.get(inspection, :head_ref)
+
+    cond do
+      clean_worktree?(workspace) and present_review_value?(review_head) ->
+        review_head
+
+      true ->
+        current_branch(workspace) ||
+          review_head ||
+          requirements["integration_branch"] ||
+          requirements["branch"] ||
+          issue_value(issue, :branch_name)
+    end
   end
 
   defp integration_check_preflight(workspace, issue, requirements, inspection) do

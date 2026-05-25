@@ -1106,6 +1106,91 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "abnormal worker exit at handoff recovery pushed checkpoint does not schedule failure retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-abnormal-handoff-recovery-stop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      origin = Path.join(test_root, "origin.git")
+      issue_id = "issue-handoff-recovery-abnormal-stop"
+      branch = "orocsy/feature-analytics-observability-integration"
+
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "ready\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: workspace, stderr_to_stdout: true)
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "handoff_recovery"}, pretty: true) <> "\n"
+      )
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+      )
+
+      assert AgentRunner.pushed_handoff_stop_for_test(workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :HandoffRecoveryAbnormalStopOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: "COD-205",
+        issue: %Issue{id: issue_id, identifier: "COD-205", state: "Rework"},
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed after handoff"}, []}})
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert MapSet.member?(state.completed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "normal worker exit with open correction does not schedule continuation retry" do
     test_root =
       Path.join(
@@ -5547,6 +5632,134 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Mode: handoff recovery"
       assert prompt =~ "Dirty workspace recovery is the only task"
       refute prompt =~ "Mode: fresh implementation"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight keeps handoff recovery on discovered PR head branch when clean" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-clean-handoff-recovery-pr-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      origin = Path.join(test_root, "origin.git")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-205-clean-recovery-preflight",
+        identifier: "COD-205",
+        title: "Analytics MIU: Flow Instrumentation",
+        state: "Rework",
+        branch_name: "orocsy/cod-205-analytics-miu-flow-instrumentation",
+        description: "Recover interrupted review work."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nRecovered handoff.\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Recovered handoff"], cd: workspace, stderr_to_stdout: true)
+      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      head_sha = String.trim(head_sha)
+      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), """
+      # COD-205 Issue Brief
+
+      ## Ticket Type
+      implementation
+
+      ## Integration Branch
+      orocsy/feature-analytics-observability-integration
+
+      ## Write Scope
+      - src/app/api/cards/route.ts
+      - tests/integration/analytics-instrumentation.test.ts
+      """)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation") ->
+            {:ok, []}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:orocsy/feature-analytics-observability-integration") ->
+            {:ok,
+             [
+               %{
+                 "number" => 56,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+               }
+             ]}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "per_page=100") ->
+            {:ok, []}
+
+          decoded == "repos/acme/nutribuddy/pulls/56" ->
+            {:ok,
+             %{
+               "number" => 56,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "mergeable" => true,
+               "mergeable_state" => "clean"
+             }}
+
+          decoded in [
+            "repos/acme/nutribuddy/pulls/56/comments",
+            "repos/acme/nutribuddy/pulls/56/reviews",
+            "repos/acme/nutribuddy/issues/56/comments"
+          ] ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
+      assert get_in(preflight, ["review", "head_ref"]) == "orocsy/feature-analytics-observability-integration"
+      assert get_in(preflight, ["review", "head_sha"]) == head_sha
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace, stderr_to_stdout: true)
+      assert String.trim(current_branch) == "orocsy/feature-analytics-observability-integration"
     after
       File.rm_rf(test_root)
     end

@@ -80,6 +80,7 @@ defmodule SymphonyElixir.AgentRunner do
   if Mix.env() == :test do
     def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
     def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
+    def pushed_handoff_stop_for_test(workspace), do: pushed_handoff_stop?(workspace)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
   end
 
@@ -205,7 +206,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp pushed_handoff_stop?(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check"] ->
+      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
         workspace
         |> PromptBuilder.workspace_recovery_checkpoint()
         |> String.starts_with?("Pushed validated handoff checkpoint:")
