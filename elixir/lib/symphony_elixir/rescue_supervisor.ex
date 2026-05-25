@@ -1127,7 +1127,11 @@ defmodule SymphonyElixir.RescueSupervisor do
     findings = Enum.join(correction["findings"] || [], " ")
 
     String.contains?(source, "validation-blocker") or
+      (String.contains?(source, "validation") and
+         String.match?(summary <> " " <> findings, ~r/\b(fail(?:ed|s)?|error|blocked)\b/i)) or
       String.contains?(summary, "validation command") or
+      (String.contains?(findings, "Command:") and
+         String.match?(findings, ~r/\b(fail(?:ed|s)?|error|blocked)\b/i)) or
       String.contains?(findings, "Validation command failed")
   end
 

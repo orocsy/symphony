@@ -89,7 +89,7 @@ defmodule SymphonyElixir.ReviewMonitor do
           :ok
 
         {:ok, %{feedback: []} = inspection} ->
-          maybe_request_missing_codex_review(issue, monitor, inspection)
+          maybe_advance_clean_codex_review(issue, monitor, inspection)
 
         {:ok, %{repo: repo, pr: pr, feedback: feedback}} ->
           mark_rework(issue, monitor, build_feedback(repo, pr, feedback))
@@ -502,6 +502,57 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp maybe_request_missing_codex_review(_issue, _monitor, _inspection), do: :ok
 
+  defp maybe_advance_clean_codex_review(%Issue{} = issue, monitor, %{repo: repo, pr: pr} = inspection) do
+    if review_state_issue?(issue, monitor) do
+      case clean_codex_review_after_latest_request?(repo, pr) do
+        {:ok, true} ->
+          advance_clean_codex_review(issue, monitor, inspection)
+
+        {:ok, false} ->
+          maybe_request_missing_codex_review(issue, monitor, inspection)
+
+        {:error, reason} ->
+          Logger.warning("Review monitor could not inspect clean Codex result for #{issue_context(issue)}: #{inspect(reason)}")
+      end
+    end
+  end
+
+  defp maybe_advance_clean_codex_review(_issue, _monitor, _inspection), do: :ok
+
+  defp advance_clean_codex_review(%Issue{} = issue, monitor, inspection) do
+    case handoff_review_state(monitor) do
+      {:ok, target_state} ->
+        if normalize_state_name(issue.state) == normalize_state_name(target_state) do
+          :ok
+        else
+          case Tracker.update_issue_state(issue.id, target_state) do
+            :ok ->
+              _ = Tracker.create_comment(issue.id, clean_codex_review_handoff_comment(issue, inspection, target_state))
+
+              Logger.info("Review monitor advanced clean Codex handoff for #{issue_context(issue)} to #{target_state} PR ##{pr_number(inspection.pr)}")
+
+            {:error, reason} ->
+              Logger.warning("Review monitor could not advance clean Codex handoff for #{issue_context(issue)}: #{inspect(reason)}")
+          end
+        end
+
+      {:error, reason} ->
+        Logger.warning("Review monitor could not resolve clean Codex handoff state for #{issue_context(issue)}: #{inspect(reason)}")
+    end
+  end
+
+  defp handoff_review_state(monitor) do
+    monitor.states
+    |> Enum.find_value(fn state ->
+      state = state |> to_string() |> String.trim()
+      if state == "", do: nil, else: state
+    end)
+    |> case do
+      nil -> {:error, :missing_review_state}
+      state -> {:ok, state}
+    end
+  end
+
   defp review_state_issue?(%Issue{state: state}, monitor) do
     issue_state = normalize_state_name(state)
 
@@ -562,6 +613,20 @@ defmodule SymphonyElixir.ReviewMonitor do
     - PR: ##{pr_number(pr)} #{pr_url(pr)}
     - State kept: `#{issue.state}`
     - Next action: wait for Codex review; if current-head feedback appears, the monitor will move this issue to `#{monitor.rework_state}` for review hardening.
+    """
+    |> String.trim()
+  end
+
+  defp clean_codex_review_handoff_comment(%Issue{} = issue, inspection, target_state) do
+    pr = inspection.pr
+
+    """
+    Symphony review monitor observed a clean Codex review for the current PR head and advanced this issue to `#{target_state}`.
+
+    - Issue: `#{issue.identifier}`
+    - PR: ##{pr_number(pr)} #{pr_url(pr)}
+    - Previous state: `#{issue.state}`
+    - Next action: continue the configured Symphony delivery loop without starting a product-code worker for review polling.
     """
     |> String.trim()
   end
