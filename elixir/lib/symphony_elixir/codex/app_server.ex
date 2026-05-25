@@ -530,7 +530,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     Do not load Codex skills, plugins, apps, MCP tools, broad project docs, prior session JSONL, or unrelated issue history.
     Do not refetch GitHub or Linear review text when the prompt already includes the current-head feedback body.
     If there is no dirty/local handoff checkpoint, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. Classify the supplied current-head feedback from the prompt before any file read.
-    Do not run rg, grep, find, ls, git ls-files, mutating gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
+    Do not run broad rg, grep, find, ls, git ls-files, mutating gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
+    If current-head feedback or a runtime correction names exact files and a symbol lookup is truly needed after `review-feedback-classified`, use only bounded `rg -n "literal" <exact named file...>` over those named files. Never use grep, recursive flags, or bare directories such as `src`, `app`, `lib`, or `tests`.
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state.
     For review-request handoff comments, use `gh pr comment <pr-number> --body '@codex review'`; never use `gh api --method POST` or issue-comment API endpoints.
     If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff, run focused validation, commit, push, request fresh review, and leave Linear state transitions to Symphony's review monitor.
@@ -592,6 +593,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     In validation rework, do not just rerun the same failing validation command and create the same correction again. First restore the missing export, fallback behavior, or directly named assertion path from the issue brief/correction; then rerun the exact focused validation command.
     If a declared validation command fails after merge/review fixes and names an exact failing test, route, helper, or assertion on the integration branch, treat it as integration validation rework for this handoff branch. Make the smallest same-branch fix, or create an Orocsy inbox correction with the exact command, failing test/assertion, and next action; do not record only a `validation.blocker` event and stop.
     A single conflict-marker scan with `grep` is allowed only when it searches for `<<<<<<<`, `=======`, and `>>>>>>>` across explicit issue-brief/preflight files.
+    If current validation rework needs symbol lookup after the correction names exact files, use only bounded `rg -n "literal" <exact named file...>` over those named files. Never use grep for symbol search, recursive flags, or bare directories such as `src`, `app`, `lib`, or `tests`.
     Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` after naming the exact conflict files, validation commands, PR number or missing-PR finding, and same-branch push target.
     Resolve only the named conflict files and directly required helper/test files; do not do unrelated feature work or broad rediscovery.
     Do not reason through every conflict before editing. Take unresolved files in `git status --short` order; read one conflicted file, resolve and `git add` it, then append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "integration-conflict-slice"` before moving to the next file.
@@ -1719,6 +1721,9 @@ defmodule SymphonyElixir.Codex.AppServer do
           grep_pattern?(match) and scoped_file_grep_allowed?(command_for_patterns, workspace) ->
             :ok
 
+          rg_pattern?(match) and scoped_file_rg_allowed?(command_for_patterns, workspace) ->
+            :ok
+
           review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -1863,6 +1868,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scoped_file_grep_allowed?(_command, _workspace), do: false
+
+  defp scoped_file_rg_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
+         true <- file_scoped_rg_command?(command),
+         {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      allowed_paths =
+        preflight
+        |> review_rework_allowed_read_paths(workspace)
+        |> MapSet.new()
+
+      command_paths =
+        command
+        |> paths_from_review_rework_text()
+        |> Enum.uniq()
+
+      command_paths != [] and
+        Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scoped_file_rg_allowed?(_command, _workspace), do: false
 
   defp review_rework_missing_referenced_read_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
@@ -2011,13 +2041,32 @@ defmodule SymphonyElixir.Codex.AppServer do
       String.contains?(command, "-n") and
       not Regex.match?(~r/(^|\s)-[^-\s]*[Rr][^-\s]*(\s|$)/, command) and
       not Regex.match?(~r/(^|\s)--recursive(\s|=|$)/, command) and
+      not broad_search_path_token?(command) and
       not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
   end
 
   defp file_scoped_grep_command?(_command), do: false
 
+  defp file_scoped_rg_command?(command) when is_binary(command) do
+    Regex.match?(~r/(^|\s|["'])rg\s+/, command) and
+      (String.contains?(command, "-n") or String.contains?(command, "--line-number")) and
+      not Regex.match?(~r/(^|\s)(--files|--glob|-g|--type|-t|--replace|-r)(\s|=|$)/, command) and
+      not broad_search_path_token?(command) and
+      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+  end
+
+  defp file_scoped_rg_command?(_command), do: false
+
+  defp broad_search_path_token?(command) when is_binary(command) do
+    Regex.match?(~r/(^|\s)(?:\.\/)?(?:src|app|apps|packages|lib|tests)\/?(?=\s|$)/, command)
+  end
+
+  defp broad_search_path_token?(_command), do: false
+
   defp grep_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "grep")
   defp grep_pattern?(_pattern), do: false
+  defp rg_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "rg")
+  defp rg_pattern?(_pattern), do: false
 
   defp integration_check_allowed_ref_names(preflight) when is_map(preflight) do
     requirements =
