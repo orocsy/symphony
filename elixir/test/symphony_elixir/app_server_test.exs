@@ -3700,6 +3700,218 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows bounded exact test file rg during review rework validation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-exact-test-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-EXACT-TEST-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      route_file = Path.join(workspace, "src/app/api/cards/route.ts")
+      cards_test = Path.join(workspace, "tests/integration/cards-route.test.ts")
+      rework_test = Path.join(workspace, "tests/unit/cod-205-review-rework.test.ts")
+      analytics_test = Path.join(workspace, "tests/integration/analytics-instrumentation.test.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(route_file))
+      File.mkdir_p!(Path.dirname(cards_test))
+      File.mkdir_p!(Path.dirname(rework_test))
+      File.mkdir_p!(Path.dirname(analytics_test))
+
+      File.write!(route_file, "export async function GET() { return Response.json({ ok: true }); }\n")
+      File.write!(cards_test, "test('records start_clicked', () => expect(true).toBe(true));\n")
+      File.write!(rework_test, "test('keeps guestLimit', () => expect(true).toBe(true));\n")
+      File.write!(analytics_test, "test('records card_served', () => expect(true).toBe(true));\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-EXACT-TEST-RG",
+          "branch" => "orocsy/mt-review-exact-test-rg",
+          "requirements" => %{
+            "write_scope" => [
+              "src/app/api/cards/route.ts",
+              "tests/integration/analytics-instrumentation.test.ts only to activate/update existing specs"
+            ],
+            "validation" => %{
+              "commands" => [
+                "pnpm exec vitest run --configLoader runner tests/integration/analytics-instrumentation.test.ts",
+                "pnpm test -- --configLoader runner"
+              ]
+            }
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/app/api/cards/route.ts",
+                "line" => 103,
+                "body" => "Reuse existing guest session before creating one on cards load."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-exact-test-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-exact-test-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"rg -n start_clicked tests/integration/cards-route.test.ts tests/unit/cod-205-review-rework.test.ts tests/integration/analytics-instrumentation.test.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-exact-test-rg",
+        identifier: "MT-REVIEW-EXACT-TEST-RG",
+        title: "Review rework exact test rg",
+        description: "Exact test file rg after validation failure should stay inside the read-only guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-EXACT-TEST-RG",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Continue review validation", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks bare test directory rg during review rework validation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-bare-test-dir-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-BARE-TEST-DIR-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      route_file = Path.join(workspace, "src/app/api/cards/route.ts")
+      analytics_test = Path.join(workspace, "tests/integration/analytics-instrumentation.test.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(route_file))
+      File.mkdir_p!(Path.dirname(analytics_test))
+
+      File.write!(route_file, "export async function GET() { return Response.json({ ok: true }); }\n")
+      File.write!(analytics_test, "test('records card_served', () => expect(true).toBe(true));\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-BARE-TEST-DIR-RG",
+          "branch" => "orocsy/mt-review-bare-test-dir-rg",
+          "requirements" => %{
+            "write_scope" => [
+              "src/app/api/cards/route.ts",
+              "tests/integration/analytics-instrumentation.test.ts only to activate/update existing specs"
+            ]
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/app/api/cards/route.ts",
+                "line" => 103,
+                "body" => "Reuse existing guest session before creating one on cards load."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-bare-test-dir-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-bare-test-dir-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"rg -n start_clicked tests/integration tests/integration/analytics-instrumentation.test.ts\\""}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-bare-test-dir-rg",
+        identifier: "MT-REVIEW-BARE-TEST-DIR-RG",
+        title: "Review rework bare test dir rg",
+        description: "Bare test directory rg should stay blocked in review rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-BARE-TEST-DIR-RG",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Continue review validation", issue)
+
+      assert command ==
+               ~s(/bin/zsh -lc "rg -n start_clicked tests/integration tests/integration/analytics-instrumentation.test.ts")
+
+      assert pattern == "(^|\\s|[\"'])rg(\\s|$)"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows scoped conflict marker grep during integration check" do
     test_root =
       Path.join(

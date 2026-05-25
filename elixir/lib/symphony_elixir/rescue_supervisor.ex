@@ -49,6 +49,9 @@ defmodule SymphonyElixir.RescueSupervisor do
         corrections != [] and validation_blocker_correction?(corrections) ->
           classify_validation_blocker(issue, workspace, corrections)
 
+        corrections != [] and exact_test_search_permission_correction?(corrections, workspace) ->
+          resolve_exact_test_search_permission_corrections(issue, workspace, corrections)
+
         corrections != [] and runtime_progress_correction?(corrections) ->
           classify_runtime_progress_block(issue, workspace, corrections)
 
@@ -64,6 +67,23 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp rescue_issue(_issue), do: []
+
+  defp resolve_exact_test_search_permission_corrections(%Issue{} = issue, workspace, corrections) do
+    safe_permission_corrections =
+      Enum.filter(corrections, &exact_test_search_permission_correction?(&1, workspace))
+
+    correction_ids = correction_id_list(safe_permission_corrections)
+
+    summary =
+      "permission_guard_resolved_by_exact_test_search_policy: runtime now allows bounded read-only rg/grep over exact existing test files when anchored to review/validation context; redispatch can continue without human approval."
+
+    :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, correction_ids, summary)
+    _ = Tracker.create_comment(issue.id, exact_test_search_permission_resolved_comment(issue, safe_permission_corrections))
+
+    Logger.info("Rescue supervisor resolved safe exact-test search permission correction for #{issue.identifier}")
+
+    []
+  end
 
   defp classify_validation_blocker(%Issue{} = issue, workspace, corrections) do
     validation_corrections = validation_blocker_corrections(corrections)
@@ -1093,6 +1113,113 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp validation_blocker_correction?(_correction), do: false
 
+  defp exact_test_search_permission_correction?(corrections, workspace) when is_list(corrections) do
+    Enum.any?(corrections, &exact_test_search_permission_correction?(&1, workspace))
+  end
+
+  defp exact_test_search_permission_correction?(%{} = correction, workspace) when is_binary(workspace) do
+    correction["status"] == "open" and
+      correction["source"] == "symphony.runtime.permission" and
+      correction
+      |> permission_forbidden_command_text()
+      |> exact_test_search_command?(workspace)
+  end
+
+  defp exact_test_search_permission_correction?(_correction, _workspace), do: false
+
+  defp permission_forbidden_command_text(correction) when is_map(correction) do
+    text =
+      [
+        correction["summary"],
+        correction["findings"],
+        correction["required_corrections"]
+      ]
+      |> string_values()
+      |> Enum.join("\n")
+
+    case Regex.run(~r/event=forbidden_command command=(.+?)(?:\n|$)/, text) do
+      [_, command] -> String.trim(command)
+      _ -> ""
+    end
+  end
+
+  defp permission_forbidden_command_text(_correction), do: ""
+
+  defp exact_test_search_command?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    command_paths = search_command_file_paths(command)
+
+    read_only_search_command?(command) and
+      length(command_paths) in 1..6 and
+      Enum.all?(command_paths, &exact_existing_test_file?(workspace, &1))
+  end
+
+  defp exact_test_search_command?(_command, _workspace), do: false
+
+  defp read_only_search_command?(command) when is_binary(command) do
+    (Regex.match?(~r/(^|\s|["'])rg\s+/, command) or Regex.match?(~r/(^|\s|["'])grep\s+/, command)) and
+      (String.contains?(command, "-n") or String.contains?(command, "--line-number")) and
+      not Regex.match?(~r/(^|\s)(--files|--glob|-g|--type|-t|--replace|-r)(\s|=|$)/, command) and
+      not Regex.match?(~r/(^|\s)-[^-\s]*[Rr][^-\s]*(\s|$)/, command) and
+      not Regex.match?(~r/(^|\s)--recursive(\s|=|$)/, command) and
+      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command) and
+      not broad_search_directory_token?(command)
+  end
+
+  defp read_only_search_command?(_command), do: false
+
+  defp search_command_file_paths(command) when is_binary(command) do
+    ~r{(?:^|[\s"'])(\.?/?(?:src|app|apps|packages|lib|tests)/[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    |> Regex.scan(command, capture: :all_but_first)
+    |> Enum.flat_map(fn
+      [path] when is_binary(path) -> [normalize_permission_path(path)]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp search_command_file_paths(_command), do: []
+
+  defp broad_search_directory_token?(command) when is_binary(command) do
+    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)/
+    |> Regex.scan(command, capture: :all_but_first)
+    |> Enum.flat_map(fn
+      [path] when is_binary(path) -> [normalize_permission_path(path)]
+      _ -> []
+    end)
+    |> Enum.any?(fn path ->
+      root = path |> String.split("/", parts: 2) |> List.first()
+
+      root in ["src", "app", "apps", "packages", "lib", "tests"] and
+        Path.extname(path) == ""
+    end)
+  end
+
+  defp broad_search_directory_token?(_command), do: false
+
+  defp exact_existing_test_file?(workspace, path) when is_binary(workspace) and is_binary(path) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_path = Path.expand(path, expanded_workspace)
+
+    String.starts_with?(path, "tests/") and
+      String.starts_with?(expanded_path, expanded_workspace <> "/") and
+      File.regular?(expanded_path)
+  end
+
+  defp exact_existing_test_file?(_workspace, _path), do: false
+
+  defp normalize_permission_path(path) when is_binary(path) do
+    path
+    |> String.trim()
+    |> String.trim_leading("./")
+    |> String.replace(~r/:\d+(?:-\d+)?$/, "")
+  end
+
+  defp normalize_permission_path(_path), do: ""
+
+  defp string_values(values) when is_list(values), do: Enum.flat_map(values, &string_values/1)
+  defp string_values(value) when is_binary(value), do: [value]
+  defp string_values(_value), do: []
+
   defp pending_codex_review_correction?(corrections) when is_list(corrections) do
     Enum.any?(corrections, &pending_codex_review_correction?/1)
   end
@@ -1272,6 +1399,20 @@ defmodule SymphonyElixir.RescueSupervisor do
       findings ->
         "\n- Evidence: #{Enum.join(findings, " | ")}"
     end
+  end
+
+  defp exact_test_search_permission_resolved_comment(issue, corrections) do
+    correction_ids = correction_ids(corrections)
+
+    """
+    Symphony resolved a safe read-only permission correction after a runtime guard update.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - Runtime guard: bounded `rg -n`/`grep -n` over exact existing test files is allowed when anchored to review/validation context.
+    - Next action: redispatch the worker from the existing local handoff and continue focused validation.
+    """
+    |> String.trim()
   end
 
   defp later_progress_review_rework_comment(issue, corrections, pr_number, pr_url, head_sha) do
