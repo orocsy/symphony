@@ -501,7 +501,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state.
     For review-request handoff comments, use `gh pr comment <pr-number> --body '@codex review'`; never use `gh api --method POST` or issue-comment API endpoints.
     If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff, run focused validation, commit, push, request fresh review, and leave Linear state transitions to Symphony's review monitor.
-    For Vitest validation, use the exact `pnpm exec vitest run --configLoader runner <test-file>` command from the issue brief. Do not run `pnpm test <test-file>` and do not probe or touch `node_modules/.vite-temp`; if that path appears, switch to the runner command instead of requesting approval.
+    For Vitest validation, use `--configLoader runner` to avoid Vite writing startup temp files into symlinked `node_modules/.vite-temp`. If the issue brief names a focused test, run the exact `pnpm exec vitest run --configLoader runner <test-file>` command. If the declared full-suite command is `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not run `pnpm test <test-file>` and do not probe or request approval for `node_modules/.vite-temp`.
     After the `review-feedback-classified` checkpoint, start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
     If the issue brief names an exact write-scope file that does not exist yet, create that exact file; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
     If the issue brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
@@ -525,7 +525,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Start from `git status --short --branch`, then read `.orocsy/delivery/issue-brief.md` if present.
     Use exact files, line ranges, data shapes, tests, and validation commands from the issue brief. Do not run `rg`, `grep`, `find`, `git ls-files`, GitHub, or Linear discovery before the first scoped edit unless the issue brief is missing required code-level scope.
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state; use `gh pr create` or `gh pr comment` for PR creation and Codex review requests.
-    For Vitest validation, use the exact `pnpm exec vitest run --configLoader runner <test-file>` command from the issue brief. Do not run `pnpm test <test-file>` and do not probe or touch `node_modules/.vite-temp`; if that path appears, switch to the runner command instead of requesting approval.
+    For Vitest validation, use `--configLoader runner` to avoid Vite writing startup temp files into symlinked `node_modules/.vite-temp`. If the issue brief names a focused test, run the exact `pnpm exec vitest run --configLoader runner <test-file>` command. If the declared full-suite command is `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not run `pnpm test <test-file>` and do not probe or request approval for `node_modules/.vite-temp`.
     If the brief is missing exact write scope, dependencies, target files, target tests, or acceptance criteria, write an Orocsy blocker/correction and stop instead of searching broadly.
     If an exact write-scope file from the brief is missing, create that exact path; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
     If the brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
@@ -550,6 +550,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Immediately after confirming the current branch/status, and before any `gh pr`, `gh api`, conflict scan, diff, or file read, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.integration-check-started --status passed --phase handoff --step "integration branch/status confirmed" --tool "integration-handoff-preflight"`.
     If the preflight PR is unknown, use bounded read-only `gh pr view`/`gh pr list` for the configured integration branch before deciding whether a same-branch PR handoff is missing. If you use `gh api` for PR lookup, it must include `--method GET`; never pass `-f`, `-F`, `--field`, or `--raw-field` without `--method GET`.
     If no PR exists for the configured integration branch after bounded lookup, create exactly one PR for that branch only when the branch contains the intended handoff commits; do not create a new branch.
+    For full-suite Vitest validation, if the issue/preflight declares `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not rerun plain `pnpm test` after a `node_modules/.vite-temp` EPERM.
     If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only `git diff --stat` plus focused diffs for the dirty files, run the exact focused validation from the brief/correction, then stage, commit, push the existing PR branch, and request fresh review.
     In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
     If no unmerged files remain and the issue brief has a `Current Validation Rework` section or an open correction names validation failures, treat the turn as validation rework: inspect and edit only the named in-scope helper/test files before rerunning validation.
@@ -1661,6 +1662,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       is_nil(command) ->
         :ok
 
+      symlinked_vitest_full_test_command?(command_for_patterns, workspace) ->
+        {:error, command, "symlinked_vitest_full_test_requires_configLoader_runner"}
+
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
@@ -1707,6 +1711,53 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp symlinked_vitest_full_test_command?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    symlinked_node_modules?(workspace) and
+      package_test_script_vitest?(workspace) and
+      plain_pnpm_test_command?(command)
+  end
+
+  defp symlinked_vitest_full_test_command?(_command, _workspace), do: false
+
+  defp plain_pnpm_test_command?(command) when is_binary(command) do
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.replace(~r/\s+/, " ")
+
+    Regex.match?(~r/(?:^|[\s'"])(?:corepack\s+)?pnpm\s+test(?:\s|["']|$)/, normalized) and
+      not Regex.match?(~r/\s--configLoader\s+runner(?:\s|["']|$)/, normalized)
+  end
+
+  defp plain_pnpm_test_command?(_command), do: false
+
+  defp symlinked_node_modules?(workspace) when is_binary(workspace) do
+    case File.lstat(Path.join(workspace, "node_modules")) do
+      {:ok, %File.Stat{type: :symlink}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp symlinked_node_modules?(_workspace), do: false
+
+  defp package_test_script_vitest?(workspace) when is_binary(workspace) do
+    package_json = Path.join(workspace, "package.json")
+
+    with {:ok, content} <- File.read(package_json),
+         {:ok, %{"scripts" => %{"test" => test_script}}} <- Jason.decode(content) do
+      is_binary(test_script) and Regex.match?(~r/(^|\s)vitest(\s|$)/, test_script)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp package_test_script_vitest?(_workspace), do: false
 
   defp integration_check_show_ref_filter_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do

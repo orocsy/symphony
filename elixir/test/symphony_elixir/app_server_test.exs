@@ -1492,6 +1492,189 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server blocks plain pnpm test when symlinked Vitest workspaces need configLoader runner" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-symlinked-vitest-pnpm-test-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SYMLINKED-VITEST-BLOCK")
+      dependency_root = Path.join(test_root, "dependency-root")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(dependency_root, "node_modules"))
+      File.ln_s!(Path.join(dependency_root, "node_modules"), Path.join(workspace, "node_modules"))
+
+      File.write!(
+        Path.join(workspace, "package.json"),
+        Jason.encode!(%{"scripts" => %{"test" => "vitest run"}})
+      )
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-SYMLINKED-VITEST-BLOCK",
+          "branch" => "orocsy/feature-analytics-observability-integration",
+          "requirements" => %{
+            "ticket_type" => "integration-check",
+            "integration_branch" => "orocsy/feature-analytics-observability-integration",
+            "validation" => %{"commands" => ["pnpm test"]},
+            "write_scope" => ["Final PR validation notes only"]
+          },
+          "review" => %{"pr_number" => nil, "pr_url" => nil}
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-symlinked-vitest-block"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-symlinked-vitest-block"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"pnpm test"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-symlinked-vitest-block",
+        identifier: "MT-SYMLINKED-VITEST-BLOCK",
+        title: "Symlinked Vitest full validation",
+        description: "Plain pnpm test should be redirected to configLoader runner",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SYMLINKED-VITEST-BLOCK",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, "pnpm test", "symlinked_vitest_full_test_requires_configLoader_runner"}} =
+               AppServer.run(workspace, "Validate integration handoff", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows symlinked Vitest pnpm test with configLoader runner" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-symlinked-vitest-pnpm-test-runner-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SYMLINKED-VITEST-RUNNER")
+      dependency_root = Path.join(test_root, "dependency-root")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(dependency_root, "node_modules"))
+      File.ln_s!(Path.join(dependency_root, "node_modules"), Path.join(workspace, "node_modules"))
+
+      File.write!(
+        Path.join(workspace, "package.json"),
+        Jason.encode!(%{"scripts" => %{"test" => "vitest run"}})
+      )
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-SYMLINKED-VITEST-RUNNER",
+          "branch" => "orocsy/feature-analytics-observability-integration",
+          "requirements" => %{
+            "ticket_type" => "integration-check",
+            "integration_branch" => "orocsy/feature-analytics-observability-integration",
+            "validation" => %{"commands" => ["pnpm test"]},
+            "write_scope" => ["Final PR validation notes only"]
+          },
+          "review" => %{"pr_number" => nil, "pr_url" => nil}
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-symlinked-vitest-runner"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-symlinked-vitest-runner"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"pnpm test -- --configLoader runner"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-symlinked-vitest-runner",
+        identifier: "MT-SYMLINKED-VITEST-RUNNER",
+        title: "Symlinked Vitest full validation with runner",
+        description: "ConfigLoader runner full validation should be allowed",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SYMLINKED-VITEST-RUNNER",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate integration handoff", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks integration-check GitHub API field lookup without GET method before progress" do
     test_root =
       Path.join(
