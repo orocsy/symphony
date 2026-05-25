@@ -994,6 +994,87 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "issue requirements normalize plain Vitest pnpm test in workspaces" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-vitest-normalize-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      File.write!(Path.join(workspace, "package.json"), ~s({"scripts":{"test":"vitest run"}}))
+
+      issue = %Issue{
+        id: "issue-vitest-normalize",
+        identifier: "COD-904",
+        title: "Vitest validation normalization",
+        state: "In Progress",
+        description: """
+        ## Write Scope
+        - src/features/example.ts
+
+        ### MIU 1 - Example
+        Keep validation commands executable in Symphony worktrees.
+
+        ## Validation
+        - `pnpm test`
+        - `pnpm typecheck`
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["validation"]["commands"] == [
+               "pnpm test -- --configLoader runner",
+               "pnpm typecheck"
+             ]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "issue requirements normalize focused Vitest pnpm test commands in workspaces" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-vitest-focused-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      File.write!(Path.join(workspace, "package.json"), ~s({"scripts":{"test":"vitest run"}}))
+
+      issue = %Issue{
+        id: "issue-vitest-focused-normalize",
+        identifier: "COD-905",
+        title: "Vitest focused validation normalization",
+        state: "In Progress",
+        description: """
+        ## Write Scope
+        - src/features/example.ts
+        - tests/unit/example.test.ts
+
+        ### MIU 1 - Example
+        Keep focused validation commands executable in Symphony worktrees.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/example.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["validation"]["commands"] == [
+               "pnpm exec vitest run --configLoader runner tests/unit/example.test.ts"
+             ]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "issue requirements skip empty primary issue brief and read fallback brief" do
     workspace =
       Path.join(
