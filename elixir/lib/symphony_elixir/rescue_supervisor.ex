@@ -12,6 +12,11 @@ defmodule SymphonyElixir.RescueSupervisor do
   @review_rework_loop_limit 2
   @validation_blocker_loop_limit 3
   @handoff_recovery_progress_grace_seconds 15 * 60
+  @pending_codex_review_correction_sources [
+    "pr-review-handoff",
+    "github-codex-review",
+    "continuation-review-rework"
+  ]
   @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
@@ -1098,7 +1103,7 @@ defmodule SymphonyElixir.RescueSupervisor do
     findings = Enum.join(correction["findings"] || [], " ")
     required = Enum.join(correction["required_corrections"] || [], " ")
 
-    source in ["pr-review-handoff", "github-codex-review"] or
+    source in @pending_codex_review_correction_sources or
       (next_action == "retry" and
          (String.contains?(summary, "Codex review") or
             String.contains?(findings, "Codex review") or
