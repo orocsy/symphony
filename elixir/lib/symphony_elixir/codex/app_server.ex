@@ -2005,7 +2005,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp integration_check_readonly_gh_api_allowed?(_command, _workspace), do: false
 
   defp readonly_gh_api_method?(command) when is_binary(command) do
-    normalized = String.replace(command, ~r/\s+/, " ")
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.replace(~r/\s+/, " ")
 
     cond do
       Regex.match?(~r/(?:^|[\s'"])gh\s+api\s+graphql(\s|$)/, normalized) ->
@@ -2025,7 +2028,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp readonly_gh_api_method?(_command), do: false
 
   defp handoff_gh_api_command?(command) do
-    normalized = String.replace(command, ~r/\s+/, " ")
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.replace(~r/\s+/, " ")
 
     cond do
       Regex.match?(~r/(?:^|[\s'"])gh\s+api\s+graphql(\s|$)/, normalized) ->
@@ -2062,6 +2068,12 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     Enum.any?(allowed_patterns, &Regex.match?(&1, endpoint))
   end
+
+  defp unescape_shell_argument_quotes(command) when is_binary(command) do
+    String.replace(command, ~r/\\(["'])/, "\\1")
+  end
+
+  defp unescape_shell_argument_quotes(command), do: command
 
   defp durable_handoff_progress?(workspace) when is_binary(workspace) do
     events_path = Path.join(workspace, ".orocsy/delivery/events/events.jsonl")
