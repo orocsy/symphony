@@ -1584,6 +1584,86 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server adds only symlinked Vite temp as writable root for Vitest workspaces" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-symlinked-vitest-temp-root-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SYMLINKED-VITEST-TEMP")
+      dependency_root = Path.join(test_root, "dependency-root")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(dependency_root, "node_modules"))
+      File.ln_s!(Path.join(dependency_root, "node_modules"), Path.join(workspace, "node_modules"))
+
+      File.write!(
+        Path.join(workspace, "package.json"),
+        Jason.encode!(%{"scripts" => %{"test" => "vitest run"}})
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-symlinked-vitest-temp"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_turn_sandbox_policy: %{
+          "type" => "workspaceWrite",
+          "writableRoots" => [".", ".git"],
+          "readOnlyAccess" => %{"type" => "fullAccess"},
+          "networkAccess" => true
+        }
+      )
+
+      assert {:ok, session} = AppServer.start_session(workspace)
+
+      try do
+        expected_vite_temp =
+          Path.join([dependency_root, "node_modules", ".vite-temp"])
+          |> SymphonyElixir.PathSafety.canonicalize()
+          |> elem(1)
+
+        roots = session.turn_sandbox_policy["writableRoots"]
+        {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
+
+        assert canonical_workspace in roots
+        assert Path.join(canonical_workspace, ".git") in roots
+        assert expected_vite_temp in roots
+        refute Path.join(dependency_root, "node_modules") in roots
+        refute dependency_root in roots
+      after
+        AppServer.stop_session(session)
+      end
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows symlinked Vitest pnpm test with configLoader runner" do
     test_root =
       Path.join(
