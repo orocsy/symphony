@@ -665,13 +665,18 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp summarize_passed_events(path) do
     if File.regular?(path) do
-      path
-      |> recent_lines()
-      |> Enum.filter(&passed_validation_event?/1)
-      |> Enum.take(-8)
-      |> Enum.map(&event_summary_line/1)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n")
+      events = decoded_recent_events(path)
+
+      if blocked_event_after_last_passed?(events) do
+        ""
+      else
+        events
+        |> Enum.filter(&passed_validation_event?/1)
+        |> Enum.take(-8)
+        |> Enum.map(&event_summary_line/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.join("\n")
+      end
     else
       ""
     end
@@ -688,14 +693,58 @@ defmodule SymphonyElixir.PromptBuilder do
     |> Enum.reverse()
   end
 
-  defp passed_validation_event?(line) do
-    with {:ok, decoded} <- Jason.decode(line),
-         "passed" <- Map.get(decoded, "status") do
-      passed_validation_event_decoded?(decoded)
-    else
+  defp decoded_recent_events(path) do
+    path
+    |> recent_lines()
+    |> Enum.flat_map(fn line ->
+      case Jason.decode(line) do
+        {:ok, decoded} when is_map(decoded) -> [decoded]
+        _ -> []
+      end
+    end)
+  end
+
+  defp blocked_event_after_last_passed?(events) when is_list(events) do
+    indexed = Enum.with_index(events)
+
+    last_passed_index =
+      indexed
+      |> Enum.filter(fn {event, _index} -> passed_validation_event?(event) end)
+      |> List.last()
+      |> case do
+        {_event, index} -> index
+        nil -> nil
+      end
+
+    last_blocked_index =
+      indexed
+      |> Enum.filter(fn {event, _index} -> blocking_event?(event) end)
+      |> List.last()
+      |> case do
+        {_event, index} -> index
+        nil -> nil
+      end
+
+    is_integer(last_passed_index) and is_integer(last_blocked_index) and
+      last_blocked_index > last_passed_index
+  end
+
+  defp blocked_event_after_last_passed?(_events), do: false
+
+  defp passed_validation_event?(%{} = decoded) do
+    case Map.get(decoded, "status") do
+      "passed" -> passed_validation_event_decoded?(decoded)
       _ -> false
     end
   end
+
+  defp passed_validation_event?(_decoded), do: false
+
+  defp blocking_event?(%{} = decoded) do
+    Map.get(decoded, "status") in ["blocked", "failed", "error"]
+  end
+
+  defp blocking_event?(_decoded), do: false
 
   defp passed_validation_event_decoded?(%{"event" => event} = decoded) when is_binary(event) do
     event in ["tool.finished", "gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
@@ -706,16 +755,12 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp passed_validation_event_decoded?(_decoded), do: false
 
-  defp event_summary_line(line) do
-    with {:ok, decoded} <- Jason.decode(line) do
-      ts = Map.get(decoded, "ts", "unknown-time")
-      event = Map.get(decoded, "event", "event")
-      detail = Map.get(decoded, "tool") || Map.get(decoded, "step") || Map.get(decoded, "gate") || Map.get(decoded, "rubric") || "passed"
+  defp event_summary_line(%{} = decoded) do
+    ts = Map.get(decoded, "ts", "unknown-time")
+    event = Map.get(decoded, "event", "event")
+    detail = Map.get(decoded, "tool") || Map.get(decoded, "step") || Map.get(decoded, "gate") || Map.get(decoded, "rubric") || "passed"
 
-      "- #{ts} #{event}: #{detail}"
-    else
-      _ -> ""
-    end
+    "- #{ts} #{event}: #{detail}"
   end
 
   defp indent(text) do

@@ -8788,6 +8788,69 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder does not treat a pushed branch as validated when a later validation blocker exists" do
+    workflow_prompt = """
+    Continue normal worker prompt.
+    Ticket {{ issue.identifier }}
+    """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pushed-handoff-validation-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nReview fix.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        """
+        {"event":"tool.finished","status":"passed","tool":"review-feedback-classified","ts":"2026-05-12T05:00:49Z"}
+        {"event":"validation.blocker","status":"blocked","tool":"pnpm test","ts":"2026-05-12T05:01:49Z"}
+        """
+      )
+
+      issue = %Issue{
+        identifier: "MT-205",
+        title: "Continue validation rework",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-205",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      refute String.starts_with?(prompt, "Pushed validated handoff checkpoint:")
+      refute prompt =~ "Minimal review handoff mode:"
+      assert prompt =~ "Continue normal worker prompt."
+      assert prompt =~ "Ticket MT-205"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "orchestrator skips pushed review handoff inspection when monitor is disabled" do
     test_root =
       Path.join(

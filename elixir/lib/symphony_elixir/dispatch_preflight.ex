@@ -522,6 +522,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Use `git fetch origin #{base_branch}` and a bounded merge/rebase conflict check only to expose current merge conflicts.
     - Resolve only the listed conflict/write-scope paths and directly required helper/test paths.
     - If the PR is already mergeable/clean and no current-head review feedback is listed, validate and request/confirm review without product edits; only change code after a concrete validation or review blocker.
+    - If a declared validation command fails and names an exact failing test, route, helper, or assertion on the integration branch, treat it as integration validation rework for this handoff branch. Make the smallest same-branch fix, or create an Orocsy inbox correction with the exact command, failing test/assertion, and next action.
     - Do not create a new branch or duplicate PR, do not broaden into unrelated feature work, and never merge the PR automatically.
     - After the conflict fix, run focused validation, then commit, push, and request a fresh Codex review.
     """
