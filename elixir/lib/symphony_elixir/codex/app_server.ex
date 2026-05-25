@@ -541,6 +541,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Before spending broad analysis tokens, either edit a scoped code/test file or write an explicit Orocsy blocker/correction.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
+    Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
     In the first turn, complete the scoped fix, focused validation, commit, push, and fresh review request, or stop with a concrete blocker.
     Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review.
     Never merge automatically.
@@ -566,6 +567,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
     In the first fresh implementation turn, stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
+    Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
     In the first turn, complete only the scoped implementation checkpoint or stop with a concrete blocker.
     Never merge automatically.
     """
@@ -588,6 +590,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
     If no unmerged files remain and the issue brief has a `Current Validation Rework` section or an open correction names validation failures, treat the turn as validation rework: inspect and edit only the named in-scope helper/test files before rerunning validation.
     In validation rework, do not just rerun the same failing validation command and create the same correction again. First restore the missing export, fallback behavior, or directly named assertion path from the issue brief/correction; then rerun the exact focused validation command.
+    If a declared validation command fails after merge/review fixes and names an exact failing test, route, helper, or assertion on the integration branch, treat it as integration validation rework for this handoff branch. Make the smallest same-branch fix, or create an Orocsy inbox correction with the exact command, failing test/assertion, and next action; do not record only a `validation.blocker` event and stop.
     A single conflict-marker scan with `grep` is allowed only when it searches for `<<<<<<<`, `=======`, and `>>>>>>>` across explicit issue-brief/preflight files.
     Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` after naming the exact conflict files, validation commands, PR number or missing-PR finding, and same-branch push target.
     Resolve only the named conflict files and directly required helper/test files; do not do unrelated feature work or broad rediscovery.
@@ -596,6 +599,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     After the conflict fix, run focused validation, commit, push to the existing PR branch, and request fresh review with `gh pr comment <pr-number> --body '@codex review'`.
     Never create a duplicate PR, move Linear to a terminal state, or merge the PR automatically.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
+    Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
     """
     |> String.trim()
   end
