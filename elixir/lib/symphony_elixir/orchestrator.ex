@@ -374,6 +374,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
 
     @doc false
+    def handle_orchestration_review_pending_for_test(%Issue{} = issue) do
+      maybe_handle_orchestration_review_pending(issue)
+    end
+
+    @doc false
     def complete_review_classification_handoff_for_test(%Issue{} = issue) do
       maybe_complete_review_classification_handoff(issue)
     end
@@ -1300,7 +1305,16 @@ defmodule SymphonyElixir.Orchestrator do
                 state_acc
 
               :not_ready ->
-                dispatch_issue(state_acc, issue)
+                case maybe_handle_orchestration_review_pending(issue) do
+                  {:completed, _handoff} ->
+                    complete_issue(state_acc, issue.id)
+
+                  {:blocked, _reason} ->
+                    state_acc
+
+                  :not_ready ->
+                    dispatch_issue(state_acc, issue)
+                end
             end
         end
       else
@@ -1318,6 +1332,145 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_complete_review_classification_handoff(_issue), do: :not_ready
+
+  defp maybe_handle_orchestration_review_pending(%Issue{} = issue) do
+    if Config.settings!().review_monitor.enabled do
+      case orchestration_review_pending_candidate(issue) do
+        {:ok, candidate} ->
+          inspect_orchestration_review_pending(issue, candidate)
+
+        :not_ready ->
+          :not_ready
+
+        {:error, reason} ->
+          {:blocked, reason}
+      end
+    else
+      :not_ready
+    end
+  end
+
+  defp maybe_handle_orchestration_review_pending(_issue), do: :not_ready
+
+  defp inspect_orchestration_review_pending(%Issue{} = issue, candidate) do
+    issue = %{issue | branch_name: candidate.branch}
+    monitor = handoff_review_monitor(candidate.workspace)
+
+    case ReviewMonitor.inspect_issue(issue, monitor) do
+      {:ok, %{pr: nil}} ->
+        :not_ready
+
+      {:ok, inspection} ->
+        complete_inspected_orchestration_review_pending(issue, candidate, Map.new(inspection))
+
+      {:error, reason} ->
+        reason = {:orchestration_review_pending_inspection_failed, reason}
+        park_pushed_handoff_blocker(issue, candidate, reason)
+        {:blocked, reason}
+    end
+  end
+
+  defp complete_inspected_orchestration_review_pending(%Issue{} = issue, candidate, inspection) do
+    case pushed_handoff_head_status(candidate, inspection) do
+      :current ->
+        clean_review_status = clean_codex_review_status(inspection)
+
+        cond do
+          mergeability_conflict?(inspection) ->
+            :not_ready
+
+          pushed_review_feedback_status(inspection) == :has_review_feedback ->
+            :not_ready
+
+          codex_review_request_pending?(inspection) ->
+            Logger.info(
+              "Orchestration review guard is waiting for pending Codex review: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+            )
+
+            {:blocked, :review_pending}
+
+          clean_review_status == :missing ->
+            Logger.info(
+              "Orchestration review guard found clean PR with no clean Codex review yet; requesting review without worker: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+            )
+
+            case request_pushed_handoff_codex_review(issue, candidate, inspection) do
+              :ok ->
+                {:blocked, :review_pending}
+
+              {:error, reason} ->
+                park_pushed_handoff_blocker(issue, candidate, reason)
+                {:blocked, reason}
+            end
+
+          clean_review_status == :confirmed ->
+            finish_clean_pushed_review_handoff(issue, candidate, inspection)
+
+          true ->
+            reason = {:clean_codex_review_lookup_failed, clean_review_status}
+            park_pushed_handoff_blocker(issue, candidate, reason)
+            {:blocked, reason}
+        end
+
+      {:stale, _reason} ->
+        :not_ready
+    end
+  end
+
+  defp orchestration_review_pending_candidate(%Issue{} = issue) do
+    with true <- review_pending_issue_state?(issue.state),
+         {:ok, workspace} <- Workspace.path_for_issue(issue),
+         true <- File.dir?(workspace),
+         {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
+         true <- clean_pushed_tracking_status?(status),
+         {:ok, branch} <- git_output(workspace, ["branch", "--show-current"]),
+         branch <- String.trim(branch),
+         true <- handoff_branch_name?(branch),
+         {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]) do
+      {:ok,
+       %{
+         workspace: workspace,
+         checkpoint: "Orchestration review-pending guard",
+         status: String.trim(status),
+         branch: branch,
+         head_sha: String.trim(head_sha),
+         head_committed_at: git_head_committed_at(workspace)
+       }}
+    else
+      false -> :not_ready
+      "" -> :not_ready
+      {:error, reason} -> {:error, reason}
+      _ -> :not_ready
+    end
+  rescue
+    error -> {:error, {:orchestration_review_pending_candidate_failed, Exception.message(error)}}
+  end
+
+  defp review_pending_issue_state?(state) when is_binary(state) do
+    state = normalize_issue_state(state)
+    state == "rework" or String.contains?(state, "review")
+  end
+
+  defp review_pending_issue_state?(_state), do: false
+
+  defp clean_pushed_tracking_status?(status) when is_binary(status) do
+    lines = String.split(status, "\n", trim: true)
+    branch_line = List.first(lines) || ""
+    dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+
+    dirty_lines == [] and
+      String.contains?(branch_line, "...") and
+      not String.contains?(branch_line, ["ahead", "behind", "diverged"])
+  end
+
+  defp clean_pushed_tracking_status?(_status), do: false
+
+  defp handoff_branch_name?(branch) when is_binary(branch) do
+    branch = String.trim(branch)
+    branch != "" and branch not in ["main", "master", "trunk", "develop", "dev"]
+  end
+
+  defp handoff_branch_name?(_branch), do: false
 
   defp complete_review_classification_handoff(%Issue{} = issue, candidate) do
     if Config.settings!().review_monitor.enabled do
