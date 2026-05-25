@@ -3,7 +3,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   Writes a small machine-owned dispatch checkpoint before Codex starts.
   """
 
-  alias SymphonyElixir.{Config, IssueRequirements, ReviewMonitor}
+  alias SymphonyElixir.{Config, IssueRequirements, PromptBuilder, ReviewMonitor}
   alias SymphonyElixir.Linear.Issue
 
   @preflight_path ".orocsy/delivery/state/dispatch-preflight.json"
@@ -15,10 +15,11 @@ defmodule SymphonyElixir.DispatchPreflight do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements),
-         mode <- preflight_mode(requirements, inspection),
+         mode <- preflight_mode(workspace, requirements, inspection),
          :ok <- maybe_switch_to_review_head(workspace, inspection, mode) do
       preflight =
         case mode do
+          "handoff_recovery" -> handoff_recovery_preflight(workspace, issue, requirements, inspection)
           "review_rework" -> review_rework_preflight(workspace, issue, requirements, inspection)
           "integration_check" -> integration_check_preflight(workspace, issue, requirements, inspection)
           _ -> fresh_implementation_preflight(workspace, issue, requirements, inspection)
@@ -62,6 +63,9 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       {:ok, %{"mode" => "fresh_implementation"} = preflight} ->
         fresh_prompt_context(preflight)
+
+      {:ok, %{"mode" => "handoff_recovery"} = preflight} ->
+        handoff_recovery_prompt_context(preflight)
 
       {:ok, %{"mode" => "integration_check"} = preflight} ->
         integration_prompt_context(preflight)
@@ -209,6 +213,19 @@ defmodule SymphonyElixir.DispatchPreflight do
     error -> {Exception.message(error), 1}
   end
 
+  defp current_branch(workspace) when is_binary(workspace) do
+    case git_command(workspace, ["branch", "--show-current"]) do
+      {branch, 0} ->
+        branch = String.trim(branch)
+        if branch == "", do: nil, else: branch
+
+      _ ->
+        nil
+    end
+  end
+
+  defp current_branch(_workspace), do: nil
+
   defp review_inspection_failed(reason) do
     %{
       pr: nil,
@@ -224,8 +241,11 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp review_feedback?(%{feedback: feedback}) when is_list(feedback), do: feedback != []
   defp review_feedback?(_inspection), do: false
 
-  defp preflight_mode(requirements, inspection) do
+  defp preflight_mode(workspace, requirements, inspection) do
     cond do
+      handoff_recovery_checkpoint?(workspace) ->
+        "handoff_recovery"
+
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
@@ -242,6 +262,15 @@ defmodule SymphonyElixir.DispatchPreflight do
         "fresh_implementation"
     end
   end
+
+  defp handoff_recovery_checkpoint?(workspace) when is_binary(workspace) do
+    checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)
+
+    String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Local handoff recovery checkpoint:")
+  end
+
+  defp handoff_recovery_checkpoint?(_workspace), do: false
 
   defp integration_check_mergeability?(requirements, inspection) do
     integration_check_requirements?(requirements) and mergeability_conflict?(inspection)
@@ -338,6 +367,33 @@ defmodule SymphonyElixir.DispatchPreflight do
         "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
         "feedback_count" => length(feedback),
         "feedback" => Enum.map(feedback, &feedback_summary/1)
+      }
+    }
+  end
+
+  defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
+    %{
+      "schema_version" => 1,
+      "mode" => "handoff_recovery",
+      "created_at" => now_iso8601(),
+      "issue" => issue_value(issue, :identifier),
+      "state" => issue_value(issue, :state),
+      "branch" => current_branch(workspace) || requirements["branch"] || issue_value(issue, :branch_name),
+      "checkpoint_event" => "gate.post-miu",
+      "first_task" =>
+        "Recover the existing dirty/local handoff only: inspect git status and focused dirty diffs, run the smallest validation for those files, then commit, push, and request/update Codex review. Do not restart fresh implementation or broaden project discovery.",
+      "requirements" => compact_requirements(requirements),
+      "toolchain" => toolchain_snapshot(workspace),
+      "review" => %{
+        "pr_number" => Map.get(inspection, :pr_number),
+        "pr_url" => Map.get(inspection, :pr_url),
+        "head_ref" => Map.get(inspection, :head_ref),
+        "head_sha" => Map.get(inspection, :head_sha),
+        "mergeable" => Map.get(inspection, :mergeable),
+        "mergeable_state" => Map.get(inspection, :mergeable_state),
+        "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
+        "feedback_count" => length(Map.get(inspection, :feedback, [])),
+        "feedback" => Enum.map(Map.get(inspection, :feedback, []), &feedback_summary/1)
       }
     }
   end
@@ -507,6 +563,35 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
 
     Do not inspect broad project history before producing scoped file/test progress or an explicit blocker. In a fresh implementation first turn, stop after the scoped code/test checkpoint and `technical-miu-trace`, or after recording a blocker; `technical-miu-trace` alone is not durable progress. The next handoff-recovery turn handles focused validation, commit, push, PR review request, and Linear handoff. Do not create/update a PR, request review, or update Linear handoff from the first implementation turn.
+    """
+    |> String.trim()
+  end
+
+  defp handoff_recovery_prompt_context(preflight) do
+    requirements = preflight["requirements"] || %{}
+    review = preflight["review"] || %{}
+
+    """
+    Runtime dispatch preflight:
+
+    - Mode: handoff recovery
+    - Preflight file: `#{@preflight_path}`
+    - Branch: `#{preflight["branch"] || "unknown"}`
+    - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
+    - Reviewed head: `#{short_sha(review["head_sha"])}`
+    - Worker-required checkpoint: focused validation such as `#{preflight["checkpoint_event"]}`, or a scoped blocker if the dirty diff is invalid.
+    - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
+    - First task: #{preflight["first_task"]}
+    - Dirty workspace recovery is the only task. Use `git status --short --branch`, `git diff --stat`, and focused `git diff -- <dirty-file>` reads before any edit.
+    - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
+    - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
+    - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
+
+    Handoff recovery limits:
+    - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
+    - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
+    - If the focused diff is complete, run the smallest validation for the dirty files, then commit, push the current branch, and request/update Codex review.
+    - If validation or permissions block handoff, record an Orocsy correction with the exact blocker and stop.
     """
     |> String.trim()
   end
