@@ -78,7 +78,7 @@ defmodule SymphonyElixir.RescueSupervisor do
     correction_ids = correction_id_list(safe_permission_corrections)
 
     summary =
-      "permission_guard_resolved_by_exact_test_search_policy: runtime now allows bounded read-only rg/grep over exact existing test files when anchored to review/validation context; redispatch can continue without human approval."
+      "permission_guard_resolved_by_exact_test_search_policy: runtime now allows bounded read-only rg/grep over exact test/spec file paths when anchored to review/validation context; redispatch can continue without human approval."
 
     :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, correction_ids, summary)
     _ = Tracker.create_comment(issue.id, exact_test_search_permission_resolved_comment(issue, safe_permission_corrections))
@@ -1214,7 +1214,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
     read_only_search_command?(command) and
       length(command_paths) in 1..6 and
-      Enum.all?(command_paths, &exact_existing_test_file?(workspace, &1))
+      Enum.all?(command_paths, &exact_test_file_candidate?(workspace, &1))
   end
 
   defp exact_test_search_command?(_command, _workspace), do: false
@@ -1260,16 +1260,23 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp broad_search_directory_token?(_command), do: false
 
-  defp exact_existing_test_file?(workspace, path) when is_binary(workspace) and is_binary(path) do
+  defp exact_test_file_candidate?(workspace, path) when is_binary(workspace) and is_binary(path) do
     expanded_workspace = Path.expand(workspace)
     expanded_path = Path.expand(path, expanded_workspace)
 
-    String.starts_with?(path, "tests/") and
-      String.starts_with?(expanded_path, expanded_workspace <> "/") and
-      File.regular?(expanded_path)
+    String.starts_with?(expanded_path, expanded_workspace <> "/") and
+      review_search_supported_file?(path) and
+      (String.starts_with?(path, "tests/") or
+         Regex.match?(~r/(^|\/)[^\/]+\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/, path))
   end
 
-  defp exact_existing_test_file?(_workspace, _path), do: false
+  defp exact_test_file_candidate?(_workspace, _path), do: false
+
+  defp review_search_supported_file?(path) when is_binary(path) do
+    Path.extname(path) in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".md", ".json", ".yml", ".yaml", ".css", ".scss"]
+  end
+
+  defp review_search_supported_file?(_path), do: false
 
   defp normalize_permission_path(path) when is_binary(path) do
     path
@@ -1473,7 +1480,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
     - Issue: `#{issue.identifier}`
     - Correction: `#{correction_ids}`
-    - Runtime guard: bounded `rg -n`/`grep -n` over exact existing test files is allowed when anchored to review/validation context.
+    - Runtime guard: bounded `rg -n`/`grep -n` over exact test/spec file paths is allowed when anchored to review/validation context.
     - Next action: redispatch the worker from the existing local handoff and continue focused validation.
     """
     |> String.trim()

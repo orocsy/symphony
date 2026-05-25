@@ -3810,6 +3810,105 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows bounded exact test/spec candidate rg during review rework validation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-exact-test-candidate-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-EXACT-TEST-CANDIDATE-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      handler_file = Path.join(workspace, "src/app/api/cards/handler.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(handler_file))
+
+      File.write!(handler_file, "export async function handleCardsRequest() { return Response.json({ ok: true }); }\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-EXACT-TEST-CANDIDATE-RG",
+          "branch" => "orocsy/mt-review-exact-test-candidate-rg",
+          "requirements" => %{
+            "write_scope" => [
+              "src/app/api/cards/handler.ts"
+            ],
+            "validation" => %{
+              "commands" => [
+                "pnpm test -- --configLoader runner"
+              ]
+            }
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/app/api/cards/handler.ts",
+                "line" => 91,
+                "body" => "Avoid creating guest sessions from unrelated cookies."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-exact-test-candidate-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-exact-test-candidate-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"rg -n '\\''handleCardsRequest'\\'' src/app/api/cards/handler.test.ts src/app/api/cards/route.test.ts src/app/api/cards/route.spec.ts tests/api/cards.test.ts\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-exact-test-candidate-rg",
+        identifier: "MT-REVIEW-EXACT-TEST-CANDIDATE-RG",
+        title: "Review rework exact test candidate rg",
+        description: "Exact test/spec candidate file rg should stay inside the read-only guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-EXACT-TEST-CANDIDATE-RG",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Continue review validation", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks bare test directory rg during review rework validation" do
     test_root =
       Path.join(
