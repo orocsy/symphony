@@ -12959,6 +12959,45 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "review rework continuation correction stays parked while provider result is pending" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-review-rework-continuation-correction-pending-#{System.unique_integer([:positive])}")
+
+    try do
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(test_root, "issue-review-rework-continuation-correction-pending", %{
+          source: "review-rework-continuation",
+          summary: "Provider result pending after pushed fix",
+          findings: [
+            "Branch is clean and synced to origin at fbd1f7a; latest automated result still targets an older commit."
+          ],
+          required_corrections: [
+            "Wait for provider result for fbd1f7a; retry state inspection later before moving tracker state."
+          ]
+        })
+
+      head_sha = "fbd1f7ace58e2c60ce89589db38e652c4286834e"
+      request_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      refute_receive {:memory_tracker_state_update, "issue-review-rework-continuation-correction-pending", _state}, 50
+      refute_receive {:github_post, _endpoint, _fields}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "pending review correction resolves to rework when fresh current-head feedback arrives" do
     test_root =
       Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-feedback-#{System.unique_integer([:positive])}")
