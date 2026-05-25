@@ -10,6 +10,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   @hydrated_retry_loop_limit 2
   @review_rework_loop_limit 2
+  @handoff_recovery_progress_grace_seconds 15 * 60
   @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
@@ -143,6 +144,9 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp handle_worker_prompt_defect_corrections(%Issue{} = issue, workspace, corrections) do
     cond do
+      handoff_recovery_correction_with_recent_local_progress?(workspace, corrections) ->
+        resolve_handoff_recovery_after_recent_local_progress(issue, workspace, corrections)
+
       current_worker_prompt_defect_correction?(corrections) and
           durable_workspace_progress_after_corrections?(workspace, corrections) ->
         resolve_worker_prompt_defect_after_later_progress(issue, workspace, corrections)
@@ -227,10 +231,69 @@ defmodule SymphonyElixir.RescueSupervisor do
     end
   end
 
+  defp resolve_handoff_recovery_after_recent_local_progress(%Issue{} = issue, workspace, corrections) do
+    summary =
+      "retry_dirty_handoff_recovery: fresh uncommitted or unpushed handoff progress was observed shortly before the retryable handoff correction; redispatching through the constrained dirty-handoff prompt."
+
+    :ok = Workspace.resolve_blocking_corrections_in_workspace(workspace, summary)
+    _ = Tracker.create_comment(issue.id, handoff_recovery_retry_comment(issue, corrections, workspace))
+
+    []
+  end
+
+  defp handoff_recovery_correction_with_recent_local_progress?(workspace, corrections)
+       when is_binary(workspace) and is_list(corrections) do
+    with true <- Enum.any?(corrections, &handoff_recovery_correction?/1),
+         %DateTime{} = correction_created_at <- latest_correction_created_at(corrections),
+         %DateTime{} = progress_at <- latest_meaningful_uncommitted_or_unpushed_progress_at(workspace),
+         true <- recent_progress_at_or_before_correction?(progress_at, correction_created_at),
+         false <- handoff_recovery_retry_already_resolved_after_progress?(workspace, progress_at, corrections) do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp handoff_recovery_correction_with_recent_local_progress?(_workspace, _corrections), do: false
+
+  defp recent_progress_at_or_before_correction?(%DateTime{} = progress_at, %DateTime{} = correction_created_at) do
+    diff_seconds = DateTime.diff(correction_created_at, progress_at, :second)
+
+    diff_seconds >= -2 and diff_seconds <= @handoff_recovery_progress_grace_seconds
+  end
+
+  defp recent_progress_at_or_before_correction?(_progress_at, _correction_created_at), do: false
+
+  defp handoff_recovery_retry_already_resolved_after_progress?(workspace, %DateTime{} = progress_at, open_corrections) do
+    open_ids =
+      open_corrections
+      |> Enum.map(& &1["correction_id"])
+      |> Enum.reject(&blank?/1)
+      |> MapSet.new()
+
+    workspace
+    |> correction_history()
+    |> Enum.any?(fn correction ->
+      correction["status"] == "resolved" and
+        not MapSet.member?(open_ids, correction["correction_id"]) and
+        handoff_recovery_correction?(correction) and
+        correction_created_at_or_after?(correction, progress_at)
+    end)
+  rescue
+    _error -> false
+  end
+
+  defp handoff_recovery_retry_already_resolved_after_progress?(_workspace, _progress_at, _open_corrections), do: false
+
   defp classify_hydrated_retry(%Issue{} = issue, workspace, corrections) do
     case IssueRequirements.from_issue(issue, workspace) do
       {:ok, requirements} ->
         cond do
+          handoff_recovery_correction_with_recent_local_progress?(workspace, corrections) ->
+            resolve_handoff_recovery_after_recent_local_progress(issue, workspace, corrections)
+
           hydrated_dispatch_preflight_before_corrections?(workspace, corrections) and
               not durable_workspace_progress_after_corrections?(workspace, corrections) ->
             classification = "worker_prompt_defect"
@@ -551,6 +614,21 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp latest_uncommitted_or_unpushed_progress_at(_workspace), do: nil
 
+  defp latest_meaningful_uncommitted_or_unpushed_progress_at(workspace) when is_binary(workspace) do
+    if not File.dir?(workspace) do
+      nil
+    else
+      [
+        meaningful_git_dirty_observed_at(workspace),
+        git_unpushed_head_commit_observed_at(workspace)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> latest_datetime()
+    end
+  end
+
+  defp latest_meaningful_uncommitted_or_unpushed_progress_at(_workspace), do: nil
+
   defp git_dirty_observed_at(workspace) do
     if not File.dir?(workspace) do
       nil
@@ -576,6 +654,43 @@ defmodule SymphonyElixir.RescueSupervisor do
   rescue
     _error -> nil
   end
+
+  defp meaningful_git_dirty_observed_at(workspace) do
+    workspace
+    |> meaningful_git_dirty_paths()
+    |> Enum.map(&Path.join(workspace, &1))
+    |> Enum.map(&file_mtime_datetime/1)
+    |> Enum.reject(&is_nil/1)
+    |> latest_datetime()
+  rescue
+    _error -> nil
+  end
+
+  defp meaningful_git_dirty_paths(workspace) do
+    [
+      git_command_lines(workspace, ["diff", "--name-only", "HEAD", "--"]),
+      git_command_lines(workspace, ["ls-files", "--others", "--exclude-standard"])
+    ]
+    |> List.flatten()
+    |> Enum.reject(&blank?/1)
+    |> Enum.reject(&generated_runtime_path?/1)
+    |> Enum.uniq()
+  end
+
+  defp git_command_lines(workspace, args) do
+    case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> String.split(output, "\n", trim: true)
+      {_output, _exit_code} -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp generated_runtime_path?(path) when is_binary(path) do
+    String.starts_with?(path, [".orocsy/", ".codex/"])
+  end
+
+  defp generated_runtime_path?(_path), do: false
 
   defp git_unpushed_head_commit_observed_at(workspace) do
     if not File.dir?(workspace) do
@@ -784,6 +899,17 @@ defmodule SymphonyElixir.RescueSupervisor do
     Enum.filter(corrections, &runtime_progress_correction?([&1]))
   end
 
+  defp handoff_recovery_correction?(%{} = correction) do
+    source = correction["source"] || ""
+    kind = correction["kind"] || ""
+
+    String.contains?(source, "no-durable-progress-handoff") or
+      String.contains?(source, "token-budget-handoff") or
+      String.ends_with?(kind, "-handoff")
+  end
+
+  defp handoff_recovery_correction?(_correction), do: false
+
   defp correction_id_list(corrections) when is_list(corrections) do
     corrections
     |> Enum.map(& &1["correction_id"])
@@ -936,6 +1062,29 @@ defmodule SymphonyElixir.RescueSupervisor do
     - Hydrated scope entries: #{scope_count}
     - Hydrated MIUs: #{miu_count}
     - Next action: resolve the stale no-durable-progress block and redispatch a bounded worker with the hydrated issue requirements.
+    """
+    |> String.trim()
+  end
+
+  defp handoff_recovery_retry_comment(issue, corrections, workspace) do
+    correction_ids = correction_ids(corrections)
+
+    progress_label =
+      workspace
+      |> latest_meaningful_uncommitted_or_unpushed_progress_at()
+      |> case do
+        %DateTime{} = progress_at -> DateTime.to_iso8601(progress_at)
+        _ -> "unknown"
+      end
+
+    """
+    Symphony rescue classified this parked correction as `retry_dirty_handoff_recovery`.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - Branch: `#{issue.branch_name || "unknown"}`
+    - Local handoff progress observed: `#{progress_label}`
+    - Next action: resolve the retryable handoff correction and redispatch the existing workspace through the dirty-handoff recovery prompt, starting from the local diff and focused validation.
     """
     |> String.trim()
   end
