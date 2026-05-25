@@ -8828,6 +8828,7 @@ defmodule SymphonyElixir.CoreTest do
         """
         {"event":"tool.finished","status":"passed","tool":"review-feedback-classified","ts":"2026-05-12T05:00:49Z"}
         {"event":"validation.blocker","status":"blocked","tool":"pnpm test","ts":"2026-05-12T05:01:49Z"}
+        {"event":"tool.finished","status":"passed","tool":"technical-miu-trace","step":"validation-only handoff checkpoint: validation=pnpm test","ts":"2026-05-12T05:02:49Z"}
         """
       )
 

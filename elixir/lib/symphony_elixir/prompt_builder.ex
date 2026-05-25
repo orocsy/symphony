@@ -7,6 +7,12 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @render_opts [strict_variables: true, strict_filters: true]
   @recent_event_limit 80
+  @checkpoint_only_tool_labels [
+    "technical-miu-trace",
+    "review-feedback-classified",
+    "integration-conflict-slice",
+    "integration-handoff-preflight"
+  ]
   @issue_brief_max_bytes 20_000
   @issue_brief_heading_max_bytes 4_000
   @issue_description_max_bytes 8_000
@@ -747,13 +753,31 @@ defmodule SymphonyElixir.PromptBuilder do
   defp blocking_event?(_decoded), do: false
 
   defp passed_validation_event_decoded?(%{"event" => event} = decoded) when is_binary(event) do
-    event in ["tool.finished", "gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+    event in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+      tool_finished_validation_event?(decoded) or
       String.starts_with?(event, "eval.") or
-      String.starts_with?(event, "handoff.") or
       Map.get(decoded, "phase") == "eval"
   end
 
   defp passed_validation_event_decoded?(_decoded), do: false
+
+  defp tool_finished_validation_event?(%{"event" => "tool.finished"} = decoded) do
+    tool = decoded |> Map.get("tool", "") |> to_string()
+
+    tool not in @checkpoint_only_tool_labels and
+      (tool == "github-pr-created-and-codex-review-requested" or
+         decoded
+         |> validation_signal_text()
+         |> String.downcase()
+         |> String.contains?(["validation", "test", "vitest", "typecheck", "lint", "build", "playwright", "e2e"]))
+  end
+
+  defp tool_finished_validation_event?(_decoded), do: false
+
+  defp validation_signal_text(decoded) when is_map(decoded) do
+    ["tool", "step", "command", "summary", "details"]
+    |> Enum.map_join(" ", fn key -> decoded |> Map.get(key, "") |> to_string() end)
+  end
 
   defp event_summary_line(%{} = decoded) do
     ts = Map.get(decoded, "ts", "unknown-time")
