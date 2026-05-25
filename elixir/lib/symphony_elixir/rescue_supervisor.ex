@@ -15,7 +15,8 @@ defmodule SymphonyElixir.RescueSupervisor do
   @pending_codex_review_correction_sources [
     "pr-review-handoff",
     "github-codex-review",
-    "continuation-review-rework"
+    "continuation-review-rework",
+    "review-rework-continuation"
   ]
   @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
