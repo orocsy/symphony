@@ -6853,6 +6853,231 @@ defmodule SymphonyElixir.CoreTest do
            end)
   end
 
+  test "codex function-call build failure records validation blocker evidence" do
+    command_at = DateTime.add(DateTime.utc_now(), -2, :second)
+    output_at = DateTime.utc_now()
+
+    running_entry = %{
+      started_at: DateTime.add(command_at, -30, :second),
+      recent_codex_events: [],
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_cached_input_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      codex_last_reported_cached_input_tokens: 0,
+      session_id: nil,
+      turn_count: 0
+    }
+
+    function_call_update = %{
+      event: :notification,
+      timestamp: command_at,
+      payload: %{
+        payload: %{
+          "method" => "codex/event/response_item",
+          "params" => %{
+            "type" => "response_item",
+            "payload" => %{
+              "type" => "function_call",
+              "name" => "exec_command",
+              "arguments" => Jason.encode!(%{"cmd" => "pnpm exec next build --webpack"})
+            }
+          }
+        }
+      }
+    }
+
+    function_output_update = %{
+      event: :notification,
+      timestamp: output_at,
+      payload: %{
+        payload: %{
+          "method" => "codex/event/response_item",
+          "params" => %{
+            "type" => "response_item",
+            "payload" => %{
+              "type" => "function_call_output",
+              "call_id" => "call-validation",
+              "output" =>
+                "Process exited with code 1\nFailed to compile.\nsrc/app/api/cards/route.ts Type error: Route handler export is invalid\n"
+            }
+          }
+        }
+      }
+    }
+
+    {running_entry, _token_delta} =
+      Orchestrator.integrate_codex_update_for_test(running_entry, function_call_update)
+
+    assert running_entry.last_validation_command == "pnpm exec next build --webpack"
+
+    {running_entry, _token_delta} =
+      Orchestrator.integrate_codex_update_for_test(running_entry, function_output_update)
+
+    assert running_entry.last_validation_command == "pnpm exec next build --webpack"
+    assert running_entry.last_validation_failure_command == "pnpm exec next build --webpack"
+    assert DateTime.compare(running_entry.last_validation_failure_at, output_at) == :eq
+    assert running_entry.last_validation_failure_evidence =~ "src/app/api/cards/route.ts"
+    assert is_nil(running_entry.last_validation_progress_at)
+
+    assert Enum.any?(running_entry.recent_codex_events, fn event ->
+             event =~ "command=pnpm exec next build --webpack" and event =~ "outcome=failed"
+           end)
+  end
+
+  test "quiet high-token worker with validation failure creates validation blocker correction" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-validation-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 1,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-validation-blocker"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-VALIDATION-BLOCKER",
+        state: "In Progress",
+        title: "Validation blocker",
+        description: "Failed build should become validation rework, not dirty handoff recovery",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      started_at = DateTime.utc_now()
+      Process.sleep(5)
+      failed_at = DateTime.utc_now()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 500,
+            last_validation_command: "pnpm exec next build --webpack",
+            last_validation_failure_at: failed_at,
+            last_validation_failure_command: "pnpm exec next build --webpack",
+            last_validation_failure_evidence: "src/app/api/cards/route.ts Type error: Route handler export is invalid",
+            recent_codex_events: [
+              "event=notification command=pnpm exec next build --webpack outcome=failed detail=src/app/api/cards/route.ts Type error"
+            ]
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.validation-blocker"
+      assert correction["source_status"] == "retryable"
+      assert correction["next_action"] == "retry"
+      assert correction["summary"] =~ "pnpm exec next build --webpack"
+      refute correction["source"] =~ "no-durable-progress"
+      assert Enum.join(correction["findings"], "\n") =~ "src/app/api/cards/route.ts"
+      assert correction["guard"]["command"] == "pnpm exec next build --webpack"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "rescue resolves validation blocker for bounded validation rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-validation-blocker-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-validation-blocker-rescue",
+        identifier: "MT-VALIDATION-RESCUE",
+        state: "In Progress",
+        title: "Validation blocker rescue",
+        description: "Runtime should redispatch bounded validation rework.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      {:ok, correction} =
+        Workspace.create_correction_in_workspace(workspace, issue, %{
+          source: "symphony.runtime.validation-blocker",
+          source_status: "retryable",
+          summary: "Validation command `pnpm exec next build --webpack` failed.",
+          findings: [
+            "Validation command failed: pnpm exec next build --webpack",
+            "Validation failure evidence: src/app/api/cards/route.ts Type error: Route handler export is invalid"
+          ],
+          required_corrections: ["Fix the failed validation command."],
+          next_action: "retry"
+        })
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      assert_receive {:memory_tracker_comment, "issue-validation-blocker-rescue", body}
+      assert body =~ "validation blocker"
+      assert body =~ "pnpm exec next build --webpack"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "validation_rework_needed"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "quiet high-token worker with fresh dirty progress creates handoff retry correction" do
     test_root =
       Path.join(
