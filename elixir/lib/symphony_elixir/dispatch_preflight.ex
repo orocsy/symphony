@@ -243,7 +243,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp preflight_mode(workspace, requirements, inspection) do
     cond do
-      handoff_recovery_checkpoint?(workspace) ->
+      handoff_recovery_checkpoint?(workspace) and handoff_recovery_must_precede_review?(workspace, inspection) ->
         "handoff_recovery"
 
       integration_check_mergeability?(requirements, inspection) ->
@@ -251,6 +251,9 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       review_feedback?(inspection) ->
         "review_rework"
+
+      handoff_recovery_checkpoint?(workspace) ->
+        "handoff_recovery"
 
       integration_check_review?(requirements, inspection) ->
         "integration_check"
@@ -271,6 +274,35 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_checkpoint?(_workspace), do: false
+
+  defp handoff_recovery_must_precede_review?(workspace, inspection) do
+    dirty_or_ahead_handoff?(workspace) or current_branch_matches_review_head?(workspace, inspection)
+  end
+
+  defp dirty_or_ahead_handoff?(workspace) when is_binary(workspace) do
+    case git_command(workspace, ["status", "--short", "--branch"]) do
+      {status, 0} ->
+        lines = String.split(String.trim(status), "\n", trim: true)
+        branch_line = List.first(lines) || ""
+        dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+
+        dirty_lines != [] or String.contains?(branch_line, ["ahead", "diverged"])
+
+      _ ->
+        false
+    end
+  end
+
+  defp dirty_or_ahead_handoff?(_workspace), do: false
+
+  defp current_branch_matches_review_head?(workspace, inspection) when is_binary(workspace) and is_map(inspection) do
+    case Map.get(inspection, :head_ref) do
+      branch when is_binary(branch) and branch != "" -> current_branch(workspace) == branch
+      _ -> false
+    end
+  end
+
+  defp current_branch_matches_review_head?(_workspace, _inspection), do: false
 
   defp integration_check_mergeability?(requirements, inspection) do
     integration_check_requirements?(requirements) and mergeability_conflict?(inspection)
