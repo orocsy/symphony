@@ -24,6 +24,7 @@ defmodule SymphonyElixir.Orchestrator do
     "gate.post-miu",
     "gate.required-evidence",
     "gate.declared-scope",
+    "validation.blocker",
     "eval.recorded",
     "handoff.completed"
   ]
@@ -596,6 +597,14 @@ defmodule SymphonyElixir.Orchestrator do
     review_request_wait_checkpoint? =
       first_event_budget_exceeded? and review_request_wait_checkpoint?(running_entry)
 
+    validation_failure = validation_failure_for_guard(running_entry)
+
+    validation_blocker_guard? =
+      validation_failure != nil and
+        (first_event_budget_exceeded? or
+           (is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
+              durable_progress_guard_tokens >= min_tokens))
+
     cond do
       review_request_wait_checkpoint? ->
         identifier = Map.get(running_entry, :identifier, issue_id)
@@ -608,6 +617,31 @@ defmodule SymphonyElixir.Orchestrator do
         state
         |> terminate_running_issue(issue_id, false)
         |> complete_issue(issue_id)
+
+      validation_blocker_guard? ->
+        identifier = Map.get(running_entry, :identifier, issue_id)
+        session_id = running_entry_session_id(running_entry)
+
+        Logger.warning(
+          "Issue hit validation blocker before durable progress guard: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} command=#{inspect(validation_failure.command)} elapsed_ms=#{elapsed_ms} quiet_ms=#{quiet_ms} codex_total_tokens=#{total_tokens}"
+        )
+
+        failure =
+          validation_blocker_failure(
+            validation_failure,
+            elapsed_ms,
+            quiet_ms,
+            total_tokens,
+            durable_progress_guard_tokens,
+            cached_input_tokens,
+            timeout_ms,
+            min_tokens
+          )
+
+        reason =
+          {:validation_failure_blocker, elapsed_ms, quiet_ms, durable_progress_guard_tokens, timeout_ms, min_tokens}
+
+        park_running_issue(state, issue_id, running_entry, reason, failure)
 
       first_event_budget_exceeded? ->
         identifier = Map.get(running_entry, :identifier, issue_id)
@@ -848,6 +882,32 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp runtime_validation_progress_times(_running_entry), do: []
+
+  defp validation_failure_for_guard(%{started_at: %DateTime{} = started_at} = running_entry) do
+    with %DateTime{} = failed_at <- Map.get(running_entry, :last_validation_failure_at),
+         true <- datetime_at_or_after?(failed_at, started_at),
+         false <- validation_failure_resolved_by_success?(running_entry, failed_at) do
+      %{
+        at: failed_at,
+        command:
+          Map.get(running_entry, :last_validation_failure_command) ||
+            Map.get(running_entry, :last_validation_command) ||
+            "unknown validation command",
+        evidence: Map.get(running_entry, :last_validation_failure_evidence)
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp validation_failure_for_guard(_running_entry), do: nil
+
+  defp validation_failure_resolved_by_success?(running_entry, %DateTime{} = failed_at) do
+    case Map.get(running_entry, :last_validation_progress_at) do
+      %DateTime{} = progress_at -> datetime_at_or_after?(progress_at, failed_at)
+      _ -> false
+    end
+  end
 
   defp git_dirty_observed_at(workspace) do
     case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
@@ -2812,6 +2872,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_failure_findings(reason, running_entry) do
     guard_reason = "Guard reason: #{failure_reason_text(reason)}"
+    validation_findings = validation_failure_findings(running_entry)
 
     case Map.get(running_entry, :recent_codex_events, []) do
       events when is_list(events) and events != [] ->
@@ -2820,11 +2881,28 @@ defmodule SymphonyElixir.Orchestrator do
             (events
              |> Enum.take(-@recent_codex_update_limit)
              |> Enum.map_join("\n", &"- #{redact_runtime_evidence(&1)}")),
+          validation_findings,
           guard_reason
         ]
+        |> List.flatten()
 
       _ ->
-        [guard_reason]
+        validation_findings ++ [guard_reason]
+    end
+  end
+
+  defp validation_failure_findings(running_entry) do
+    case validation_failure_for_guard(running_entry) do
+      %{command: command, at: %DateTime{} = failed_at, evidence: evidence} ->
+        [
+          "Validation command failed: #{command}",
+          "Validation failure observed at: #{DateTime.to_iso8601(failed_at)}",
+          if(is_binary(evidence) and evidence != "", do: "Validation failure evidence: #{redact_runtime_evidence(evidence)}")
+        ]
+        |> Enum.reject(&is_nil/1)
+
+      _ ->
+        []
     end
   end
 
@@ -3034,6 +3112,43 @@ defmodule SymphonyElixir.Orchestrator do
         "If the worker actually produced useful local work that was not visible to the watchdog, commit or record the durable evidence before resolving the correction."
       ],
       guard: %{
+        elapsed_ms: elapsed_ms,
+        quiet_ms: quiet_ms,
+        total_tokens: total_tokens,
+        durable_progress_guard_tokens: durable_progress_guard_tokens,
+        cached_input_tokens: cached_input_tokens,
+        timeout_ms: timeout_ms,
+        min_tokens: min_tokens
+      }
+    }
+  end
+
+  defp validation_blocker_failure(
+         %{command: command, at: %DateTime{} = failed_at, evidence: evidence},
+         elapsed_ms,
+         quiet_ms,
+         total_tokens,
+         durable_progress_guard_tokens,
+         cached_input_tokens,
+         timeout_ms,
+         min_tokens
+       ) do
+    %{
+      action: :retry,
+      kind: "validation-blocker",
+      source_status: "retryable",
+      next_action: "retry",
+      summary:
+        "Symphony stopped a Codex worker because validation command `#{command}` failed and the worker did not record a durable Orocsy validation blocker before the runtime progress guard fired.",
+      required_corrections: [
+        "Redispatch a bounded worker from the failed validation command and evidence; inspect only the files needed to explain that failure before editing.",
+        "Fix the smallest product or workflow issue that makes `#{command}` pass, or record a scoped validation.blocker event if the failure belongs to another ticket.",
+        "Do not treat this as dirty-handoff/no-progress recovery; the latest durable signal is the failed validation command."
+      ],
+      guard: %{
+        failed_at: DateTime.to_iso8601(failed_at),
+        command: command,
+        evidence: truncate_runtime_evidence(evidence || "", 1_000),
         elapsed_ms: elapsed_ms,
         quiet_ms: quiet_ms,
         total_tokens: total_tokens,
@@ -3486,9 +3601,27 @@ defmodule SymphonyElixir.Orchestrator do
         true -> previous_validation_command
       end
 
+    validation_success_at = validation_progress_timestamp(update, validation_command)
+
     validation_progress_at =
-      validation_progress_timestamp(update, validation_command) ||
+      validation_success_at ||
         Map.get(running_entry, :last_validation_progress_at)
+
+    validation_failure =
+      cond do
+        failure = validation_failure_snapshot(update, validation_command) ->
+          failure
+
+        validation_success_at != nil ->
+          nil
+
+        true ->
+          validation_failure_from_running(running_entry)
+      end
+
+    validation_failure_at = if validation_failure, do: validation_failure.at
+    validation_failure_command = if validation_failure, do: validation_failure.command
+    validation_failure_evidence = if validation_failure, do: validation_failure.evidence
 
     recent_codex_events =
       running_entry
@@ -3514,6 +3647,9 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_event: last_codex_event,
         last_validation_command: validation_command,
         last_validation_progress_at: validation_progress_at,
+        last_validation_failure_at: validation_failure_at,
+        last_validation_failure_command: validation_failure_command,
+        last_validation_failure_evidence: validation_failure_evidence,
         recent_codex_events: recent_codex_events,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
@@ -3598,14 +3734,49 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp validation_progress_timestamp(_update, _command), do: nil
 
+  defp validation_failure_snapshot(update, command) when is_binary(command) do
+    text = compact_codex_update_text(update)
+
+    if validation_command?(command) and codex_update_failure?(text) do
+      %{
+        at: codex_update_timestamp(update),
+        command: command,
+        evidence: truncate_runtime_evidence(text, 1_000)
+      }
+    end
+  end
+
+  defp validation_failure_snapshot(_update, _command), do: nil
+
+  defp validation_failure_from_running(running_entry) do
+    case Map.get(running_entry, :last_validation_failure_at) do
+      %DateTime{} = at ->
+        %{
+          at: at,
+          command:
+            Map.get(running_entry, :last_validation_failure_command) ||
+              Map.get(running_entry, :last_validation_command) ||
+              "unknown validation command",
+          evidence: Map.get(running_entry, :last_validation_failure_evidence)
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp codex_update_timestamp(%{timestamp: %DateTime{} = timestamp}), do: timestamp
+  defp codex_update_timestamp(%{"timestamp" => %DateTime{} = timestamp}), do: timestamp
+  defp codex_update_timestamp(_update), do: DateTime.utc_now()
+
   defp validation_command?(command) when is_binary(command) do
     normalized = String.downcase(command)
 
     String.match?(
       normalized,
-      ~r/(^|\s)(pnpm|npm|yarn|bun|mix|npx|corepack)\b.*\b(test|typecheck|type-check|check|lint|eslint|tsc|vitest|jest|playwright|credo|dialyzer)\b/
+      ~r/(^|\s)(pnpm|npm|yarn|bun|mix|npx|corepack)\b.*\b(test|typecheck|type-check|check|lint|build|eslint|tsc|vitest|jest|playwright|credo|dialyzer)\b/
     ) or
-      String.match?(normalized, ~r/\b(tsc|eslint|vitest|jest|playwright|mix test)\b/)
+      String.match?(normalized, ~r/\b(tsc|eslint|vitest|jest|playwright|mix test|next\s+build)\b/)
   end
 
   defp validation_command?(_command), do: false
@@ -3618,10 +3789,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp codex_update_success?(_text), do: false
 
+  defp codex_update_failure?(text) when is_binary(text) do
+    not codex_update_success?(text) and
+      (String.match?(text, ~r/(exit[_ ]?(code|status)|status)[\"':\s]+(1|2|126|127|128)\b/i) or
+         String.match?(text, ~r/process exited with code [1-9]\d*/i) or
+         errorish_text?(text))
+  end
+
+  defp codex_update_failure?(_text), do: false
+
   defp codex_update_outcome(text) when is_binary(text) do
     cond do
       codex_update_success?(text) -> "outcome=passed"
       String.match?(text, ~r/(exit[_ ]?(code|status)|status)[\"':\s]+(1|2|126|127|128)\b/i) -> "outcome=failed"
+      String.match?(text, ~r/process exited with code [1-9]\d*/i) -> "outcome=failed"
       errorish_text?(text) -> "outcome=error"
       true -> nil
     end

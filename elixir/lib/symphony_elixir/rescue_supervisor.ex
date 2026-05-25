@@ -10,6 +10,7 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   @hydrated_retry_loop_limit 2
   @review_rework_loop_limit 2
+  @validation_blocker_loop_limit 3
   @handoff_recovery_progress_grace_seconds 15 * 60
   @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
@@ -36,6 +37,9 @@ defmodule SymphonyElixir.RescueSupervisor do
         runtime_dispatch_config_correction?(corrections) ->
           handle_worker_prompt_defect_corrections(issue, workspace, corrections)
 
+        corrections != [] and validation_blocker_correction?(corrections) ->
+          classify_validation_blocker(issue, workspace, corrections)
+
         corrections != [] and runtime_progress_correction?(corrections) ->
           classify_runtime_progress_block(issue, workspace, corrections)
 
@@ -51,6 +55,35 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp rescue_issue(_issue), do: []
+
+  defp classify_validation_blocker(%Issue{} = issue, workspace, corrections) do
+    validation_corrections = validation_blocker_corrections(corrections)
+    validation_correction_ids = correction_id_list(validation_corrections)
+
+    if validation_blocker_retry_loop_exhausted_without_new_progress?(workspace) do
+      classification = "worker_prompt_defect"
+
+      summary =
+        "#{classification}: repeated validation-blocker retries produced no durable workspace progress after #{@validation_blocker_loop_limit} attempts."
+
+      :ok = Workspace.classify_blocking_corrections_by_id_in_workspace(workspace, validation_correction_ids, classification, summary)
+      _ = Tracker.create_comment(issue.id, validation_blocker_loop_block_comment(issue, validation_corrections))
+
+      Logger.warning("Rescue supervisor classified #{issue.identifier} as #{classification}; validation blocker retry loop exhausted")
+
+      [issue.id]
+    else
+      summary =
+        "validation_rework_needed: runtime captured a failed validation command; redispatch a bounded worker to fix the validation failure or record a scoped blocker."
+
+      :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, validation_correction_ids, summary)
+      _ = Tracker.create_comment(issue.id, validation_rework_comment(issue, validation_corrections))
+
+      Logger.info("Rescue supervisor classified #{issue.identifier} as validation_rework_needed")
+
+      []
+    end
+  end
 
   defp classify_runtime_progress_block(%Issue{} = issue, workspace, corrections) do
     progress_corrections = runtime_progress_corrections(corrections)
@@ -588,9 +621,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp durable_workspace_progress_after_corrections?(workspace, corrections) when is_binary(workspace) do
     case latest_correction_created_at(corrections) do
       %DateTime{} = correction_created_at ->
-        git_dirty_after?(workspace, correction_created_at) or
-          git_head_commit_after?(workspace, correction_created_at) or
-          handoff_event_after?(workspace, correction_created_at)
+        durable_workspace_progress_after?(workspace, correction_created_at)
 
       _ ->
         false
@@ -598,6 +629,14 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp durable_workspace_progress_after_corrections?(_workspace, _corrections), do: false
+
+  defp durable_workspace_progress_after?(workspace, %DateTime{} = reference_at) when is_binary(workspace) do
+    git_dirty_after?(workspace, reference_at) or
+      git_head_commit_after?(workspace, reference_at) or
+      handoff_event_after?(workspace, reference_at)
+  end
+
+  defp durable_workspace_progress_after?(_workspace, _reference_at), do: false
 
   defp latest_uncommitted_or_unpushed_progress_at(workspace) when is_binary(workspace) do
     if not File.dir?(workspace) do
@@ -877,6 +916,55 @@ defmodule SymphonyElixir.RescueSupervisor do
     |> Enum.max_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
+  defp validation_blocker_retry_loop_exhausted_without_new_progress?(workspace) when is_binary(workspace) do
+    validation_times =
+      workspace
+      |> validation_blocker_correction_created_times()
+      |> Enum.sort_by(&DateTime.to_unix(&1, :microsecond))
+
+    with true <- length(validation_times) >= @validation_blocker_loop_limit,
+         %DateTime{} = previous_validation_at <- Enum.at(validation_times, -2) do
+      not durable_workspace_progress_after?(workspace, previous_validation_at)
+    else
+      _ -> false
+    end
+  end
+
+  defp validation_blocker_retry_loop_exhausted_without_new_progress?(_workspace), do: false
+
+  defp validation_blocker_correction_created_times(workspace) when is_binary(workspace) do
+    workspace
+    |> correction_history()
+    |> Enum.flat_map(fn correction ->
+      with true <- validation_blocker_correction?(correction),
+           %DateTime{} = created_at <- correction |> Map.get("created_at") |> datetime_from_iso8601() do
+        [created_at]
+      else
+        _ -> []
+      end
+    end)
+  end
+
+  defp validation_blocker_corrections(corrections) when is_list(corrections) do
+    Enum.filter(corrections, &validation_blocker_correction?/1)
+  end
+
+  defp validation_blocker_correction?(corrections) when is_list(corrections) do
+    Enum.any?(corrections, &validation_blocker_correction?/1)
+  end
+
+  defp validation_blocker_correction?(%{} = correction) do
+    source = correction["source"] || ""
+    summary = correction["summary"] || ""
+    findings = Enum.join(correction["findings"] || [], " ")
+
+    String.contains?(source, "validation-blocker") or
+      String.contains?(summary, "validation command") or
+      String.contains?(findings, "Validation command failed")
+  end
+
+  defp validation_blocker_correction?(_correction), do: false
+
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->
       source = correction["source"] || ""
@@ -983,6 +1071,55 @@ defmodule SymphonyElixir.RescueSupervisor do
     - Next action: redispatch is allowed; Symphony will record runtime preflight before Codex starts, but the worker must still produce real review classification, Technical MIU, file, test, commit, or blocker progress.
     """
     |> String.trim()
+  end
+
+  defp validation_rework_comment(issue, corrections) do
+    correction_ids = correction_ids(corrections)
+    evidence = validation_blocker_comment_evidence(corrections)
+
+    """
+    Symphony resolved a retryable validation blocker and will redispatch bounded validation rework.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - Next action: start from the failed validation command/evidence, fix the smallest scoped cause, then rerun the failed command before handoff.
+    #{evidence}
+    """
+    |> String.trim()
+  end
+
+  defp validation_blocker_loop_block_comment(issue, corrections) do
+    correction_ids = correction_ids(corrections)
+    evidence = validation_blocker_comment_evidence(corrections)
+
+    """
+    Symphony rescue classified this validation blocker as `worker_prompt_defect`.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - Prior validation retries: #{@validation_blocker_loop_limit}+
+    - Next action: stop redispatching automatically; fix the validation-rework prompt/runtime path so the next turn records file, commit, test, or scoped blocker progress before retrying the same failed command.
+    #{evidence}
+    """
+    |> String.trim()
+  end
+
+  defp validation_blocker_comment_evidence(corrections) do
+    evidence =
+      corrections
+      |> Enum.flat_map(fn correction ->
+        correction["findings"] || []
+      end)
+      |> Enum.filter(&String.contains?(&1, "Validation command failed"))
+      |> Enum.take(2)
+
+    case evidence do
+      [] ->
+        ""
+
+      findings ->
+        "\n- Evidence: #{Enum.join(findings, " | ")}"
+    end
   end
 
   defp later_progress_review_rework_comment(issue, corrections, pr_number, pr_url, head_sha) do
