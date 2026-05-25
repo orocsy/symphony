@@ -413,7 +413,8 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Symphony review-rework micro-worker"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not load Codex skills"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not refetch GitHub or Linear review text"
-      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run rg, grep, find, ls, git ls-files, mutating gh api"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run broad rg, grep, find, ls, git ls-files, mutating gh api"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "bounded `rg -n"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "read-only GitHub PR/review inspection"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "gh pr comment <pr-number> --body '@codex review'"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "create that exact file"
@@ -3880,6 +3881,172 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "before any `gh pr`"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows scoped rg during integration validation rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-check-file-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INTEGRATION-FILE-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-INTEGRATION-FILE-RG",
+          "branch" => "orocsy/mt-integration-file-rg",
+          "requirements" => %{
+            "write_scope" => [
+              "src/lib/server/recipe-chat-page-view.ts",
+              "tests/integration/recipe-chat-routes.test.ts"
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-integration-file-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-integration-file-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"fallbackActor\\" src/lib/server/recipe-chat-page-view.ts tests/integration/recipe-chat-routes.test.ts"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-integration-file-rg",
+        identifier: "MT-INTEGRATION-FILE-RG",
+        title: "Integration scoped file rg",
+        description: "Scoped rg should be allowed during validation rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-INTEGRATION-FILE-RG",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Resolve integration validation", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks bare-directory rg during integration validation rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-integration-check-bare-dir-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INTEGRATION-BARE-DIR-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "integration_check",
+          "issue" => "MT-INTEGRATION-BARE-DIR-RG",
+          "branch" => "orocsy/mt-integration-bare-dir-rg",
+          "requirements" => %{
+            "write_scope" => [
+              "src/lib/server/recipe-chat-page-view.ts",
+              "tests/integration/recipe-chat-routes.test.ts"
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-integration-bare-dir-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-integration-bare-dir-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"fallbackActor\\" src tests/integration/recipe-chat-routes.test.ts"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-integration-bare-dir-rg",
+        identifier: "MT-INTEGRATION-BARE-DIR-RG",
+        title: "Integration bare directory rg",
+        description: "Bare-directory rg should stay blocked during validation rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-INTEGRATION-BARE-DIR-RG",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Resolve integration validation", issue)
+
+      assert command == ~s(rg -n "fallbackActor" src tests/integration/recipe-chat-routes.test.ts)
+      assert pattern == "(^|\\s|[\"'])rg(\\s|$)"
+    after
       File.rm_rf(test_root)
     end
   end
