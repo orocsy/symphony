@@ -224,7 +224,7 @@ defmodule SymphonyElixir.PromptBuilder do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => "review_rework"}} ->
         [
-          workspace_recovery_checkpoint(workspace),
+          review_rework_handoff_checkpoint(workspace),
           DispatchPreflight.prompt_context(workspace),
           review_rework_micro_prompt()
         ]
@@ -284,6 +284,25 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp strip_leading_checkpoint(prompt, _checkpoint), do: prompt
+
+  defp review_rework_handoff_checkpoint(workspace) do
+    workspace
+    |> workspace_recovery_checkpoint()
+    |> case do
+      checkpoint when is_binary(checkpoint) ->
+        if dirty_or_local_handoff_checkpoint?(checkpoint), do: checkpoint, else: ""
+
+      _checkpoint ->
+        ""
+    end
+  end
+
+  defp dirty_or_local_handoff_checkpoint?(checkpoint) when is_binary(checkpoint) do
+    String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Local handoff recovery checkpoint:")
+  end
+
+  defp dirty_or_local_handoff_checkpoint?(_checkpoint), do: false
 
   defp integration_check_micro_prompt do
     """

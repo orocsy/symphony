@@ -9756,6 +9756,95 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder suppresses pushed handoff checkpoint in review rework preflight prompts" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-pushed-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+      feedback_path = Path.join(workspace, "tests/integration/cards-route.test.ts")
+      File.mkdir_p!(Path.dirname(feedback_path))
+      File.write!(feedback_path, "test('cards route', () => expect(true).toBe(true));\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/integration/cards-route.test.ts"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add cards route test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-15T09:51:00Z"}\n)
+      )
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/mt-205",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Fix current-head feedback.",
+          "issue" => "MT-205",
+          "review" => %{
+            "pr_number" => 56,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/56",
+            "head_sha" => "d7b8da54ba28448585f347bb9af9337cb42a62cd",
+            "feedback" => [
+              %{
+                "path" => "tests/integration/cards-route.test.ts",
+                "line" => 13,
+                "body" => "Import handleCardsRequest from src/app/api/cards/handler.ts instead of the route.",
+                "url" => "https://github.com/acme/nutribuddy/pull/56#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-205",
+        title: "Fix current review feedback",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-205",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Runtime dispatch preflight:")
+      assert prompt =~ "- Mode: review rework"
+      assert prompt =~ "tests/integration/cards-route.test.ts"
+      assert prompt =~ "Import handleCardsRequest"
+      assert prompt =~ "Review rework execution contract:"
+      refute prompt =~ "Pushed validated handoff checkpoint:"
+      refute prompt =~ "Minimal review handoff mode:"
+      refute prompt =~ "Ticket MT-205"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder preserves local handoff checkpoint in integration check preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
@@ -13269,7 +13358,10 @@ defmodule SymphonyElixir.CoreTest do
       trace = File.read!(trace_file)
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
       assert trace =~ "Runtime dispatch preflight:"
-      assert trace =~ "Pushed validated handoff checkpoint:"
+      assert trace =~ "Review rework execution contract:"
+      assert trace =~ "Fix current review feedback."
+      refute trace =~ "Pushed validated handoff checkpoint:"
+      refute trace =~ "Minimal review handoff mode:"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       Application.delete_env(:symphony_elixir, :github_api_runner)
