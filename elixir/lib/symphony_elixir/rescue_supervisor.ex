@@ -49,6 +49,9 @@ defmodule SymphonyElixir.RescueSupervisor do
         corrections != [] and validation_blocker_correction?(corrections) ->
           classify_validation_blocker(issue, workspace, corrections)
 
+        corrections != [] and review_polling_permission_correction?(corrections) ->
+          resolve_review_polling_permission_corrections(issue, workspace, corrections)
+
         corrections != [] and exact_test_search_permission_correction?(corrections, workspace) ->
           resolve_exact_test_search_permission_corrections(issue, workspace, corrections)
 
@@ -81,6 +84,23 @@ defmodule SymphonyElixir.RescueSupervisor do
     _ = Tracker.create_comment(issue.id, exact_test_search_permission_resolved_comment(issue, safe_permission_corrections))
 
     Logger.info("Rescue supervisor resolved safe exact-test search permission correction for #{issue.identifier}")
+
+    []
+  end
+
+  defp resolve_review_polling_permission_corrections(%Issue{} = issue, workspace, corrections) do
+    review_permission_corrections =
+      Enum.filter(corrections, &review_polling_permission_correction?/1)
+
+    correction_ids = correction_id_list(review_permission_corrections)
+
+    summary =
+      "permission_guard_resolved_by_orchestration_review_polling_policy: review-state polling belongs to Symphony orchestration/review-monitor, so worker-created PR review polling permission corrections are stale and can be handed back to runtime state."
+
+    :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, correction_ids, summary)
+    _ = Tracker.create_comment(issue.id, review_polling_permission_resolved_comment(issue, review_permission_corrections))
+
+    Logger.info("Rescue supervisor resolved review-polling permission correction for #{issue.identifier}")
 
     []
   end
@@ -1127,6 +1147,20 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp exact_test_search_permission_correction?(_correction, _workspace), do: false
 
+  defp review_polling_permission_correction?(corrections) when is_list(corrections) do
+    Enum.any?(corrections, &review_polling_permission_correction?/1)
+  end
+
+  defp review_polling_permission_correction?(%{} = correction) do
+    correction["status"] == "open" and
+      correction["source"] == "symphony.runtime.permission" and
+      correction
+      |> permission_forbidden_command_text()
+      |> review_polling_command?()
+  end
+
+  defp review_polling_permission_correction?(_correction), do: false
+
   defp permission_forbidden_command_text(correction) when is_map(correction) do
     text =
       [
@@ -1144,6 +1178,36 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp permission_forbidden_command_text(_correction), do: ""
+
+  defp review_polling_command?(command) when is_binary(command) do
+    command = String.downcase(command)
+
+    review_query? =
+      String.contains?(command, [
+        "reviewthreads",
+        "latestreviews",
+        "reviewdecision",
+        "pullrequestreview",
+        "reviewstate"
+      ])
+
+    github_read? =
+      String.contains?(command, "gh pr view") or
+        String.contains?(command, "gh api graphql")
+
+    mutation? =
+      String.contains?(command, [
+        "mutation",
+        "--method post",
+        " -x post",
+        " -f body=",
+        " --field body="
+      ])
+
+    github_read? and review_query? and not mutation?
+  end
+
+  defp review_polling_command?(_command), do: false
 
   defp exact_test_search_command?(command, workspace) when is_binary(command) and is_binary(workspace) do
     command_paths = search_command_file_paths(command)
@@ -1411,6 +1475,20 @@ defmodule SymphonyElixir.RescueSupervisor do
     - Correction: `#{correction_ids}`
     - Runtime guard: bounded `rg -n`/`grep -n` over exact existing test files is allowed when anchored to review/validation context.
     - Next action: redispatch the worker from the existing local handoff and continue focused validation.
+    """
+    |> String.trim()
+  end
+
+  defp review_polling_permission_resolved_comment(issue, corrections) do
+    correction_ids = correction_ids(corrections)
+
+    """
+    Symphony resolved a worker-created PR review polling permission correction after moving review waiting back to orchestration.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - Runtime guard: workers should not poll GitHub review threads to wait; Symphony orchestration/review-monitor owns request, wait, feedback, and clean-review transitions.
+    - Next action: continue from runtime state so the orchestrator can request or wait for Codex review without starting another polling worker.
     """
     |> String.trim()
   end
