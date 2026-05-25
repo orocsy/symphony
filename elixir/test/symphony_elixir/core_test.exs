@@ -6901,8 +6901,7 @@ defmodule SymphonyElixir.CoreTest do
             "payload" => %{
               "type" => "function_call_output",
               "call_id" => "call-validation",
-              "output" =>
-                "Process exited with code 1\nFailed to compile.\nsrc/app/api/cards/route.ts Type error: Route handler export is invalid\n"
+              "output" => "Process exited with code 1\nFailed to compile.\nsrc/app/api/cards/route.ts Type error: Route handler export is invalid\n"
             }
           }
         }
@@ -12889,5 +12888,286 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "pending review correction stays parked while fresh Codex review request is pending" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-pending-#{System.unique_integer([:positive])}")
+
+    try do
+      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-pending")
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      feedback_at = iso_seconds(-300)
+      request_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        pull_comments: [review_thread_payload(head_sha, feedback_at)],
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      refute_receive {:memory_tracker_state_update, "issue-pending-review-correction-pending", _state}, 50
+      refute_receive {:github_post, _endpoint, _fields}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pending review correction resolves to rework when fresh current-head feedback arrives" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-feedback-#{System.unique_integer([:positive])}")
+
+    try do
+      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-feedback")
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      request_at = iso_seconds(-300)
+      feedback_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        pull_comments: [review_thread_payload(head_sha, feedback_at)],
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      assert_receive {:memory_tracker_state_update, "issue-pending-review-correction-feedback", "Rework"}
+      assert_receive {:memory_tracker_comment, "issue-pending-review-correction-feedback", body}
+      assert body =~ "fresh current-head feedback"
+      assert body =~ "pull/7"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "review_rework_needed"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pending review correction resolves clean review to review handoff state" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-clean-#{System.unique_integer([:positive])}")
+
+    try do
+      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-clean")
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      request_at = iso_seconds(-300)
+      clean_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        pull_comments: [],
+        issue_comments: [
+          codex_review_request_payload(request_at),
+          clean_codex_review_payload(clean_at)
+        ]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      assert_receive {:memory_tracker_state_update, "issue-pending-review-correction-clean", "Human Review"}
+      assert_receive {:memory_tracker_comment, "issue-pending-review-correction-clean", body}
+      assert body =~ "clean current review"
+      assert body =~ "Human Review"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      resolved = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "review_handoff_clean_after_pending_review"
+      refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pending review correction re-requests stale Codex review without dispatching a worker" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-stale-#{System.unique_integer([:positive])}")
+
+    try do
+      Application.put_env(:symphony_elixir, :codex_review_request_stale_after_ms, 1)
+
+      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-stale")
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      feedback_at = iso_seconds(-30)
+      request_at = iso_seconds(-10)
+
+      install_pending_review_github_fixture(head_sha,
+        pull_comments: [review_thread_payload(head_sha, feedback_at)],
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      assert_receive {:github_post, "repos/acme/nutribuddy/issues/7/comments", %{"body" => "@codex review"}}
+      assert_receive {:memory_tracker_comment, "issue-pending-review-correction-stale", body}
+      assert body =~ "re-requested Codex review"
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      Application.delete_env(:symphony_elixir, :codex_review_request_stale_after_ms)
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp pending_review_correction_fixture(test_root, issue_id) do
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Rework"],
+      workspace_root: workspace_root,
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review", "In Review"],
+      review_monitor_rework_state: "Rework",
+      review_monitor_request_stale_after_ms: 600_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "COD-205",
+      title: "Analytics MIU: Flow Instrumentation",
+      state: "Rework",
+      branch_name: "orocsy/cod-205"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+    assert {:ok, correction} =
+             Workspace.create_correction_in_workspace(workspace, issue, %{
+               source: "pr-review-handoff",
+               source_status: "blocked",
+               summary: "Fresh Codex review has not materialized for pushed head 748a56f",
+               findings: [
+                 "Branch is clean and pushed; gh pr comment --body '@codex review' succeeded but the latest Codex review is stale."
+               ],
+               required_corrections: [
+                 "External Codex review provider or Symphony review monitor must produce/observe a review result for the commit before Linear can leave active review-rework state."
+               ],
+               next_action: "retry"
+             })
+
+    {issue, workspace, correction}
+  end
+
+  defp install_pending_review_github_fixture(head_sha, opts) do
+    test_pid = self()
+    pr_number = Keyword.get(opts, :pr_number, 7)
+    branch = Keyword.get(opts, :branch, "orocsy/cod-205")
+    head_committed_at = Keyword.get(opts, :head_committed_at, "2026-05-15T09:10:00Z")
+    pull_comments = Keyword.get(opts, :pull_comments, [])
+    reviews = Keyword.get(opts, :reviews, [])
+    issue_comments = Keyword.get(opts, :issue_comments, [])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => pr_number,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/#{pr_number}",
+               "head" => %{"sha" => head_sha, "ref" => branch}
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/#{pr_number}" ->
+          {:ok,
+           %{
+             "number" => pr_number,
+             "html_url" => "https://github.com/acme/nutribuddy/pull/#{pr_number}",
+             "head" => %{"sha" => head_sha, "ref" => branch}
+           }}
+
+        endpoint == "repos/acme/nutribuddy/commits/#{head_sha}" ->
+          {:ok, %{"commit" => %{"committer" => %{"date" => head_committed_at}}}}
+
+        endpoint == "repos/acme/nutribuddy/pulls/#{pr_number}/comments" ->
+          {:ok, pull_comments}
+
+        endpoint == "repos/acme/nutribuddy/pulls/#{pr_number}/reviews" ->
+          {:ok, reviews}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/#{pr_number}/comments?") ->
+          {:ok, issue_comments}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_api_post_runner, fn endpoint, fields ->
+      send(test_pid, {:github_post, endpoint, fields})
+      {:ok, %{"html_url" => "https://github.com/acme/nutribuddy/pull/#{pr_number}#issuecomment"}}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+      Application.delete_env(:symphony_elixir, :github_api_post_runner)
+    end)
+  end
+
+  defp review_thread_payload(head_sha, created_at) do
+    %{
+      "body" => "Keep current-head behavior intact.",
+      "commit_id" => head_sha,
+      "path" => "README.md",
+      "line" => 3,
+      "created_at" => created_at,
+      "html_url" => "https://github.com/acme/nutribuddy/pull/7#discussion"
+    }
+  end
+
+  defp codex_review_request_payload(created_at) do
+    %{
+      "body" => "@codex review",
+      "created_at" => created_at,
+      "html_url" => "https://github.com/acme/nutribuddy/pull/7#issuecomment"
+    }
+  end
+
+  defp clean_codex_review_payload(created_at) do
+    %{
+      "body" => "Codex Review: Didn't find any major issues. What shall we delve into next?",
+      "created_at" => created_at,
+      "html_url" => "https://github.com/acme/nutribuddy/pull/7#issuecomment-clean"
+    }
+  end
+
+  defp empty_orchestrator_state do
+    %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+  end
+
+  defp iso_seconds(delta_seconds) do
+    DateTime.utc_now()
+    |> DateTime.add(delta_seconds, :second)
+    |> DateTime.truncate(:second)
+    |> DateTime.to_iso8601()
   end
 end

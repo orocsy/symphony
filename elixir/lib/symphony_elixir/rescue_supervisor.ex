@@ -37,6 +37,9 @@ defmodule SymphonyElixir.RescueSupervisor do
         runtime_dispatch_config_correction?(corrections) ->
           handle_worker_prompt_defect_corrections(issue, workspace, corrections)
 
+        corrections != [] and pending_codex_review_correction?(corrections) ->
+          handle_pending_codex_review_corrections(issue, workspace, corrections)
+
         corrections != [] and validation_blocker_correction?(corrections) ->
           classify_validation_blocker(issue, workspace, corrections)
 
@@ -174,6 +177,71 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp classify_resolved_review_rework_loop(_issue, _workspace), do: []
+
+  defp handle_pending_codex_review_corrections(%Issue{} = issue, workspace, corrections) do
+    pending_corrections = pending_codex_review_corrections(corrections)
+    pending_correction_ids = correction_id_list(pending_corrections)
+
+    case inspect_review_if_enabled(issue) do
+      {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha, feedback: feedback} = inspection}
+      when feedback != [] ->
+        cond do
+          codex_review_request_pending_any?(inspection) ->
+            Logger.info("Rescue supervisor kept #{issue.identifier} parked because a fresh Codex review request is pending")
+            [issue.id]
+
+          fresh_review_feedback_after_latest_codex_request?(inspection) ->
+            classification = "review_rework_needed"
+
+            summary =
+              "#{classification}: fresh Codex review feedback arrived after the latest review request; pending review handoff correction is resolved."
+
+            :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, pending_correction_ids, summary)
+            :ok = Tracker.update_issue_state(issue.id, Config.settings!().review_monitor.rework_state)
+            _ = Tracker.create_comment(issue.id, pending_review_feedback_rework_comment(issue, pending_corrections, pr_number, pr_url, head_sha))
+
+            Logger.info("Rescue supervisor resolved pending review handoff for #{issue.identifier}; fresh feedback is ready on PR ##{pr_number}")
+
+            [issue.id]
+
+          true ->
+            request_pending_codex_review_retry(issue, inspection)
+            [issue.id]
+        end
+
+      {:ok, %{pr_number: pr_number, pr_url: pr_url, head_sha: head_sha} = inspection} ->
+        if clean_codex_review_after_latest_request?(inspection) do
+          summary =
+            "review_handoff_clean_after_pending_review: a clean Codex review arrived after the latest review request; pending review handoff correction is resolved."
+
+          :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, pending_correction_ids, summary)
+
+          case handoff_review_state() do
+            {:ok, target_state} ->
+              :ok = Tracker.update_issue_state(issue.id, target_state)
+              _ = Tracker.create_comment(issue.id, pending_review_clean_comment(issue, pending_corrections, pr_number, pr_url, head_sha, target_state))
+              Logger.info("Rescue supervisor moved #{issue.identifier} to #{target_state} after clean Codex review for PR ##{pr_number}")
+
+            {:error, reason} ->
+              Logger.debug("Rescue supervisor resolved pending review for #{issue.identifier} but could not find review state: #{inspect(reason)}")
+          end
+
+          []
+        else
+          if codex_review_request_pending_any?(inspection) do
+            Logger.info("Rescue supervisor kept #{issue.identifier} parked because a clean Codex review is pending")
+          else
+            request_pending_codex_review_retry(issue, inspection)
+          end
+
+          [issue.id]
+        end
+
+      {:error, reason} ->
+        Logger.debug("Rescue supervisor could not inspect pending Codex review for #{issue.identifier}: #{inspect(reason)}")
+        [issue.id]
+    end
+  end
 
   defp handle_worker_prompt_defect_corrections(%Issue{} = issue, workspace, corrections) do
     cond do
@@ -579,6 +647,60 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp codex_review_request_pending?(_inspection), do: false
 
+  defp codex_review_request_pending_any?(%{repo: repo, pr: pr, feedback: feedback})
+       when is_list(feedback) do
+    case ReviewMonitor.codex_review_request_pending?(repo, pr, feedback) do
+      {:ok, pending?} ->
+        pending?
+
+      {:error, reason} ->
+        Logger.debug("Rescue supervisor could not inspect pending Codex review request: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp codex_review_request_pending_any?(_inspection), do: false
+
+  defp clean_codex_review_after_latest_request?(%{repo: repo, pr: pr}) do
+    case ReviewMonitor.clean_codex_review_after_latest_request?(repo, pr) do
+      {:ok, clean?} ->
+        clean?
+
+      {:error, reason} ->
+        Logger.debug("Rescue supervisor could not inspect clean Codex review: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp clean_codex_review_after_latest_request?(_inspection), do: false
+
+  defp request_pending_codex_review_retry(%Issue{} = issue, %{repo: repo, pr: pr}) do
+    case ReviewMonitor.request_codex_review(repo, pr, "@codex review") do
+      {:ok, _comment} ->
+        Logger.info("Rescue supervisor re-requested Codex review for #{issue.identifier}")
+        _ = Tracker.create_comment(issue.id, pending_review_rerequest_comment(issue, pr))
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Rescue supervisor could not re-request Codex review for #{issue.identifier}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp request_pending_codex_review_retry(_issue, _inspection), do: :ok
+
+  defp handoff_review_state do
+    Config.settings!().review_monitor.states
+    |> Enum.find_value(fn state ->
+      state = state |> to_string() |> String.trim()
+      if state == "", do: nil, else: state
+    end)
+    |> case do
+      nil -> {:error, :missing_review_state}
+      state -> {:ok, state}
+    end
+  end
+
   defp inspect_review_if_enabled(%Issue{} = issue) do
     monitor = Config.settings!().review_monitor
 
@@ -965,6 +1087,30 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp validation_blocker_correction?(_correction), do: false
 
+  defp pending_codex_review_correction?(corrections) when is_list(corrections) do
+    Enum.any?(corrections, &pending_codex_review_correction?/1)
+  end
+
+  defp pending_codex_review_correction?(%{} = correction) do
+    source = correction["source"] || ""
+    next_action = correction["next_action"] || ""
+    summary = correction["summary"] || ""
+    findings = Enum.join(correction["findings"] || [], " ")
+    required = Enum.join(correction["required_corrections"] || [], " ")
+
+    source in ["pr-review-handoff", "github-codex-review"] or
+      (next_action == "retry" and
+         (String.contains?(summary, "Codex review") or
+            String.contains?(findings, "Codex review") or
+            String.contains?(required, "Codex review")))
+  end
+
+  defp pending_codex_review_correction?(_correction), do: false
+
+  defp pending_codex_review_corrections(corrections) when is_list(corrections) do
+    Enum.filter(corrections, &pending_codex_review_correction?/1)
+  end
+
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->
       source = correction["source"] || ""
@@ -1243,6 +1389,47 @@ defmodule SymphonyElixir.RescueSupervisor do
     |> String.trim()
   end
 
+  defp pending_review_feedback_rework_comment(issue, corrections, pr_number, pr_url, head_sha) do
+    correction_ids = correction_ids(corrections)
+
+    """
+    Symphony rescue resolved pending Codex review handoff and found fresh current-head feedback.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - PR: ##{pr_number} #{pr_url}
+    - Head: `#{short_sha(head_sha)}`
+    - Next action: redispatch bounded review rework on the existing PR branch.
+    """
+    |> String.trim()
+  end
+
+  defp pending_review_clean_comment(issue, corrections, pr_number, pr_url, head_sha, target_state) do
+    correction_ids = correction_ids(corrections)
+
+    """
+    Symphony rescue resolved pending Codex review handoff after a clean current review.
+
+    - Issue: `#{issue.identifier}`
+    - Correction: `#{correction_ids}`
+    - PR: ##{pr_number} #{pr_url}
+    - Head: `#{short_sha(head_sha)}`
+    - State moved: `#{target_state}`
+    """
+    |> String.trim()
+  end
+
+  defp pending_review_rerequest_comment(issue, pr) do
+    """
+    Symphony rescue re-requested Codex review for a stale pending review handoff instead of leaving the issue blocked.
+
+    - Issue: `#{issue.identifier}`
+    - PR: ##{pr_number(pr)} #{pr_url(pr)}
+    - Next action: wait for Codex review; fresh feedback will move the issue back to rework automatically.
+    """
+    |> String.trim()
+  end
+
   defp hydrated_preflight_block_comment(issue, corrections, requirements) do
     correction_ids = correction_ids(corrections)
 
@@ -1297,6 +1484,12 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp short_sha(value) when is_binary(value), do: String.slice(value, 0, 12)
   defp short_sha(_value), do: "unknown"
+
+  defp pr_number(pr) when is_map(pr), do: pr["number"] || pr[:number]
+  defp pr_number(_pr), do: nil
+
+  defp pr_url(pr) when is_map(pr), do: pr["html_url"] || pr[:html_url]
+  defp pr_url(_pr), do: nil
 
   defp blank?(value), do: not is_binary(value) or String.trim(value) == ""
 end
