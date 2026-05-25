@@ -5765,6 +5765,170 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight prioritizes current review feedback over stale clean branch handoff recovery" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-feedback-over-stale-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      origin = Path.join(test_root, "origin.git")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-205-feedback-over-recovery",
+        identifier: "COD-205",
+        title: "Analytics MIU: Flow Instrumentation",
+        state: "Rework",
+        branch_name: "orocsy/cod-205-analytics-miu-flow-instrumentation",
+        description: "Fix current review feedback on the integration PR."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nIntegration handoff.\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Integration handoff"], cd: workspace, stderr_to_stdout: true)
+      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      head_sha = String.trim(head_sha)
+      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+
+      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), """
+      # COD-205 Issue Brief
+
+      ## Ticket Type
+      implementation
+
+      ## Integration Branch
+      orocsy/feature-analytics-observability-integration
+
+      ## Write Scope
+      - tests/integration/cards-route.test.ts
+      """)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation") ->
+            {:ok, []}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:orocsy/feature-analytics-observability-integration") ->
+            {:ok,
+             [
+               %{
+                 "number" => 56,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+               }
+             ]}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "per_page=100") ->
+            {:ok, []}
+
+          decoded == "repos/acme/nutribuddy/pulls/56" ->
+            {:ok,
+             %{
+               "number" => 56,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "mergeable" => true,
+               "mergeable_state" => "clean"
+             }}
+
+          decoded in [
+            "repos/acme/nutribuddy/pulls/56/comments",
+            "repos/acme/nutribuddy/pulls/56/reviews",
+            "repos/acme/nutribuddy/issues/56/comments"
+          ] ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => head_sha,
+                 "reviewThreads" => %{
+                   "nodes" => [
+                     %{
+                       "isResolved" => false,
+                       "isOutdated" => false,
+                       "comments" => %{
+                         "nodes" => [
+                           %{
+                             "author" => %{"login" => "codex"},
+                             "body" => "Import cards handler from its new module.",
+                             "path" => "tests/integration/cards-route.test.ts",
+                             "line" => 13,
+                             "originalLine" => 13,
+                             "createdAt" => "2026-05-25T15:38:22Z",
+                             "outdated" => false,
+                             "url" => "https://github.com/acme/nutribuddy/pull/56#discussion"
+                           }
+                         ]
+                       }
+                     }
+                   ],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert PromptBuilder.workspace_recovery_checkpoint(workspace) =~ "Local handoff recovery checkpoint:"
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
+      assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert get_in(preflight, ["review", "feedback_count"]) == 1
+      assert [%{"path" => "tests/integration/cards-route.test.ts", "line" => 13}] = get_in(preflight, ["review", "feedback"])
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace, stderr_to_stdout: true)
+      assert String.trim(current_branch) == "orocsy/feature-analytics-observability-integration"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight routes integration handoff without discovered PR to integration check mode" do
     test_root =
       Path.join(
