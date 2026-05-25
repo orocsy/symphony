@@ -12920,6 +12920,45 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "continuation review-rework correction stays parked while external review is pending" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-continuation-review-correction-pending-#{System.unique_integer([:positive])}")
+
+    try do
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(test_root, "issue-continuation-review-correction-pending", %{
+          source: "continuation-review-rework",
+          summary: "External review result is still pending for pushed clean head",
+          findings: [
+            "Branch is clean and synced to origin at 6c42573; latest automated review still targets an older commit."
+          ],
+          required_corrections: [
+            "Retry/monitor PR state until external review posts for commit 6c42573; then dispatch only if new current-head feedback exists."
+          ]
+        })
+
+      head_sha = "6c425739b51d7ffdde65e3469e8d2f38421d1736"
+      request_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      refute_receive {:memory_tracker_state_update, "issue-continuation-review-correction-pending", _state}, 50
+      refute_receive {:github_post, _endpoint, _fields}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "pending review correction resolves to rework when fresh current-head feedback arrives" do
     test_root =
       Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-feedback-#{System.unique_integer([:positive])}")
@@ -13025,7 +13064,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  defp pending_review_correction_fixture(test_root, issue_id) do
+  defp pending_review_correction_fixture(test_root, issue_id, correction_attrs \\ %{}) do
     workspace_root = Path.join(test_root, "workspaces")
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -13054,18 +13093,25 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, workspace} = Workspace.create_for_issue(issue)
 
     assert {:ok, correction} =
-             Workspace.create_correction_in_workspace(workspace, issue, %{
-               source: "pr-review-handoff",
-               source_status: "blocked",
-               summary: "Fresh Codex review has not materialized for pushed head 748a56f",
-               findings: [
-                 "Branch is clean and pushed; gh pr comment --body '@codex review' succeeded but the latest Codex review is stale."
-               ],
-               required_corrections: [
-                 "External Codex review provider or Symphony review monitor must produce/observe a review result for the commit before Linear can leave active review-rework state."
-               ],
-               next_action: "retry"
-             })
+             Workspace.create_correction_in_workspace(
+               workspace,
+               issue,
+               Map.merge(
+                 %{
+                   source: "pr-review-handoff",
+                   source_status: "blocked",
+                   summary: "Fresh Codex review has not materialized for pushed head 748a56f",
+                   findings: [
+                     "Branch is clean and pushed; gh pr comment --body '@codex review' succeeded but the latest Codex review is stale."
+                   ],
+                   required_corrections: [
+                     "External Codex review provider or Symphony review monitor must produce/observe a review result for the commit before Linear can leave active review-rework state."
+                   ],
+                   next_action: "retry"
+                 },
+                 correction_attrs
+               )
+             )
 
     {issue, workspace, correction}
   end
