@@ -5503,6 +5503,55 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight routes dirty local work to handoff recovery mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-handoff-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-205-dirty-preflight",
+        identifier: "COD-205",
+        title: "Analytics MIU: Flow Instrumentation",
+        state: "Rework",
+        branch_name: "orocsy/cod-205-analytics-miu-flow-instrumentation",
+        description: "Recover interrupted review work."
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDirty handoff.\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
+      assert preflight["first_task"] =~ "Recover the existing dirty/local handoff"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Mode: handoff recovery"
+      assert prompt =~ "Dirty workspace recovery is the only task"
+      refute prompt =~ "Mode: fresh implementation"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight routes integration handoff without discovered PR to integration check mode" do
     test_root =
       Path.join(
