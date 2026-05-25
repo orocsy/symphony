@@ -268,7 +268,8 @@ defmodule SymphonyElixir.PromptBuilder do
 
     - Treat PR mergeability conflict resolution as the first task; it supersedes pushed-handoff waiting.
     - Start from `git status --short --branch`, then fetch the PR target branch and expose conflicts with a bounded merge/rebase check.
-    - Before broad reads, append a `technical-miu-trace` event naming only the conflicted/write-scope paths, validation commands, and same-branch push target.
+    - Immediately after confirming the current branch/status, and before any GitHub PR lookup, conflict scan, diff, or file read, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.integration-check-started --status passed --phase handoff --step "integration branch/status confirmed" --tool "integration-handoff-preflight"`.
+    - Before broad reads, append a `technical-miu-trace` event naming only the conflicted/write-scope paths, validation commands, PR number or missing-PR finding, and same-branch push target.
     - Resolve only the in-scope conflict files and directly required helper/test files from the issue brief.
     - Run the focused validation named by the preflight/brief, then commit, push to the existing PR branch, and request `@codex review`.
     - Do not create a new branch, open a duplicate PR, update unrelated product code, move Linear to a terminal state, or merge the PR automatically.
