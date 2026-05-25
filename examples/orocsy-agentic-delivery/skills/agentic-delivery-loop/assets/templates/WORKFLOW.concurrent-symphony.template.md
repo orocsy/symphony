@@ -220,17 +220,33 @@ Orocsy worker prelude:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . <command>`
 9. Implement one MIU at a time and append command evidence after each check:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "<command>"`
-10. Before commit, run:
+10. Vitest validation in symlinked Symphony worktrees:
+   - If this worktree reuses the project dependency root by symlinking
+     `node_modules`, avoid commands that force Vite's bundle config loader to
+     write transient files under `node_modules/.vite-temp`.
+   - For focused unit/integration checks, use:
+     `pnpm exec vitest run --configLoader runner <test-file>`
+   - For full validation where the ticket declares `pnpm test` and the package
+     script is `vitest run`, use:
+     `pnpm test -- --configLoader runner`
+     Record it as `pnpm test (via --configLoader runner for symlinked
+     node_modules)` so the required validation remains visible without writing
+     outside the worker sandbox.
+   - If a reviewer requires a literal `pnpm test` command, stop with a
+     workflow-environment blocker for the owner to run it outside the symlinked
+     worker sandbox or after installing workspace-local dependencies. Do not
+     classify `.vite-temp` EPERM as a product validation failure.
+11. Before commit, run:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate declared-scope --strict --record`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --record`
-11. Before push, run:
+12. Before push, run:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`
-12. Before handoff, print the applicable eval rubric and record the verdict:
+13. Before handoff, print the applicable eval rubric and record the verdict:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval rubric miu-quality`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . eval record miu-quality --status passed --summary "<why>"`
    Dynamic `eval.*` events are durable progress. Do not invent a separate
    narrative status when the eval command can record the proof.
-13. Handoff git-state verification guard:
+14. Handoff git-state verification guard:
    - After the final push and before any GitHub or Linear completion update,
      verify the actual repository state:
      `git status --short --branch`
@@ -243,12 +259,12 @@ Orocsy worker prelude:
      record the blocker, and do not move the issue to review/completion.
    - After PR/review/Linear handoff succeeds, append a durable handoff event:
      `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.completed --status passed --tool "github-linear-handoff"`
-14. If any gate or eval fails, create/resolve inbox items and ask for guidance:
+15. If any gate or eval fails, create/resolve inbox items and ask for guidance:
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . gate required-evidence --strict --inbox`
    `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --record`
-15. If guidance says `block` or `retry`, update the Linear workpad and stop
+16. If guidance says `block` or `retry`, update the Linear workpad and stop
     until the correction is handled.
-16. Generated artifact cleanup:
+17. Generated artifact cleanup:
     - Do not run raw destructive cleanup commands such as `rm -rf`,
       `git clean`, or `find ... -delete` inside a Symphony worker. These
       commands are approval-bound in Codex and can abort non-interactive runs.
