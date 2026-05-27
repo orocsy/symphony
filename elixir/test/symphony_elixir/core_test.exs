@@ -5709,6 +5709,57 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight keeps clean in-progress implementation branches in fresh implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-in-progress-implementation-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-213",
+        identifier: "COD-213",
+        title: "Cloudflare Runtime Foundation Implementation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-213-cloudflare-runtime-foundation-implementation",
+        description:
+          "## Ticket Type\n\nimplementation\n\n## Runtime Problem\n\nContinue the remaining runtime foundation implementation.\n\n## Write Scope\n\n- `package.json`\n\n## Validation\n\n```bash\npnpm lint\n```\n"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-cloudflare-infra-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-213-cloudflare-runtime-foundation-implementation"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nCheckpoint.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add checkpoint"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-cloudflare-infra-integration"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["first_task"] =~ "Start with the first MIU"
+      refute preflight["first_task"] =~ "Recover the existing dirty/local handoff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps handoff recovery on discovered PR head branch when clean" do
     test_root =
       Path.join(
@@ -10178,6 +10229,67 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Active issue: `MT-204`"
       refute prompt =~ "You must read AGENTS.md"
       refute prompt =~ "Ticket MT-204"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder continues clean in-progress implementation branches instead of handoff mode" do
+    workflow_prompt = """
+    Continue normal worker prompt.
+    Ticket {{ issue.identifier }}
+    """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-in-progress-implementation-continuation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-213-runtime-foundation"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nCheckpoint.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add checkpoint"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/cod-213-runtime-foundation", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/cod-213-runtime-foundation"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event": "gate.post-miu", "status": "passed", "step": "first implementation checkpoint", "ts": "2026-05-12T05:00:49Z"}\n)
+      )
+
+      issue = %Issue{
+        identifier: "COD-213",
+        title: "Cloudflare Runtime Foundation Implementation",
+        description:
+          "## Ticket Type\n\nimplementation\n\n## Runtime Problem\n\nContinue the remaining runtime foundation implementation.\n\n## Write Scope\n\n- `package.json`\n\n## Validation\n\n```bash\npnpm lint\n```\n",
+        state: "In Progress",
+        url: "https://example.org/issues/COD-213",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      refute String.starts_with?(prompt, "Pushed validated handoff checkpoint:")
+      refute prompt =~ "Minimal review handoff mode:"
+      assert prompt =~ "Continue normal worker prompt."
+      assert prompt =~ "Ticket COD-213"
     after
       File.rm_rf(workspace)
     end

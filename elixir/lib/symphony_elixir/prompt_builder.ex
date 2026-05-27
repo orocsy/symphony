@@ -23,7 +23,12 @@ defmodule SymphonyElixir.PromptBuilder do
   def build_prompt(issue, opts \\ []) do
     attempt = Keyword.get(opts, :attempt)
     workspace = Keyword.get(opts, :workspace)
-    checkpoint = workspace_recovery_checkpoint(workspace)
+
+    checkpoint =
+      workspace
+      |> workspace_recovery_checkpoint()
+      |> maybe_clear_in_progress_checkpoint(issue, workspace)
+
     workflow = Workflow.current()
 
     prompt =
@@ -75,6 +80,48 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   def workspace_recovery_checkpoint(_workspace), do: ""
+
+  defp maybe_clear_in_progress_checkpoint(checkpoint, issue, workspace)
+       when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
+    if issue_in_progress?(issue) and issue_implementation?(issue) and clean_worktree?(workspace) do
+      ""
+    else
+      checkpoint
+    end
+  end
+
+  defp maybe_clear_in_progress_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
+
+  defp issue_in_progress?(%{state: state}) when is_binary(state) do
+    state
+    |> String.trim()
+    |> String.downcase()
+    |> Kernel.==("in progress")
+  end
+
+  defp issue_in_progress?(_issue), do: false
+
+  defp issue_implementation?(%{description: description}) when is_binary(description) do
+    text = String.downcase(description)
+
+    Regex.match?(~r/ticket\s+type\s*\n+\s*implementation/, text) or
+      (String.contains?(text, "ticket_type") and String.contains?(text, "implementation"))
+  end
+
+  defp issue_implementation?(_issue), do: false
+
+  defp clean_worktree?(workspace) when is_binary(workspace) do
+    with {:ok, status} <- git_status(workspace) do
+      status
+      |> String.split("\n", trim: true)
+      |> Enum.reject(&String.starts_with?(&1, "##"))
+      |> Enum.empty?()
+    else
+      _ -> false
+    end
+  end
+
+  defp clean_worktree?(_workspace), do: false
 
   @spec render_issue_template(String.t(), SymphonyElixir.Linear.Issue.t() | map() | String.t() | nil, keyword()) ::
           String.t()

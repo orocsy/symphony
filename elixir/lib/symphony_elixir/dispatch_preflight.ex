@@ -243,14 +243,17 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp preflight_mode(workspace, requirements, inspection) do
     cond do
-      handoff_recovery_checkpoint?(workspace) and handoff_recovery_must_precede_review?(workspace, inspection) ->
-        "handoff_recovery"
-
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
       review_feedback?(inspection) ->
         "review_rework"
+
+      in_progress_implementation_continuation?(workspace, requirements) ->
+        "fresh_implementation"
+
+      handoff_recovery_checkpoint?(workspace) and handoff_recovery_must_precede_review?(workspace, inspection) ->
+        "handoff_recovery"
 
       handoff_recovery_checkpoint?(workspace) ->
         "handoff_recovery"
@@ -274,6 +277,35 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_checkpoint?(_workspace), do: false
+
+  defp in_progress_implementation_continuation?(workspace, requirements)
+       when is_binary(workspace) and is_map(requirements) do
+    implementation_issue?(requirements) and
+      requirement_state(requirements) == "in progress" and
+      clean_worktree?(workspace)
+  end
+
+  defp in_progress_implementation_continuation?(_workspace, _requirements), do: false
+
+  defp implementation_issue?(requirements) when is_map(requirements) do
+    requirements
+    |> Map.get("ticket_type", "")
+    |> to_string()
+    |> String.downcase()
+    |> Kernel.==("implementation")
+  end
+
+  defp implementation_issue?(_requirements), do: false
+
+  defp requirement_state(requirements) when is_map(requirements) do
+    requirements
+    |> Map.get("state", "")
+    |> to_string()
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp requirement_state(_requirements), do: ""
 
   defp handoff_recovery_must_precede_review?(workspace, inspection) do
     dirty_or_ahead_handoff?(workspace) or current_branch_matches_review_head?(workspace, inspection)
