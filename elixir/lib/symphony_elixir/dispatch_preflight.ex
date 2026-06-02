@@ -186,9 +186,12 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp maybe_switch_to_review_head(_workspace, _inspection, _mode), do: :ok
 
   defp clean_worktree?(workspace) do
-    case git_command(workspace, ["status", "--porcelain"]) do
-      {"", 0} -> true
-      _ -> false
+    case git_command(workspace, ["status", "--porcelain", "--untracked-files=all"]) do
+      {status, 0} ->
+        substantive_status_lines(status) == []
+
+      _ ->
+        false
     end
   end
 
@@ -273,16 +276,27 @@ defmodule SymphonyElixir.DispatchPreflight do
     checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)
 
     String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:") or
       String.starts_with?(checkpoint, "Local handoff recovery checkpoint:")
   end
 
   defp handoff_recovery_checkpoint?(_workspace), do: false
 
+  defp validated_handoff_checkpoint?(workspace) when is_binary(workspace) do
+    checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)
+
+    String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:")
+  end
+
+  defp validated_handoff_checkpoint?(_workspace), do: false
+
   defp in_progress_implementation_continuation?(workspace, requirements)
        when is_binary(workspace) and is_map(requirements) do
     implementation_issue?(requirements) and
       requirement_state(requirements) == "in progress" and
-      clean_worktree?(workspace)
+      clean_worktree?(workspace) and
+      not validated_handoff_checkpoint?(workspace)
   end
 
   defp in_progress_implementation_continuation?(_workspace, _requirements), do: false
@@ -312,11 +326,11 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp dirty_or_ahead_handoff?(workspace) when is_binary(workspace) do
-    case git_command(workspace, ["status", "--short", "--branch"]) do
+    case git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]) do
       {status, 0} ->
         lines = String.split(String.trim(status), "\n", trim: true)
         branch_line = List.first(lines) || ""
-        dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+        dirty_lines = substantive_status_lines(status)
 
         dirty_lines != [] or String.contains?(branch_line, ["ahead", "diverged"])
 
@@ -326,6 +340,51 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp dirty_or_ahead_handoff?(_workspace), do: false
+
+  defp substantive_status_lines(status) when is_binary(status) do
+    status
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&String.starts_with?(&1, "##"))
+    |> Enum.reject(&orchestration_status_line?/1)
+  end
+
+  defp substantive_status_lines(_status), do: []
+
+  defp orchestration_status_line?(line) when is_binary(line) do
+    line
+    |> status_line_paths()
+    |> case do
+      [] -> false
+      paths -> Enum.all?(paths, &orchestration_status_path?/1)
+    end
+  end
+
+  defp orchestration_status_line?(_line), do: false
+
+  defp status_line_paths(line) when is_binary(line) do
+    path_part =
+      if String.length(line) > 3 do
+        String.slice(line, 3..-1//1)
+      else
+        line
+      end
+
+    path_part
+    |> String.split(" -> ")
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(&String.trim(&1, ~s(")))
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp orchestration_status_path?(path) when is_binary(path) do
+    String.starts_with?(path, [
+      ".codex/agentic/issue-briefs/",
+      ".orocsy/",
+      ".codex/delivery/"
+    ])
+  end
+
+  defp orchestration_status_path?(_path), do: false
 
   defp current_branch_matches_review_head?(workspace, inspection) when is_binary(workspace) and is_map(inspection) do
     case Map.get(inspection, :head_ref) do
@@ -445,7 +504,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
       "checkpoint_event" => "gate.post-miu",
       "first_task" =>
-        "Recover the existing dirty/local handoff only: inspect git status and focused dirty diffs, run the smallest validation for those files, then commit, push, and request/update Codex review. Do not restart fresh implementation or broaden project discovery.",
+        "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs, run the smallest validation for those files, then either fix exact in-scope validation failures or commit, push, and request/update Codex review after validation passes. Do not restart broad implementation or broaden project discovery.",
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
       "review" => %{
@@ -659,7 +718,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Branch: `#{preflight["branch"] || "unknown"}`
     - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
     - Reviewed head: `#{short_sha(review["head_sha"])}`
-    - Worker-required checkpoint: focused validation such as `#{preflight["checkpoint_event"]}`, or a scoped blocker if the dirty diff is invalid.
+    - Worker-required checkpoint: focused validation such as `#{preflight["checkpoint_event"]}`, or a scoped blocker only if validation cannot name an in-scope fix target.
     - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
     - First task: #{preflight["first_task"]}
     - Dirty workspace recovery is the only task. Use `git status --short --branch`, `git diff --stat`, and focused `git diff -- <dirty-file>` reads before any edit.
@@ -671,7 +730,8 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
     - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
     - If the focused diff is complete, run the smallest validation for the dirty files, then commit, push the current branch, and request/update Codex review.
-    - If validation or permissions block handoff, record an Orocsy correction with the exact blocker and stop.
+    - If focused validation fails and names exact in-scope files, assertions, missing columns, missing exports, or required contract symbols, make that smallest in-scope fix first, rerun the same focused validation, then continue handoff.
+    - Record an Orocsy correction and stop only when validation lacks an actionable in-scope target, a required dependency/credential is missing, permissions block the command, or the needed edit is outside the issue write scope.
     """
     |> String.trim()
   end

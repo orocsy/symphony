@@ -7,9 +7,9 @@ defmodule SymphonyElixir.IssueRequirements do
 
   @required_keys [:identifier, :write_scope, :mius, :validation]
 
-  @spec from_issue(Issue.t() | map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def from_issue(issue, workspace \\ nil)
 
+  @spec from_issue(Issue.t() | map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def from_issue(%Issue{} = issue, workspace) do
     description =
       issue

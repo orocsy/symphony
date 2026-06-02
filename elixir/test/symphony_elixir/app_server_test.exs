@@ -4548,6 +4548,96 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows review-referenced root config reads in review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-root-config-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-ROOT-CONFIG-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      root_config = Path.join(workspace, "opennext.js")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(root_config, """
+      export default {};
+      """)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-ROOT-CONFIG-READ",
+          "branch" => "orocsy/mt-review-root-config-read",
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/lib/server/recipe-chats.ts",
+                "line" => 42,
+                "body" => "Confirm the root OpenNext config in `opennext.js` before the provider review fix."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-root-config-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-root-config-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,120p'\\'' opennext.js\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-root-config-read",
+        identifier: "MT-REVIEW-ROOT-CONFIG-READ",
+        title: "Review rework root config read",
+        description: "Review feedback body root config paths should be allowed in review rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-ROOT-CONFIG-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows shell-wrapped declared support path reads in review rework mode" do
     test_root =
       Path.join(

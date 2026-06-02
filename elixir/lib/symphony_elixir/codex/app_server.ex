@@ -534,7 +534,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     If current-head feedback or a runtime correction names exact files and a symbol lookup is truly needed after `review-feedback-classified`, use only bounded `rg -n "literal" <exact named file...>` over those named files. Never use grep, recursive flags, or bare directories such as `src`, `app`, `lib`, or `tests`.
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state.
     For review-request handoff comments, use `gh pr comment <pr-number> --body '@codex review'`; never use `gh api --method POST` or issue-comment API endpoints.
-    If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff, run focused validation, commit, push, request fresh review, and leave Linear state transitions to Symphony's review monitor.
+    If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff and run focused validation. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit, push, request fresh review after validation passes, and leave Linear state transitions to Symphony's review monitor.
     For Vitest validation, use `--configLoader runner` to avoid Vite writing startup temp files into symlinked `node_modules/.vite-temp`. If the issue brief names a focused test, run the exact `pnpm exec vitest run --configLoader runner <test-file>` command. If the declared full-suite command is `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not run `pnpm test <test-file>` and do not probe or request approval for `node_modules/.vite-temp`.
     After the `review-feedback-classified` checkpoint, start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
     If the issue brief names an exact write-scope file that does not exist yet, create that exact file; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
@@ -1057,6 +1057,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       ".cjs",
       ".md",
       ".json",
+      ".toml",
       ".yml",
       ".yaml",
       ".css",
@@ -1256,12 +1257,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_path_like?(path) when is_binary(path) do
     path != "" and
       review_rework_supported_file?(path) and
-      String.contains?(path, "/") and
+      (String.contains?(path, "/") or review_rework_root_config_path?(path)) and
       not String.contains?(path, [" ", "\t", "\n", "\r"]) and
       not String.starts_with?(path, ["http://", "https://", "origin/"])
   end
 
   defp review_rework_path_like?(_path), do: false
+
+  defp review_rework_root_config_path?(path) when is_binary(path) do
+    path in [
+      "opennext.js",
+      "open-next.config.ts",
+      "open-next.config.js",
+      "open-next.config.mjs",
+      "next.config.ts",
+      "next.config.js",
+      "next.config.mjs",
+      "wrangler.toml",
+      "wrangler.json",
+      "wrangler.jsonc",
+      "package.json",
+      "tsconfig.json"
+    ] or String.starts_with?(path, "vitest.config.")
+  end
+
+  defp review_rework_root_config_path?(_path), do: false
 
   defp review_rework_path_guard_patterns_for_paths([]), do: []
 
@@ -1278,9 +1298,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_allowed_path_pattern(path) do
-    escaped = Regex.escape(path)
-    "(?:#{escaped}|'#{escaped}'|\"#{escaped}\")"
+    variants =
+      path
+      |> review_rework_allowed_path_variants()
+      |> Enum.map(fn variant ->
+        escaped = Regex.escape(variant)
+        "(?:#{escaped}|'#{escaped}'|\"#{escaped}\")"
+      end)
+      |> Enum.join("|")
+
+    "(?:#{variants})"
   end
+
+  defp review_rework_allowed_path_variants(path) when is_binary(path) do
+    trimmed_root_path = String.trim_leading(path, "/")
+
+    [path, trimmed_root_path]
+    |> Enum.filter(&(&1 != ""))
+    |> Enum.filter(fn variant ->
+      variant == path or
+        (review_rework_root_config_path?(variant) and not String.contains?(variant, "/"))
+    end)
+    |> Enum.uniq()
+  end
+
+  defp review_rework_allowed_path_variants(_path), do: []
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
     send_message(port, %{

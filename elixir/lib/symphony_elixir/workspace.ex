@@ -52,9 +52,9 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec blocking_correction_in_workspace?(Path.t(), worker_host()) :: boolean()
   def blocking_correction_in_workspace?(workspace, worker_host \\ nil)
 
+  @spec blocking_correction_in_workspace?(Path.t(), worker_host()) :: boolean()
   def blocking_correction_in_workspace?(workspace, nil) when is_binary(workspace) do
     with :ok <- validate_workspace_path(workspace, nil),
          true <- File.dir?(workspace) do
@@ -79,10 +79,10 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec create_correction_in_workspace(Path.t(), map() | String.t() | nil, map(), worker_host()) ::
-          {:ok, map()} | {:error, term()}
   def create_correction_in_workspace(workspace, issue_or_identifier, attrs, worker_host \\ nil)
 
+  @spec create_correction_in_workspace(Path.t(), map() | String.t() | nil, map(), worker_host()) ::
+          {:ok, map()} | {:error, term()}
   def create_correction_in_workspace(workspace, issue_or_identifier, attrs, nil)
       when is_binary(workspace) and is_map(attrs) do
     issue_context = issue_context(issue_or_identifier)

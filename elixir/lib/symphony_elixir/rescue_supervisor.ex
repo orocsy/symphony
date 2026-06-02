@@ -11,7 +11,9 @@ defmodule SymphonyElixir.RescueSupervisor do
   @hydrated_retry_loop_limit 2
   @review_rework_loop_limit 2
   @validation_blocker_loop_limit 3
-  @handoff_recovery_progress_grace_seconds 15 * 60
+  # Workers often create the useful dirty diff first, then spend a long turn on
+  # focused validation/review handoff before the durable-progress watchdog fires.
+  @handoff_recovery_progress_grace_seconds 45 * 60
   @pending_codex_review_correction_sources [
     "pr-review-handoff",
     "github-codex-review",
@@ -1125,17 +1127,23 @@ defmodule SymphonyElixir.RescueSupervisor do
     source = correction["source"] || ""
     summary = correction["summary"] || ""
     findings = Enum.join(correction["findings"] || [], " ")
+    text = summary <> " " <> findings
+    source_downcase = String.downcase(source)
+    text_downcase = String.downcase(text)
 
-    String.contains?(source, "validation-blocker") or
-      (String.contains?(source, "validation") and
-         String.match?(summary <> " " <> findings, ~r/\b(fail(?:ed|s)?|error|blocked)\b/i)) or
-      String.contains?(summary, "validation command") or
-      (String.contains?(findings, "Command:") and
-         String.match?(findings, ~r/\b(fail(?:ed|s)?|error|blocked)\b/i)) or
-      String.contains?(findings, "Validation command failed")
+    String.contains?(source_downcase, "validation-blocker") or
+      (String.contains?(source_downcase, "validation") and validation_failure_text?(text)) or
+      (String.contains?(text_downcase, "validation") and validation_failure_text?(text)) or
+      (String.contains?(findings, "Command:") and validation_failure_text?(findings))
   end
 
   defp validation_blocker_correction?(_correction), do: false
+
+  defp validation_failure_text?(text) when is_binary(text) do
+    String.match?(text, ~r/\b(fail(?:ed|s|ure)?|error|blocked|invalid|not handoff-ready)\b/i)
+  end
+
+  defp validation_failure_text?(_text), do: false
 
   defp exact_test_search_permission_correction?(corrections, workspace) when is_list(corrections) do
     Enum.any?(corrections, &exact_test_search_permission_correction?(&1, workspace))
