@@ -1897,7 +1897,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       command_paths =
         command
-        |> paths_from_review_rework_text()
+        |> search_path_tokens()
         |> Enum.uniq()
 
       scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
@@ -1921,7 +1921,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       command_paths =
         command
-        |> paths_from_review_rework_text()
+        |> search_path_tokens()
         |> Enum.uniq()
 
       scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
@@ -2142,7 +2142,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp broad_search_path_token?(_command), do: false
 
   defp search_path_tokens(command) when is_binary(command) do
-    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)/
+    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)(?=$|[\s"'])/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_requirement_path(path)]
