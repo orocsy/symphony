@@ -3700,6 +3700,108 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server blocks chrome-default playwright retry for browser launch corrections" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-playwright-chromium-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PLAYWRIGHT-GUARD")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      correction_file = Path.join(inbox_dir, "correction_20260626160144_0a19a053.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PLAYWRIGHT-GUARD",
+          "branch" => "orocsy/mt-review-playwright-guard",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(
+        correction_file,
+        Jason.encode!(%{
+          "correction_id" => "correction_20260626160144_0a19a053",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Focused Playwright validation blocked by local Chrome launch sandbox",
+          "findings" => [
+            "browserType.launch failed because Google Chrome exited SIGABRT; cleanup logged kill EPERM."
+          ],
+          "required_corrections" => [
+            "Retry focused validation with the safe Chromium channel."
+          ]
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-playwright-guard"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-playwright-guard"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-playwright-guard",
+        identifier: "MT-REVIEW-PLAYWRIGHT-GUARD",
+        title: "Review rework Playwright guard",
+        description: "Chrome-default Playwright retries should be blocked under browser launch corrections",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PLAYWRIGHT-GUARD",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Continue validation rework", issue)
+
+      assert command ==
+               "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"
+
+      assert pattern == "playwright_chrome_sandbox_correction_requires_chromium_channel"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows bounded exact test file rg during review rework validation" do
     test_root =
       Path.join(
@@ -3900,6 +4002,105 @@ defmodule SymphonyElixir.AppServerTest do
         description: "Exact test/spec candidate file rg should stay inside the read-only guard",
         state: "Rework",
         url: "https://example.org/issues/MT-REVIEW-EXACT-TEST-CANDIDATE-RG",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Continue review validation", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows bounded exact reviewed source file rg during review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-exact-source-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-EXACT-SOURCE-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      store_file = Path.join(workspace, "src/lib/db/guest-session-store.ts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.dirname(store_file))
+
+      File.write!(store_file, """
+      export class D1GuestSessionStore {}
+      export function attemptGuestSwipe() { return true; }
+      export function applyGuestSwipeDecision() { return true; }
+      """)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-EXACT-SOURCE-RG",
+          "branch" => "orocsy/feature-cloudflare-infra-integration",
+          "requirements" => %{
+            "write_scope" => [
+              "src/lib/db/guest-session-store.ts",
+              "tests/** only for focused regression tests"
+            ]
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/lib/db/guest-session-store.ts",
+                "line" => 228,
+                "body" => "Preserve swipe rollback when handoff fails."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-exact-source-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-exact-source-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc '\\''rg -n \\"applyGuestSwipeDecision|class D1GuestSessionStore|attemptGuestSwipe\\" src/lib/db/guest-session-store.ts'\\''"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-exact-source-rg",
+        identifier: "MT-REVIEW-EXACT-SOURCE-RG",
+        title: "Review rework exact source rg",
+        description: "Exact reviewed source file rg should stay inside the read-only guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-EXACT-SOURCE-RG",
         labels: []
       }
 
@@ -4539,6 +4740,96 @@ defmodule SymphonyElixir.AppServerTest do
         description: "Shell-wrapped local source import reads should be allowed in review rework",
         state: "Rework",
         url: "https://example.org/issues/MT-REVIEW-LOCAL-IMPORT-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows review-referenced root config reads in review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-root-config-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-ROOT-CONFIG-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      root_config = Path.join(workspace, "opennext.js")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(root_config, """
+      export default {};
+      """)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-ROOT-CONFIG-READ",
+          "branch" => "orocsy/mt-review-root-config-read",
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/lib/server/recipe-chats.ts",
+                "line" => 42,
+                "body" => "Confirm the root OpenNext config in `opennext.js` before the provider review fix."
+              }
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-root-config-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-root-config-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc \\"sed -n '\\''1,120p'\\'' opennext.js\\""}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-root-config-read",
+        identifier: "MT-REVIEW-ROOT-CONFIG-READ",
+        title: "Review rework root config read",
+        description: "Review feedback body root config paths should be allowed in review rework",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-ROOT-CONFIG-READ",
         labels: []
       }
 

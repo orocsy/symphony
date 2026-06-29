@@ -3,7 +3,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   Writes a small machine-owned dispatch checkpoint before Codex starts.
   """
 
-  alias SymphonyElixir.{Config, IssueRequirements, PromptBuilder, ReviewMonitor}
+  alias SymphonyElixir.{Config, IssueRequirements, PromptBuilder, ReviewMonitor, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @preflight_path ".orocsy/delivery/state/dispatch-preflight.json"
@@ -186,9 +186,12 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp maybe_switch_to_review_head(_workspace, _inspection, _mode), do: :ok
 
   defp clean_worktree?(workspace) do
-    case git_command(workspace, ["status", "--porcelain"]) do
-      {"", 0} -> true
-      _ -> false
+    case git_command(workspace, ["status", "--porcelain", "--untracked-files=all"]) do
+      {status, 0} ->
+        substantive_status_lines(status) == []
+
+      _ ->
+        false
     end
   end
 
@@ -273,16 +276,27 @@ defmodule SymphonyElixir.DispatchPreflight do
     checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)
 
     String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:") or
       String.starts_with?(checkpoint, "Local handoff recovery checkpoint:")
   end
 
   defp handoff_recovery_checkpoint?(_workspace), do: false
 
+  defp validated_handoff_checkpoint?(workspace) when is_binary(workspace) do
+    checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)
+
+    String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:")
+  end
+
+  defp validated_handoff_checkpoint?(_workspace), do: false
+
   defp in_progress_implementation_continuation?(workspace, requirements)
        when is_binary(workspace) and is_map(requirements) do
     implementation_issue?(requirements) and
       requirement_state(requirements) == "in progress" and
-      clean_worktree?(workspace)
+      clean_worktree?(workspace) and
+      not validated_handoff_checkpoint?(workspace)
   end
 
   defp in_progress_implementation_continuation?(_workspace, _requirements), do: false
@@ -312,11 +326,11 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp dirty_or_ahead_handoff?(workspace) when is_binary(workspace) do
-    case git_command(workspace, ["status", "--short", "--branch"]) do
+    case git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]) do
       {status, 0} ->
         lines = String.split(String.trim(status), "\n", trim: true)
         branch_line = List.first(lines) || ""
-        dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+        dirty_lines = substantive_status_lines(status)
 
         dirty_lines != [] or String.contains?(branch_line, ["ahead", "diverged"])
 
@@ -326,6 +340,51 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp dirty_or_ahead_handoff?(_workspace), do: false
+
+  defp substantive_status_lines(status) when is_binary(status) do
+    status
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&String.starts_with?(&1, "##"))
+    |> Enum.reject(&orchestration_status_line?/1)
+  end
+
+  defp substantive_status_lines(_status), do: []
+
+  defp orchestration_status_line?(line) when is_binary(line) do
+    line
+    |> status_line_paths()
+    |> case do
+      [] -> false
+      paths -> Enum.all?(paths, &orchestration_status_path?/1)
+    end
+  end
+
+  defp orchestration_status_line?(_line), do: false
+
+  defp status_line_paths(line) when is_binary(line) do
+    path_part =
+      if String.length(line) > 3 do
+        String.slice(line, 3..-1//1)
+      else
+        line
+      end
+
+    path_part
+    |> String.split(" -> ")
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(&String.trim(&1, ~s(")))
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp orchestration_status_path?(path) when is_binary(path) do
+    String.starts_with?(path, [
+      ".codex/agentic/issue-briefs/",
+      ".orocsy/",
+      ".codex/delivery/"
+    ])
+  end
+
+  defp orchestration_status_path?(_path), do: false
 
   defp current_branch_matches_review_head?(workspace, inspection) when is_binary(workspace) and is_map(inspection) do
     case Map.get(inspection, :head_ref) do
@@ -410,6 +469,8 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp review_rework_preflight(workspace, issue, requirements, inspection) do
     feedback = Map.get(inspection, :feedback, [])
+    open_corrections = open_correction_summaries(workspace)
+    correction_active? = open_corrections != []
 
     %{
       "schema_version" => 1,
@@ -418,9 +479,9 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
-      "checkpoint_event" => "review-feedback-classified",
-      "first_task" =>
-        "Fix only the listed current-head review feedback on the existing PR branch, then run focused validation, push, and request a fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor.",
+      "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "review-feedback-classified"),
+      "first_task" => review_rework_first_task(open_corrections),
+      "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
       "review" => %{
@@ -435,7 +496,20 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
+  defp review_rework_first_task([correction | _]) do
+    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+    "Resolve the open Orocsy correction before the review shortcut: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue PR review handoff. Do not append review-feedback-classified while an open correction remains."
+  end
+
+  defp review_rework_first_task(_open_corrections) do
+    "Fix only the listed current-head review feedback on the existing PR branch, then run focused validation, push, and request a fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
+  end
+
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
+    open_corrections = open_correction_summaries(workspace)
+    correction_active? = open_corrections != []
+
     %{
       "schema_version" => 1,
       "mode" => "handoff_recovery",
@@ -443,9 +517,9 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
-      "checkpoint_event" => "gate.post-miu",
-      "first_task" =>
-        "Recover the existing dirty/local handoff only: inspect git status and focused dirty diffs, run the smallest validation for those files, then commit, push, and request/update Codex review. Do not restart fresh implementation or broaden project discovery.",
+      "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu"),
+      "first_task" => handoff_recovery_first_task(open_corrections),
+      "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
       "review" => %{
@@ -460,6 +534,16 @@ defmodule SymphonyElixir.DispatchPreflight do
         "feedback" => Enum.map(Map.get(inspection, :feedback, []), &feedback_summary/1)
       }
     }
+  end
+
+  defp handoff_recovery_first_task([correction | _]) do
+    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
+  end
+
+  defp handoff_recovery_first_task(_open_corrections) do
+    "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
   end
 
   defp handoff_recovery_branch(workspace, issue, requirements, inspection) do
@@ -589,6 +673,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp review_prompt_context(preflight) do
     review = preflight["review"] || %{}
     feedback = review["feedback"] || []
+    open_corrections = preflight["open_corrections"] || []
+    correction_active? = open_corrections != []
 
     """
     Runtime dispatch preflight:
@@ -598,25 +684,35 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Branch: `#{preflight["branch"] || "unknown"}`
     - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
     - Reviewed head: `#{short_sha(review["head_sha"])}`
-    - Worker-required checkpoint: `#{preflight["checkpoint_event"]}` after classifying current-head feedback.
+    - Worker-required checkpoint: #{review_rework_checkpoint_guidance(preflight["checkpoint_event"], correction_active?)}
     - Runtime preflight is not worker progress and is not proof that review classification, validation, push, or handoff is complete.
     - Preflight file is read-only runtime context; do not edit it.
     - First task: #{preflight["first_task"]}
+    - Open Orocsy corrections: #{format_corrections(open_corrections)}
     - Target feedback file(s): #{format_inline_items(feedback_paths(feedback))}
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
-    - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
+    - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
 
     Current-head review feedback:
     #{format_items(feedback)}
 
     Review rework limits:
-    - Use the target feedback file as the first read/edit path.
+    - If an open Orocsy correction is listed above, it overrides the review-feedback shortcut. Start from the exact file path named in the correction, not the review feedback path.
+    - Use the target feedback file as the first read/edit path only when no open Orocsy correction is listed above.
     - Read only directly related tests, imported local types, or the nearest caller before the first edit.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first edit unless listed above.
     - Produce a scoped edit plus focused validation, or record an explicit blocker/correction. Do not stop after analysis.
     - Do not create/update a PR, request review, or update Linear handoff until this turn has produced real scoped code/test progress or a valid blocker.
     """
     |> String.trim()
+  end
+
+  defp review_rework_checkpoint_guidance(checkpoint_event, true) do
+    "`#{checkpoint_event}` after making or explicitly blocking the scoped correction fix. Do not append `review-feedback-classified` while any open correction remains."
+  end
+
+  defp review_rework_checkpoint_guidance(checkpoint_event, _correction_active?) do
+    "`#{checkpoint_event}` after classifying current-head feedback."
   end
 
   defp fresh_prompt_context(preflight) do
@@ -650,6 +746,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_prompt_context(preflight) do
     requirements = preflight["requirements"] || %{}
     review = preflight["review"] || %{}
+    open_corrections = preflight["open_corrections"] || []
+    correction_active? = open_corrections != []
 
     """
     Runtime dispatch preflight:
@@ -659,21 +757,33 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Branch: `#{preflight["branch"] || "unknown"}`
     - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
     - Reviewed head: `#{short_sha(review["head_sha"])}`
-    - Worker-required checkpoint: focused validation such as `#{preflight["checkpoint_event"]}`, or a scoped blocker if the dirty diff is invalid.
+    - Worker-required checkpoint: #{handoff_recovery_checkpoint_guidance(preflight["checkpoint_event"], correction_active?)}
     - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
     - First task: #{preflight["first_task"]}
+    - Open Orocsy corrections: #{format_corrections(open_corrections)}
     - Dirty workspace recovery is the only task. Use `git status --short --branch`, `git diff --stat`, and focused `git diff -- <dirty-file>` reads before any edit.
     - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
-    - Validation command guidance: #{toolchain_guidance(preflight["toolchain"])}
+    - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
 
     Handoff recovery limits:
+    - If an open Orocsy correction is listed above, it overrides any dirty validated checkpoint. Start from the exact file path named in the correction, and do not commit, push, request review, or use older validation evidence until the correction is fixed or explicitly blocked.
     - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
     - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
-    - If the focused diff is complete, run the smallest validation for the dirty files, then commit, push the current branch, and request/update Codex review.
-    - If validation or permissions block handoff, record an Orocsy correction with the exact blocker and stop.
+    - If the focused diff is complete and the dirty handoff checkpoint already lists current passed validation/gate evidence for those dirty files, do not rerun the same validation command; use the recorded evidence, then commit, push the current branch, and request/update Codex review.
+    - If validation evidence is missing, stale, or the focused diff changed after evidence was recorded, run the smallest validation for the dirty files before committing.
+    - If focused validation fails and names exact in-scope files, assertions, missing columns, missing exports, or required contract symbols, make that smallest in-scope fix first, rerun the same focused validation, then continue handoff.
+    - Record an Orocsy correction and stop only when validation lacks an actionable in-scope target, a required dependency/credential is missing, permissions block the command, or the needed edit is outside the issue write scope.
     """
     |> String.trim()
+  end
+
+  defp handoff_recovery_checkpoint_guidance(checkpoint_event, true) do
+    "`#{checkpoint_event}` after making or explicitly blocking the scoped correction fix. Do not use older handoff evidence while any open correction remains."
+  end
+
+  defp handoff_recovery_checkpoint_guidance(checkpoint_event, _correction_active?) do
+    "focused validation such as `#{checkpoint_event}`, or a scoped blocker only if validation cannot name an in-scope fix target."
   end
 
   defp integration_prompt_context(preflight) do
@@ -802,6 +912,37 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp toolchain_guidance(_toolchain), do: "Toolchain availability is unknown; record exact command failures as blockers."
 
+  defp validation_guidance(toolchain, open_corrections) do
+    [toolchain_guidance(toolchain), playwright_correction_guidance(open_corrections)]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" ")
+  end
+
+  defp playwright_correction_guidance(open_corrections) when is_list(open_corrections) do
+    text =
+      open_corrections
+      |> Enum.flat_map(fn correction ->
+        [
+          correction["summary"],
+          correction["findings"],
+          correction["required_corrections"]
+        ]
+        |> List.flatten()
+      end)
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    if String.contains?(text, ["playwright", "chrome", "chromium"]) and
+         String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"]) do
+      "For Playwright browser validation blocked by local Chrome/sandbox or missing Chromium, do not rerun the Chrome-default command. Prefix the focused command with `PLAYWRIGHT_CHANNEL=chromium PLAYWRIGHT_BROWSERS_PATH=0` and keep `--workers=1`; if the local browser is still missing, record that blocker instead of opening repeated Chrome sessions."
+    else
+      ""
+    end
+  end
+
+  defp playwright_correction_guidance(_open_corrections), do: ""
+
   defp executable_available?(executables, name) do
     get_in(executables, [name, "available"]) == true
   end
@@ -920,6 +1061,65 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp compact_feedback_body(_body), do: nil
+
+  defp open_correction_summaries(workspace) when is_binary(workspace) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> Enum.take(5)
+    |> Enum.map(&open_correction_summary/1)
+  rescue
+    _error -> []
+  end
+
+  defp open_correction_summaries(_workspace), do: []
+
+  defp open_correction_summary(%{} = correction) do
+    %{
+      "correction_id" => correction["correction_id"],
+      "summary" => compact_feedback_body(correction["summary"]),
+      "findings" => compact_correction_list(correction["findings"]),
+      "required_corrections" => compact_correction_list(correction["required_corrections"]),
+      "artifacts" => correction["artifacts"]
+    }
+    |> Enum.reject(fn {_key, value} -> blank?(value) or value == [] or value == %{} end)
+    |> Map.new()
+  end
+
+  defp compact_correction_list(values) when is_list(values) do
+    values
+    |> Enum.flat_map(&correction_string_values/1)
+    |> Enum.take(3)
+    |> Enum.map(&compact_feedback_body/1)
+    |> Enum.reject(&blank?/1)
+  end
+
+  defp compact_correction_list(value) when is_binary(value), do: [compact_feedback_body(value)]
+  defp compact_correction_list(_value), do: []
+
+  defp correction_string_values(values) when is_list(values), do: Enum.flat_map(values, &correction_string_values/1)
+  defp correction_string_values(value) when is_binary(value), do: [value]
+  defp correction_string_values(_value), do: []
+
+  defp format_corrections(corrections) when is_list(corrections) and corrections != [] do
+    corrections
+    |> Enum.map_join("\n", fn correction ->
+      id = correction["correction_id"] || "unknown-correction"
+      summary = correction["summary"] || "Open correction"
+      findings = format_correction_lines("Finding", correction["findings"])
+      required = format_correction_lines("Required", correction["required_corrections"])
+
+      "- #{id}: #{summary}#{findings}#{required}"
+    end)
+  end
+
+  defp format_corrections(_corrections), do: "none"
+
+  defp format_correction_lines(label, values) when is_list(values) and values != [] do
+    values
+    |> Enum.map_join("", fn value -> "\n  #{label}: #{indent_multiline(value, "  ")}" end)
+  end
+
+  defp format_correction_lines(_label, _values), do: ""
 
   defp format_items(items) when is_list(items) and items != [] do
     items

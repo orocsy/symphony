@@ -112,10 +112,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp clean_worktree?(workspace) when is_binary(workspace) do
     with {:ok, status} <- git_status(workspace) do
-      status
-      |> String.split("\n", trim: true)
-      |> Enum.reject(&String.starts_with?(&1, "##"))
-      |> Enum.empty?()
+      substantive_status_lines(status) == []
     else
       _ -> false
     end
@@ -237,11 +234,11 @@ defmodule SymphonyElixir.PromptBuilder do
 
     Core workflow policy:
     - Work only the current issue and its declared write scope. Use the Linear issue, focused issue brief, current code, and current PR review as source of truth.
-    - Start from `git status --short --branch`, the issue branch, latest `origin/main`, and the focused files named by the issue/brief. Avoid broad logs, historical tickets, unrelated docs, and unrelated GitHub/Linear data.
+    - Start from `git status --short --branch`, the issue branch, the runtime dispatch preflight Base/PR target branch when listed (otherwise latest `origin/main`), and the focused files named by the issue/brief. Avoid broad logs, historical tickets, unrelated docs, and unrelated GitHub/Linear data.
     - If `.codex/agentic/issue-briefs/#{safe_issue_identifier(issue_value(issue, :identifier))}.md` exists, read that focused brief before broad rediscovery.
     - First substantive progress guard: before optional skills, broad docs, recursive listings, or scanning more than eight implementation files, produce one real checkpoint:
       - Rework/existing PR: inspect only the current PR review threads for this branch, classify current-head feedback, then append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. After that, edit only the referenced in-scope files or record a blocker; do not rediscover the whole project.
-      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from `origin/main` if needed, read the issue brief plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
+      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the issue brief plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
       - Blocked issue: create an Orocsy inbox correction with the exact blocker and stop.
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
     - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
@@ -303,8 +300,16 @@ defmodule SymphonyElixir.PromptBuilder do
     Review rework execution contract:
 
     - Treat this as a bounded PR review fix, not a fresh implementation turn.
-    - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff, run the smallest validation needed for that diff, then commit, push, and request fresh review.
-    - If no dirty/local handoff checkpoint appears above, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. The current-head review feedback is already in this prompt, so classify it from the prompt before reading code.
+    - Before using a dirty/local handoff checkpoint or the `review-feedback-classified`
+      first-action shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`.
+      If guidance or dispatch preflight reports any open Orocsy correction, that
+      correction overrides review-rework shortcuts: read only the exact named
+      code/test file, make the smallest in-scope fix or record a scoped blocker,
+      run focused validation, and resolve the correction only after evidence is
+      recorded. Do not append `review-feedback-classified`, retry browser
+      validation-only, commit, push, or request review while any correction is open.
+    - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff and run the smallest validation needed for that diff. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit, push, and request fresh review after validation passes.
+    - If no open correction and no dirty/local handoff checkpoint appears above, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. The current-head review feedback is already in this prompt, so classify it from the prompt before reading code.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first code/test edit unless the listed feedback path is one of those files.
     - Do not run `rg`, `grep`, `find`, `ls`, `git ls-files`, `gh api`, shell pipelines, or chained shell commands in review-rework mode; the current-head feedback body and target file path are already in this prompt.
     - After the `review-feedback-classified` checkpoint, start from the listed review feedback path. Read one short `sed -n` range around that path only, then edit only directly related code/tests or record a blocker.
@@ -356,7 +361,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Integration check execution contract:
 
     - Treat PR mergeability conflict resolution as the first task; it supersedes pushed-handoff waiting.
-    - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff, run the smallest validation needed for that diff, then commit, push, and request fresh review before any broad rediscovery.
+    - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff and run the smallest validation needed for that diff. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit, push, and request fresh review after validation passes.
     - Start from `git status --short --branch`, then fetch the PR target branch and expose conflicts with a bounded merge/rebase check.
     - Immediately after confirming the current branch/status, and before any GitHub PR lookup, conflict scan, diff, or file read, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.integration-check-started --status passed --phase handoff --step "integration branch/status confirmed" --tool "integration-handoff-preflight"`.
     - Before broad reads, append a `technical-miu-trace` event naming only the conflicted/write-scope paths, validation commands, PR number or missing-PR finding, and same-branch push target.
@@ -531,7 +536,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - This is retry attempt ##{attempt} because the issue is still active after an interrupted or failed agent turn.
     - Resume from the current workspace state; inspect `git status --short --branch`, recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
     - If the workspace is dirty or ahead and recent `tool.finished`, `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope` events passed, treat that as a dirty handoff checkpoint.
-    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read, then run the smallest validation needed for the dirty files before making any additional product edit.
+    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read. If the checkpoint already lists passed validation/gate evidence for the dirty files and the diff has not changed since that evidence, do not rerun the same validation command; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
     - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
     - After focused validation passes, immediately `git add -A`, commit, push the existing branch to its configured PR head, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
@@ -608,7 +613,7 @@ defmodule SymphonyElixir.PromptBuilder do
   defp truncate_issue_description(_description), do: "unknown"
 
   defp git_status(workspace) do
-    case System.cmd("git", ["status", "--short", "--branch"], cd: workspace, stderr_to_stdout: true) do
+    case System.cmd("git", ["status", "--short", "--branch", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true) do
       {status, 0} -> {:ok, String.trim(status)}
       {error, _exit_code} -> {:error, error}
     end
@@ -619,7 +624,7 @@ defmodule SymphonyElixir.PromptBuilder do
   defp local_handoff_risk?(status) when is_binary(status) do
     lines = String.split(status, "\n", trim: true)
     branch_line = List.first(lines) || ""
-    dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+    dirty_lines = substantive_status_lines(status)
 
     dirty_lines != [] or String.contains?(branch_line, ["ahead", "diverged"])
   end
@@ -659,7 +664,7 @@ defmodule SymphonyElixir.PromptBuilder do
   defp pushed_handoff_risk?(status) when is_binary(status) do
     lines = String.split(status, "\n", trim: true)
     branch_line = List.first(lines) || ""
-    dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+    dirty_lines = substantive_status_lines(status)
     branch = status_branch_name(branch_line)
 
     dirty_lines == [] and clean_tracking_branch?(branch_line) and handoff_branch?(branch)
@@ -689,6 +694,51 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp status_branch_name(_branch_line), do: nil
 
+  defp substantive_status_lines(status) when is_binary(status) do
+    status
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&String.starts_with?(&1, "##"))
+    |> Enum.reject(&orchestration_status_line?/1)
+  end
+
+  defp substantive_status_lines(_status), do: []
+
+  defp orchestration_status_line?(line) when is_binary(line) do
+    line
+    |> status_line_paths()
+    |> case do
+      [] -> false
+      paths -> Enum.all?(paths, &orchestration_status_path?/1)
+    end
+  end
+
+  defp orchestration_status_line?(_line), do: false
+
+  defp status_line_paths(line) when is_binary(line) do
+    path_part =
+      if String.length(line) > 3 do
+        String.slice(line, 3..-1//1)
+      else
+        line
+      end
+
+    path_part
+    |> String.split(" -> ")
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(&String.trim(&1, ~s(")))
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp orchestration_status_path?(path) when is_binary(path) do
+    String.starts_with?(path, [
+      ".codex/agentic/issue-briefs/",
+      ".orocsy/",
+      ".codex/delivery/"
+    ])
+  end
+
+  defp orchestration_status_path?(_path), do: false
+
   defp dirty_validated_handoff_checkpoint(status, event_summary) do
     """
     Dirty validated handoff checkpoint:
@@ -698,9 +748,11 @@ defmodule SymphonyElixir.PromptBuilder do
     #{indent(status)}
     - Recent passed validation/gate evidence:
     #{indent(event_summary)}
-    - First action: inspect the focused diff with `git diff -- <dirty-file>`, then run the smallest focused validation for that dirty file before committing.
+    - First action: inspect the focused diff with `git diff -- <dirty-file>` and compare it to the recent passed validation/gate evidence listed below.
+    - If the focused diff is unchanged since the listed passed evidence, do not rerun the same validation command before committing; use the recorded evidence and proceed to commit, push, PR review request/update, and Linear handoff.
+    - Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
     - Do not run file-discovery commands such as `git ls-files`, `rg`, `grep`, `find`, or `ls`; the dirty file path is already listed in `git status`.
-    - Commit and push only after focused validation passes.
+    - Commit and push only after focused validation passes or after this checkpoint lists current passed evidence covering the focused dirty files.
     - Do not query broad Linear/GitHub context or rerun broad validations before the focused validation unless the focused diff is incomplete or invalid.
     - After the push, request/update PR review and Linear handoff. If network/provider/permission blocks that handoff, record a retry blocker and stop.
     """
@@ -717,7 +769,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - First action: inspect the focused local diff and local commits, then run the smallest validation needed for those changed files.
     - If the focused diff is complete and validation passes, commit any dirty intended files, push the branch, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
-    - Do not redo implementation, broad codebase scans, or broad validations first unless the focused diff is incomplete, invalid, or a current review thread requires another code change.
+    - Do not restart or broaden implementation. Edit again only when the focused diff is incomplete, invalid, focused validation names exact in-scope files/assertions, or a current review thread requires another code change.
     - If network/provider/permission blocks handoff, record the blocker with next action `retry` and stop.
     """
     |> String.trim()
@@ -806,17 +858,17 @@ defmodule SymphonyElixir.PromptBuilder do
         nil -> nil
       end
 
-    last_blocked_index =
-      indexed
-      |> Enum.filter(fn {event, _index} -> blocking_event?(event) end)
-      |> List.last()
-      |> case do
-        {_event, index} -> index
-        nil -> nil
+    trailing_blockers =
+      if is_integer(last_passed_index) do
+        events
+        |> Enum.drop(last_passed_index + 1)
+        |> Enum.filter(&blocking_event?/1)
+      else
+        []
       end
 
-    is_integer(last_passed_index) and is_integer(last_blocked_index) and
-      last_blocked_index > last_passed_index
+    trailing_blockers != [] and
+      not Enum.all?(trailing_blockers, &ignorable_handoff_recovery_blocker?/1)
   end
 
   defp blocked_event_after_last_passed?(_events), do: false
@@ -835,6 +887,32 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp blocking_event?(_decoded), do: false
+
+  defp ignorable_handoff_recovery_blocker?(%{} = decoded) do
+    text = decoded |> blocker_signal_text() |> String.downcase()
+
+    harness_validation_blocker? =
+      String.contains?(text, [
+        "blocked before spec execution",
+        "turbopackinternalerror",
+        "symlink [project]/node_modules",
+        "points out of the filesystem root",
+        "workspace/toolchain filesystem symlink blocker"
+      ])
+
+    generated_cleanup_allowlist_probe? =
+      Map.get(decoded, "event") == "symphony.generated.cleanup" and
+        String.contains?(text, "not in the generated-clean allowlist")
+
+    harness_validation_blocker? or generated_cleanup_allowlist_probe?
+  end
+
+  defp ignorable_handoff_recovery_blocker?(_decoded), do: false
+
+  defp blocker_signal_text(decoded) when is_map(decoded) do
+    decoded
+    |> inspect(limit: :infinity, printable_limit: :infinity)
+  end
 
   defp passed_validation_event_decoded?(%{"event" => event} = decoded) when is_binary(event) do
     event in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or

@@ -1367,6 +1367,109 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "provider usage-limit failures park even when a product correction is open" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-provider-usage-limit-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-usage-limit-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-USAGE-LIMIT",
+        state: "Rework",
+        title: "Usage limited worker",
+        description: "Worker should park provider quota",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, _product_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "controller-validation",
+                 source_status: "failed",
+                 summary: "Fix tests/e2e/ui-state-matrix.spec.ts before validation retry",
+                 findings: [
+                   "tests/e2e/ui-state-matrix.spec.ts still needs a code/test fix."
+                 ],
+                 required_corrections: [
+                   "Edit tests/e2e/ui-state-matrix.spec.ts and rerun focused validation."
+                 ],
+                 next_action: "retry"
+               })
+
+      ref = make_ref()
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{issue_id => running_entry},
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      {:noreply, state} =
+        Orchestrator.handle_info(
+          {:DOWN, ref, :process, self(),
+           {%RuntimeError{
+              message: ~s(Agent run failed: {:codex_error, %{"error" => %{"codexErrorInfo" => "usageLimitExceeded", "message" => "You've hit your usage limit."}, "willRetry" => false}})
+            }, []}},
+          state
+        )
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      corrections =
+        workspace
+        |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+        |> Path.wildcard()
+        |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+
+      provider_correction =
+        Enum.find(corrections, &(&1["source"] == "symphony.runtime.provider-usage-limit"))
+
+      assert provider_correction
+      assert provider_correction["next_action"] == "retry"
+      assert provider_correction["summary"] =~ "usageLimitExceeded"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "provider-usage-limit"
+      assert body =~ "usageLimitExceeded"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "retryable worker failures park after the configured retry budget" do
     test_root =
       Path.join(
@@ -3050,6 +3153,114 @@ defmodule SymphonyElixir.CoreTest do
     refute_receive {:memory_tracker_state_update, "issue-cod-187-missing-review-request", "Rework"}, 50
   end
 
+  test "review monitor moves Human Review PR with failed current-head check to rework" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    head_sha = "52b57fa160c80351278fdf5f47db5db8e066fd6c"
+
+    issue = %Issue{
+      id: "issue-cod-261-failed-check",
+      identifier: "COD-261",
+      title: "UI State E2E TDD: Route Interaction Matrix",
+      state: "Human Review",
+      branch_name: "orocsy/cod-261-ui-state-e2e-tdd-route-interaction-matrix"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 101,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/101",
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/cod-261-ui-state-e2e-tdd-route-interaction-matrix"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/101" ->
+          {:ok,
+           %{
+             "number" => 101,
+             "html_url" => "https://github.com/acme/nutribuddy/pull/101",
+             "head" => %{
+               "sha" => head_sha,
+               "ref" => "orocsy/cod-261-ui-state-e2e-tdd-route-interaction-matrix"
+             }
+           }}
+
+        endpoint == "repos/acme/nutribuddy/pulls/101/comments" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/pulls/101/reviews" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/commits/#{head_sha}" ->
+          {:ok, %{"commit" => %{"committer" => %{"date" => "2026-06-26T07:41:00Z"}}}}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/commits/#{head_sha}/check-runs?") ->
+          {:ok,
+           %{
+             "check_runs" => [
+               %{
+                 "name" => "Lint, typecheck, test, build, and smoke",
+                 "status" => "completed",
+                 "conclusion" => "failure",
+                 "completed_at" => "2026-06-26T07:45:45Z",
+                 "details_url" => "https://github.com/acme/nutribuddy/actions/runs/28224480033/job/83613067033",
+                 "output" => %{
+                   "title" => "pnpm e2e failed",
+                   "summary" => "ui-state-matrix.spec.ts line 116 timed out."
+                 }
+               },
+               %{
+                 "name" => "optional smoke",
+                 "status" => "completed",
+                 "conclusion" => "success",
+                 "completed_at" => "2026-06-26T07:45:45Z"
+               }
+             ]
+           }}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/issues/101/comments?") ->
+          {:ok,
+           [
+             %{
+               "body" => "@codex review",
+               "created_at" => "2026-06-26T07:42:37Z"
+             }
+           ]}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:memory_tracker_state_update, "issue-cod-261-failed-check", "Rework"}
+    assert_receive {:memory_tracker_comment, "issue-cod-261-failed-check", body}
+    assert body =~ "Lint, typecheck, test, build, and smoke failure"
+    assert body =~ "pnpm e2e failed"
+    assert body =~ "actions/runs/28224480033"
+  end
+
   test "review monitor advances clean Codex result from secondary review state" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -3927,7 +4138,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "classified handoff correction resolves when dirty progress is fresh before correction" do
+  test "classified handoff correction resolves when same-turn dirty progress precedes correction" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -3985,7 +4196,7 @@ defmodule SymphonyElixir.CoreTest do
 
       fresh_progress_time =
         DateTime.utc_now()
-        |> DateTime.add(-5, :second)
+        |> DateTime.add(-25 * 60, :second)
         |> DateTime.to_naive()
         |> NaiveDateTime.to_erl()
 
@@ -5166,6 +5377,104 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight adds chromium guidance for playwright chrome sandbox corrections" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-playwright-chromium-guidance-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "branch" => "orocsy/cod-261",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Resolve the open Orocsy correction before dirty handoff recovery.",
+          "toolchain" => %{
+            "package_manager" => "pnpm",
+            "executables" => %{
+              "corepack" => %{"available" => false},
+              "pnpm" => %{"available" => true}
+            },
+            "package_scripts" => ["test"]
+          },
+          "review" => %{
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/101",
+            "head_sha" => "5e9fd54fa8"
+          },
+          "open_corrections" => [
+            %{
+              "correction_id" => "correction_20260626155312_21719ed6",
+              "summary" => "COD-261 focused Playwright validation still blocked by local Chrome launch sandbox",
+              "findings" => [
+                "Playwright browserType.launch failed because Chrome exited SIGABRT."
+              ],
+              "required_corrections" => [
+                "Retry validation in an environment where Chrome/Playwright can launch."
+              ]
+            }
+          ]
+        })
+      )
+
+      prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+
+      assert prompt =~ "Validation command guidance:"
+      assert prompt =~ "PLAYWRIGHT_CHANNEL=chromium PLAYWRIGHT_BROWSERS_PATH=0"
+      assert prompt =~ "--workers=1"
+      assert prompt =~ "do not rerun the Chrome-default command"
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-261",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Resolve the open Orocsy correction before the review shortcut.",
+          "toolchain" => %{
+            "package_manager" => "pnpm",
+            "executables" => %{
+              "corepack" => %{"available" => false},
+              "pnpm" => %{"available" => true}
+            },
+            "package_scripts" => ["test"]
+          },
+          "review" => %{
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/101",
+            "head_sha" => "5e9fd54fa8",
+            "feedback" => []
+          },
+          "open_corrections" => [
+            %{
+              "correction_id" => "correction_20260626155312_21719ed6",
+              "summary" => "COD-261 focused Playwright validation still blocked by local Chrome launch sandbox",
+              "findings" => [
+                "Playwright browserType.launch failed because Chrome exited SIGABRT."
+              ],
+              "required_corrections" => [
+                "Retry validation in an environment where Chrome/Playwright can launch."
+              ]
+            }
+          ]
+        })
+      )
+
+      review_prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+
+      assert review_prompt =~ "Validation command guidance:"
+      assert review_prompt =~ "PLAYWRIGHT_CHANNEL=chromium PLAYWRIGHT_BROWSERS_PATH=0"
+      assert review_prompt =~ "--workers=1"
+      assert review_prompt =~ "do not rerun the Chrome-default command"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "dispatch preflight uses focused issue brief to find final integration PR feedback" do
     test_root =
       Path.join(
@@ -5698,11 +6007,14 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
-      assert preflight["first_task"] =~ "Recover the existing dirty/local handoff"
+      assert preflight["first_task"] =~ "Recover the existing dirty/local handoff checkpoint"
+      assert preflight["first_task"] =~ "fix exact in-scope validation failures"
 
       prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
       assert prompt =~ "Mode: handoff recovery"
       assert prompt =~ "Dirty workspace recovery is the only task"
+      assert prompt =~ "focused validation fails and names exact in-scope files"
+      assert prompt =~ "Record an Orocsy correction and stop only when validation lacks an actionable in-scope target"
       refute prompt =~ "Mode: fresh implementation"
     after
       File.rm_rf(test_root)
@@ -5755,6 +6067,127 @@ defmodule SymphonyElixir.CoreTest do
 
       assert preflight["first_task"] =~ "Start with the first MIU"
       refute preflight["first_task"] =~ "Recover the existing dirty/local handoff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight ignores copied issue briefs when classifying fresh implementation work" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-brief-dirty-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-219",
+        identifier: "COD-219",
+        title: "D1 Schema And Migration Smoke Implementation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-219-d1-schema-and-migration-smoke-implementation",
+        description:
+          "## Ticket Type\n\nimplementation\n\n## Runtime Problem\n\nCreate the D1 schema and local migration smoke foundation.\n\n## Write Scope\n\n- `migrations/`\n\n## Validation\n\n```bash\nwrangler d1 migrations apply DB --local\n```\n"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-219-d1-schema-and-migration-smoke-implementation"], cd: workspace, stderr_to_stdout: true)
+
+      brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
+      File.mkdir_p!(brief_dir)
+      File.write!(Path.join(brief_dir, "COD-219.md"), "# COD-219\n\nFocused schema brief.\n")
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["first_task"] =~ "Start with the first MIU"
+      refute preflight["first_task"] =~ "Recover the existing dirty/local handoff"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Issue technical brief is available on disk."
+      assert prompt =~ ".codex/agentic/issue-briefs/COD-219.md"
+      assert prompt =~ "Mode: fresh implementation"
+      refute prompt =~ "Mode: handoff recovery"
+      refute prompt =~ "Local handoff recovery checkpoint"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight routes validated ahead in-progress implementation branches to handoff recovery" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-validated-ahead-handoff-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-215",
+        identifier: "COD-215",
+        title: "Cloudflare Provider Implementation",
+        state: "In Progress",
+        branch_name: "orocsy/cod-215-cloudflare-provider-implementation",
+        description:
+          "## Ticket Type\n\nimplementation\n\n## Runtime Problem\n\nComplete provider handoff.\n\n## Write Scope\n\n- `src/lib/providers/*`\n\n## Validation\n\n```bash\npnpm exec vitest run tests/unit/lib/providers\n```\n"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-cloudflare-infra-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-215-cloudflare-provider-implementation"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nProvider handoff.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add provider handoff"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-cloudflare-infra-integration"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(events_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "tool.finished",
+          "tool" => "gate.post-miu",
+          "command" => "pnpm exec vitest run tests/unit/lib/providers",
+          "status" => "passed",
+          "ts" => "2026-06-01T02:00:00Z"
+        }) <> "\n"
+      )
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["branch"] == "orocsy/cod-215-cloudflare-provider-implementation"
+      assert preflight["first_task"] =~ "Recover the existing dirty/local handoff checkpoint"
+      refute preflight["first_task"] =~ "Start with the first MIU"
     after
       File.rm_rf(test_root)
     end
@@ -7663,7 +8096,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "rescue resolves validation blocker for bounded validation rework" do
+  test "rescue keeps concrete validation blocker open for bounded validation rework" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -7718,21 +8151,18 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
-      assert_receive {:memory_tracker_comment, "issue-validation-blocker-rescue", body}
-      assert body =~ "validation blocker"
-      assert body =~ "pnpm exec next build --webpack"
+      refute_receive {:memory_tracker_comment, "issue-validation-blocker-rescue", _body}, 50
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
-      resolved = correction_path |> File.read!() |> Jason.decode!()
-      assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "validation_rework_needed"
-      refute Workspace.blocking_correction_in_workspace?(workspace)
+      kept = correction_path |> File.read!() |> Jason.decode!()
+      assert kept["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "rescue resolves legacy validation command correction for bounded validation rework" do
+  test "rescue keeps legacy concrete validation command correction open for bounded validation rework" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -7788,14 +8218,146 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
-      assert_receive {:memory_tracker_comment, "issue-legacy-validation-rescue", body}
-      assert body =~ "validation blocker"
+      refute_receive {:memory_tracker_comment, "issue-legacy-validation-rescue", _body}, 50
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
-      resolved = correction_path |> File.read!() |> Jason.decode!()
-      assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "validation_rework_needed"
-      refute Workspace.blocking_correction_in_workspace?(workspace)
+      kept = correction_path |> File.read!() |> Jason.decode!()
+      assert kept["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "rescue keeps handoff validation failure correction open for bounded validation rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-handoff-validation-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-handoff-validation-rescue",
+        identifier: "MT-HANDOFF-VALIDATION",
+        state: "In Progress",
+        title: "Handoff validation correction rescue",
+        description: "Runtime should redispatch bounded handoff validation rework.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      {:ok, correction} =
+        Workspace.create_correction_in_workspace(workspace, issue, %{
+          source: "COD-214-handoff-recovery",
+          source_status: "blocked",
+          summary: "Focused D1 validation failed; dirty migration is not handoff-ready",
+          findings: [
+            "Command failed: pnpm exec vitest run tests/integration/d1-persistence-contract.test.ts tests/integration/d1-migration-smoke.test.ts. Failure kind: validation. d1-persistence-contract.test.ts failed 5 tests because migrations/0001_d1_persistence_schema.sql is missing expected contract fields/tables."
+          ],
+          required_corrections: [
+            "Update the dirty D1 migration to satisfy the accepted D1 persistence contract."
+          ],
+          next_action: "block"
+        })
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      refute_receive {:memory_tracker_comment, "issue-handoff-validation-rescue", _body}, 50
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      kept = correction_path |> File.read!() |> Jason.decode!()
+      assert kept["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "rescue keeps lowercase focused recovery validation command correction open" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-focused-validation-rescue-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue = %Issue{
+        id: "issue-focused-validation-rescue",
+        identifier: "MT-FOCUSED-VALIDATION",
+        state: "In Progress",
+        title: "Focused validation correction rescue",
+        description: "Runtime should redispatch bounded validation rework.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      {:ok, correction} =
+        Workspace.create_correction_in_workspace(workspace, issue, %{
+          source: "runtime-dispatch-preflight",
+          source_status: "failed",
+          summary: "COD-215 dirty handoff validation failed",
+          findings: [
+            "Focused recovery validation command failed: pnpm exec vitest run tests/unit/lib/providers tests/integration/provider-runtime-contract.test.ts. Failures: expected resolveAiProviderMode('workers-ai') to return 'workers-ai' but got null."
+          ],
+          required_corrections: [
+            "Complete the in-scope provider/env/auth contract work before handoff."
+          ],
+          next_action: "block"
+        })
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
+
+      assert rescued == state
+      refute_receive {:memory_tracker_comment, "issue-focused-validation-rescue", _body}, 50
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      kept = correction_path |> File.read!() |> Jason.decode!()
+      assert kept["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
     after
       File.rm_rf(test_root)
     end
@@ -9291,6 +9853,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "first abnormal worker exit waits before retrying" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     issue_id = "issue-crash-initial"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :InitialCrashRetryOrchestrator)
@@ -9331,6 +9896,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -9899,6 +10467,63 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder keeps dirty validated handoff when later blocker is harness-only" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-validated-handoff-harness-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      File.write!(Path.join(workspace, "tests/e2e/ui-state-matrix.spec.ts"), "test('matrix placeholder', () => {});\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/e2e/ui-state-matrix.spec.ts"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial matrix spec"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-261-ui-state-e2e-tdd-route-interaction-matrix"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "tests/e2e/ui-state-matrix.spec.ts"), "test('matrix validates shell states', () => {});\n")
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(event_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        """
+        {"event":"tool.finished","status":"passed","tool":"codex-controller-validation","command":"pnpm lint; pnpm typecheck; pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts","ts":"2026-06-26T04:26:37Z"}
+        {"event":"gate.required-evidence","status":"passed","gate":"required-evidence","ts":"2026-06-26T04:31:04Z"}
+        {"event":"gate.declared-scope","status":"passed","gate":"declared-scope","ts":"2026-06-26T04:31:04Z"}
+        {"event":"symphony.generated.cleanup","status":"failed","blocked":[{"path":".next","reason":"path is not in the generated-clean allowlist"}],"ts":"2026-06-26T07:19:57Z"}
+        {"event":"blocker.correction","status":"blocked","command":"pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts -> blocked before spec execution: config.webServer next build failed with TurbopackInternalError: Symlink [project]/node_modules is invalid, it points out of the filesystem root.","ts":"2026-06-26T07:23:32Z"}
+        """
+      )
+
+      issue = %Issue{
+        identifier: "COD-261",
+        title: "UI State E2E TDD: Route Interaction Matrix",
+        description: "Retry flow",
+        state: "Backlog",
+        url: "https://example.org/issues/COD-261",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Dirty validated handoff checkpoint:")
+      assert prompt =~ "codex-controller-validation"
+      assert prompt =~ "do not rerun the same validation command"
+      refute prompt =~ "Local handoff recovery checkpoint:"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder prepends local handoff checkpoint when local work lacks validation proof" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
@@ -9937,7 +10562,8 @@ defmodule SymphonyElixir.CoreTest do
       assert String.starts_with?(prompt, "Local handoff recovery checkpoint:")
       assert prompt =~ "no recent passed Orocsy validation/gate evidence"
       assert prompt =~ "run the smallest validation needed for those changed files"
-      assert prompt =~ "Do not redo implementation"
+      assert prompt =~ "Do not restart or broaden implementation"
+      assert prompt =~ "focused validation names exact in-scope files/assertions"
       assert prompt =~ "Ticket MT-203"
     after
       File.rm_rf(workspace)

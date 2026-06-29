@@ -242,6 +242,10 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @doc false
+  @spec connect_options_for_test() :: keyword()
+  def connect_options_for_test, do: linear_connect_options()
+
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
     do_fetch_by_states_page(normalize_project_slug_id(project_slug), state_names, assignee_filter, nil, [])
   end
@@ -413,13 +417,77 @@ defmodule SymphonyElixir.Linear.Client do
     Req.post(Config.settings!().tracker.endpoint,
       headers: headers,
       json: payload,
-      connect_options: [
-        timeout: @connect_timeout_ms,
-        transport_opts: [cacertfile: System.get_env("SSL_CERT_FILE") || "/etc/ssl/cert.pem"]
-      ],
+      connect_options: linear_connect_options(),
       receive_timeout: @request_timeout_ms
     )
   end
+
+  defp linear_connect_options do
+    [
+      timeout: @connect_timeout_ms,
+      transport_opts: [cacertfile: System.get_env("SSL_CERT_FILE") || "/etc/ssl/cert.pem"]
+    ]
+    |> maybe_add_env_proxy()
+  end
+
+  defp maybe_add_env_proxy(connect_options) do
+    case env_proxy_options() do
+      [] -> connect_options
+      proxy_options -> Keyword.merge(connect_options, proxy_options)
+    end
+  end
+
+  defp env_proxy_options do
+    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+    |> Enum.find_value(fn name ->
+      name
+      |> System.get_env()
+      |> proxy_options_from_env_value()
+    end)
+    |> case do
+      nil -> []
+      proxy_options -> proxy_options
+    end
+  end
+
+  defp proxy_options_from_env_value(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> proxy_options_from_trimmed_value()
+  end
+
+  defp proxy_options_from_env_value(_value), do: nil
+
+  defp proxy_options_from_trimmed_value(""), do: nil
+
+  defp proxy_options_from_trimmed_value(value) do
+    value
+    |> normalize_proxy_url()
+    |> URI.parse()
+    |> proxy_options_from_uri()
+  end
+
+  defp normalize_proxy_url(value) do
+    if String.contains?(value, "://"), do: value, else: "http://" <> value
+  end
+
+  defp proxy_options_from_uri(%URI{scheme: scheme, host: host} = uri)
+       when scheme in ["http", "https"] and is_binary(host) do
+    port = uri.port || default_proxy_port(scheme)
+    scheme_atom = if scheme == "https", do: :https, else: :http
+    proxy_options = [proxy: {scheme_atom, host, port, []}]
+
+    case uri.userinfo do
+      nil -> proxy_options
+      "" -> proxy_options
+      userinfo -> Keyword.put(proxy_options, :proxy_headers, [{"proxy-authorization", "Basic " <> Base.encode64(userinfo)}])
+    end
+  end
+
+  defp proxy_options_from_uri(_uri), do: nil
+
+  defp default_proxy_port("http"), do: 80
+  defp default_proxy_port("https"), do: 443
 
   defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
     issues =
