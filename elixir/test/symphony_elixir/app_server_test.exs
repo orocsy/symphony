@@ -3700,6 +3700,108 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server blocks chrome-default playwright retry for browser launch corrections" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-playwright-chromium-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PLAYWRIGHT-GUARD")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      correction_file = Path.join(inbox_dir, "correction_20260626160144_0a19a053.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PLAYWRIGHT-GUARD",
+          "branch" => "orocsy/mt-review-playwright-guard",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(
+        correction_file,
+        Jason.encode!(%{
+          "correction_id" => "correction_20260626160144_0a19a053",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Focused Playwright validation blocked by local Chrome launch sandbox",
+          "findings" => [
+            "browserType.launch failed because Google Chrome exited SIGABRT; cleanup logged kill EPERM."
+          ],
+          "required_corrections" => [
+            "Retry focused validation with the safe Chromium channel."
+          ]
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-playwright-guard"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-playwright-guard"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-playwright-guard",
+        identifier: "MT-REVIEW-PLAYWRIGHT-GUARD",
+        title: "Review rework Playwright guard",
+        description: "Chrome-default Playwright retries should be blocked under browser launch corrections",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PLAYWRIGHT-GUARD",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Continue validation rework", issue)
+
+      assert command ==
+               "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"
+
+      assert pattern == "playwright_chrome_sandbox_correction_requires_chromium_channel"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows bounded exact test file rg during review rework validation" do
     test_root =
       Path.join(

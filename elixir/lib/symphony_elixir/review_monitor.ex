@@ -634,6 +634,13 @@ defmodule SymphonyElixir.ReviewMonitor do
   defp fetch_current_feedback(_repo, nil, _comments, _reviews), do: {:ok, [], :no_pr}
 
   defp fetch_current_feedback(repo, pr, comments, reviews) do
+    with {:ok, review_feedback, source} <- fetch_current_review_feedback(repo, pr, comments, reviews),
+         {:ok, check_feedback} <- fetch_current_check_feedback(repo, pr) do
+      {:ok, review_feedback ++ check_feedback, feedback_source_with_checks(source, check_feedback)}
+    end
+  end
+
+  defp fetch_current_review_feedback(repo, pr, comments, reviews) do
     if review_threads_enabled?() do
       case fetch_pull_review_threads(repo, pr) do
         {:ok, threads} ->
@@ -651,6 +658,62 @@ defmodule SymphonyElixir.ReviewMonitor do
       fetch_rest_current_feedback(repo, pr, comments, reviews)
     end
   end
+
+  defp feedback_source_with_checks(source, []), do: source
+  defp feedback_source_with_checks(_source, _checks), do: :github_checks
+
+  defp fetch_current_check_feedback(repo, pr) when is_binary(repo) and is_map(pr) do
+    case head_sha(pr) do
+      sha when is_binary(sha) and sha != "" ->
+        endpoint =
+          "repos/#{repo}/commits/#{sha}/check-runs?" <>
+            URI.encode_query(%{filter: "latest", per_page: 100})
+
+        case github_api(endpoint) do
+          {:ok, %{"check_runs" => runs}} when is_list(runs) ->
+            {:ok, failed_check_run_feedback(runs)}
+
+          {:ok, payload} ->
+            Logger.debug("Review monitor ignored unexpected check-runs payload for #{repo}@#{short_sha(sha)}: #{inspect(payload)}")
+            {:ok, []}
+
+          {:error, reason} ->
+            Logger.debug("Review monitor could not inspect check runs for #{repo}@#{short_sha(sha)}: #{inspect(reason)}")
+            {:ok, []}
+        end
+
+      _ ->
+        {:ok, []}
+    end
+  end
+
+  defp fetch_current_check_feedback(_repo, _pr), do: {:ok, []}
+
+  defp failed_check_run_feedback(runs) when is_list(runs) do
+    runs
+    |> Enum.filter(&failed_check_run?/1)
+    |> Enum.map(&%{type: :check, payload: &1})
+  end
+
+  defp failed_check_run_feedback(_runs), do: []
+
+  defp failed_check_run?(run) when is_map(run) do
+    conclusion =
+      run
+      |> Map.get("conclusion", "")
+      |> to_string()
+      |> String.downcase()
+
+    status =
+      run
+      |> Map.get("status", "")
+      |> to_string()
+      |> String.downcase()
+
+    status == "completed" and conclusion in ["failure", "timed_out", "action_required", "cancelled"]
+  end
+
+  defp failed_check_run?(_run), do: false
 
   defp fetch_rest_current_feedback(repo, pr, comments, reviews) do
     repo
@@ -887,6 +950,10 @@ defmodule SymphonyElixir.ReviewMonitor do
     created_at(review) || datetime_from_iso8601(review["submitted_at"])
   end
 
+  defp review_feedback_created_at(%{type: :check, payload: check}) do
+    datetime_from_iso8601(check["completed_at"] || check["started_at"] || check["created_at"])
+  end
+
   defp review_feedback_created_at(_feedback), do: nil
 
   defp created_at(%{} = payload) do
@@ -1095,6 +1162,18 @@ defmodule SymphonyElixir.ReviewMonitor do
       |> Enum.join(":")
 
     [location, first_body_line(comment["body"]), comment["url"]]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" - ")
+  end
+
+  defp feedback_item_summary(%{type: :check, payload: check}) do
+    output = check["output"] || %{}
+
+    [
+      "Check #{check["name"] || check["workflow_name"] || "unknown"} #{check["conclusion"] || check["status"]}",
+      output["title"] || output["summary"],
+      check["details_url"] || check["html_url"]
+    ]
     |> Enum.reject(&blank?/1)
     |> Enum.join(" - ")
   end

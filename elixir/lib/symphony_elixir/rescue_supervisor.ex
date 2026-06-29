@@ -111,28 +111,38 @@ defmodule SymphonyElixir.RescueSupervisor do
     validation_corrections = validation_blocker_corrections(corrections)
     validation_correction_ids = correction_id_list(validation_corrections)
 
-    if validation_blocker_retry_loop_exhausted_without_new_progress?(workspace) do
-      classification = "worker_prompt_defect"
+    concrete_validation_corrections =
+      Enum.filter(validation_corrections, &actionable_code_or_test_correction?/1)
 
-      summary =
-        "#{classification}: repeated validation-blocker retries produced no durable workspace progress after #{@validation_blocker_loop_limit} attempts."
+    cond do
+      concrete_validation_corrections != [] ->
+        Logger.info("Rescue supervisor kept concrete validation correction open for #{issue.identifier}; dispatch preflight will carry the exact file/fix details")
 
-      :ok = Workspace.classify_blocking_corrections_by_id_in_workspace(workspace, validation_correction_ids, classification, summary)
-      _ = Tracker.create_comment(issue.id, validation_blocker_loop_block_comment(issue, validation_corrections))
+        []
 
-      Logger.warning("Rescue supervisor classified #{issue.identifier} as #{classification}; validation blocker retry loop exhausted")
+      validation_blocker_retry_loop_exhausted_without_new_progress?(workspace) ->
+        classification = "worker_prompt_defect"
 
-      [issue.id]
-    else
-      summary =
-        "validation_rework_needed: runtime captured a failed validation command; redispatch a bounded worker to fix the validation failure or record a scoped blocker."
+        summary =
+          "#{classification}: repeated validation-blocker retries produced no durable workspace progress after #{@validation_blocker_loop_limit} attempts."
 
-      :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, validation_correction_ids, summary)
-      _ = Tracker.create_comment(issue.id, validation_rework_comment(issue, validation_corrections))
+        :ok = Workspace.classify_blocking_corrections_by_id_in_workspace(workspace, validation_correction_ids, classification, summary)
+        _ = Tracker.create_comment(issue.id, validation_blocker_loop_block_comment(issue, validation_corrections))
 
-      Logger.info("Rescue supervisor classified #{issue.identifier} as validation_rework_needed")
+        Logger.warning("Rescue supervisor classified #{issue.identifier} as #{classification}; validation blocker retry loop exhausted")
 
-      []
+        [issue.id]
+
+      true ->
+        summary =
+          "validation_rework_needed: runtime captured a failed validation command; redispatch a bounded worker to fix the validation failure or record a scoped blocker."
+
+        :ok = Workspace.resolve_blocking_corrections_by_id_in_workspace(workspace, validation_correction_ids, summary)
+        _ = Tracker.create_comment(issue.id, validation_rework_comment(issue, validation_corrections))
+
+        Logger.info("Rescue supervisor classified #{issue.identifier} as validation_rework_needed")
+
+        []
     end
   end
 
@@ -1311,11 +1321,11 @@ defmodule SymphonyElixir.RescueSupervisor do
     source = correction["source"] || ""
     next_action = correction["next_action"] || ""
     summary = correction["summary"] || ""
-    findings = Enum.join(correction["findings"] || [], " ")
-    required = Enum.join(correction["required_corrections"] || [], " ")
+    findings = correction["findings"] |> string_values() |> Enum.join(" ")
+    required = correction["required_corrections"] |> string_values() |> Enum.join(" ")
 
     source in @pending_codex_review_correction_sources or
-      (next_action == "retry" and
+      (next_action == "retry" and not actionable_code_or_test_correction?(correction) and
          (String.contains?(summary, "Codex review") or
             String.contains?(findings, "Codex review") or
             String.contains?(required, "Codex review")))
@@ -1326,6 +1336,23 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp pending_codex_review_corrections(corrections) when is_list(corrections) do
     Enum.filter(corrections, &pending_codex_review_correction?/1)
   end
+
+  defp actionable_code_or_test_correction?(%{} = correction) do
+    text =
+      [
+        correction["summary"],
+        correction["findings"],
+        correction["required_corrections"]
+      ]
+      |> string_values()
+      |> Enum.join(" ")
+      |> String.downcase()
+
+    Regex.match?(~r{\b(?:src|app|apps|packages|lib|tests)/[a-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md)\b}, text) and
+      Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)
+  end
+
+  defp actionable_code_or_test_correction?(_correction), do: false
 
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->

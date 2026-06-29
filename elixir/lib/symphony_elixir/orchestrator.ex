@@ -175,6 +175,14 @@ defmodule SymphonyElixir.Orchestrator do
 
             _ ->
               cond do
+                provider_usage_limit_failure?(reason) ->
+                  Logger.warning(
+                    "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} after Codex provider usage limit; parking until worker quota is available"
+                  )
+
+                  state
+                  |> handle_agent_failure(issue_id, running_entry, reason)
+
                 workflow_blocked_by_open_correction?(running_entry) ->
                   Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; open Orocsy correction blocks retry until resolved")
 
@@ -2558,7 +2566,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !workflow_blocked_by_open_correction?(issue) and
+      workflow_correction_gate_allows_dispatch?(issue) and
       !review_rework_review_request_pending?(issue) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
@@ -2966,7 +2974,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_active_retry(state, issue, attempt, metadata) do
     cond do
-      workflow_blocked_by_open_correction?(issue, metadata) ->
+      not workflow_correction_gate_allows_dispatch?(issue, metadata) ->
         Logger.warning("Retry blocked by open Orocsy correction for #{issue_context(issue)}; waiting for correction resolution")
         {:noreply, release_issue_claim(state, issue.id)}
 
@@ -3132,6 +3140,20 @@ defmodule SymphonyElixir.Orchestrator do
     normalized = String.downcase(text)
 
     cond do
+      provider_usage_limit_failure_text?(normalized) ->
+        %{
+          action: :block,
+          kind: "provider-usage-limit",
+          source_status: "blocked",
+          next_action: "retry",
+          summary: "Symphony stopped because the Codex worker reported usageLimitExceeded before producing code/test progress or validation evidence.",
+          required_corrections: [
+            "Confirm Codex worker quota/credits are available for the same account/session used by Symphony.",
+            "Resolve this runtime correction only after worker capacity is available, then redispatch through Symphony so the original product correction is implemented by a worker.",
+            "Do not run validation-only retries, request review, or merge while this runtime correction and any original code/test correction remain open."
+          ]
+        }
+
       permission_or_input_failure?(normalized) ->
         %{
           action: :block,
@@ -3428,6 +3450,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp token_budget_failure?(text) do
     String.contains?(text, "turn_token_budget_exceeded")
+  end
+
+  defp provider_usage_limit_failure?(reason) do
+    reason
+    |> failure_reason_text()
+    |> String.downcase()
+    |> provider_usage_limit_failure_text?()
+  end
+
+  defp provider_usage_limit_failure_text?(text) do
+    String.contains?(text, [
+      "usagelimitexceeded",
+      "usage limit",
+      "has_credits\":false",
+      "has_credits\" => false",
+      "balance\":\"0",
+      "balance\" => \"0"
+    ])
   end
 
   defp transient_environment_failure?(text) do
@@ -4425,6 +4465,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp workflow_blocked_by_open_correction?(_issue_or_running_entry, _metadata), do: false
 
+  defp workflow_correction_gate_allows_dispatch?(issue_or_identifier, metadata \\ %{})
+
+  defp workflow_correction_gate_allows_dispatch?(issue_or_identifier, metadata) when is_map(metadata) do
+    blocked_targets =
+      issue_or_identifier
+      |> correction_block_check_targets(metadata)
+      |> Enum.filter(&correction_block_check_target_blocked?/1)
+
+    blocked_targets == [] or Enum.all?(blocked_targets, &correction_block_check_target_dispatchable_retry?/1)
+  end
+
+  defp workflow_correction_gate_allows_dispatch?(_issue_or_identifier, _metadata), do: true
+
   defp correction_block_check_targets(issue_or_identifier, metadata) when is_map(metadata) do
     worker_host = normalize_worker_host(Map.get(metadata, :worker_host))
     workspace_path = normalize_workspace_path(Map.get(metadata, :workspace_path))
@@ -4453,6 +4506,68 @@ defmodule SymphonyElixir.Orchestrator do
   defp correction_block_check_target_blocked?({:issue, issue_or_identifier, worker_host}) do
     Workspace.blocking_correction_for_issue?(issue_or_identifier, worker_host)
   end
+
+  defp correction_block_check_target_dispatchable_retry?({:workspace, workspace_path, nil}) do
+    workspace_path
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> dispatchable_retry_corrections?()
+  rescue
+    _error -> false
+  end
+
+  defp correction_block_check_target_dispatchable_retry?({:issue, issue_or_identifier, nil}) do
+    with {:ok, workspace_path} <- Workspace.path_for_issue(issue_or_identifier, nil) do
+      correction_block_check_target_dispatchable_retry?({:workspace, workspace_path, nil})
+    else
+      _ -> false
+    end
+  end
+
+  defp correction_block_check_target_dispatchable_retry?(_target), do: false
+
+  defp dispatchable_retry_corrections?(corrections) when is_list(corrections) do
+    corrections != [] and Enum.all?(corrections, &dispatchable_retry_correction?/1)
+  end
+
+  defp dispatchable_retry_corrections?(_corrections), do: false
+
+  defp dispatchable_retry_correction?(%{} = correction) do
+    normalize_correction_value(correction["status"]) == "open" and
+      normalize_correction_value(correction["next_action"]) == "retry" and
+      is_nil(correction["resolved_at"]) and
+      actionable_code_or_test_correction?(correction)
+  end
+
+  defp dispatchable_retry_correction?(_correction), do: false
+
+  defp actionable_code_or_test_correction?(%{} = correction) do
+    text =
+      [
+        correction["summary"],
+        correction["findings"],
+        correction["required_corrections"]
+      ]
+      |> correction_string_values()
+      |> Enum.join(" ")
+      |> String.downcase()
+
+    Regex.match?(~r{\b(?:src|app|apps|packages|lib|tests)/[a-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md)\b}, text) and
+      Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)
+  end
+
+  defp actionable_code_or_test_correction?(_correction), do: false
+
+  defp correction_string_values(values) when is_list(values), do: Enum.flat_map(values, &correction_string_values/1)
+  defp correction_string_values(value) when is_binary(value), do: [value]
+  defp correction_string_values(_value), do: []
+
+  defp normalize_correction_value(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_correction_value(_value), do: ""
 
   defp normalize_worker_host(worker_host) when is_binary(worker_host) do
     case String.trim(worker_host) do

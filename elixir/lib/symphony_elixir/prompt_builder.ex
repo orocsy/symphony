@@ -300,8 +300,16 @@ defmodule SymphonyElixir.PromptBuilder do
     Review rework execution contract:
 
     - Treat this as a bounded PR review fix, not a fresh implementation turn.
+    - Before using a dirty/local handoff checkpoint or the `review-feedback-classified`
+      first-action shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`.
+      If guidance or dispatch preflight reports any open Orocsy correction, that
+      correction overrides review-rework shortcuts: read only the exact named
+      code/test file, make the smallest in-scope fix or record a scoped blocker,
+      run focused validation, and resolve the correction only after evidence is
+      recorded. Do not append `review-feedback-classified`, retry browser
+      validation-only, commit, push, or request review while any correction is open.
     - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff and run the smallest validation needed for that diff. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit, push, and request fresh review after validation passes.
-    - If no dirty/local handoff checkpoint appears above, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. The current-head review feedback is already in this prompt, so classify it from the prompt before reading code.
+    - If no open correction and no dirty/local handoff checkpoint appears above, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. The current-head review feedback is already in this prompt, so classify it from the prompt before reading code.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first code/test edit unless the listed feedback path is one of those files.
     - Do not run `rg`, `grep`, `find`, `ls`, `git ls-files`, `gh api`, shell pipelines, or chained shell commands in review-rework mode; the current-head feedback body and target file path are already in this prompt.
     - After the `review-feedback-classified` checkpoint, start from the listed review feedback path. Read one short `sed -n` range around that path only, then edit only directly related code/tests or record a blocker.
@@ -528,7 +536,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - This is retry attempt ##{attempt} because the issue is still active after an interrupted or failed agent turn.
     - Resume from the current workspace state; inspect `git status --short --branch`, recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
     - If the workspace is dirty or ahead and recent `tool.finished`, `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope` events passed, treat that as a dirty handoff checkpoint.
-    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read, then run the smallest validation needed for the dirty files before making any additional product edit.
+    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read. If the checkpoint already lists passed validation/gate evidence for the dirty files and the diff has not changed since that evidence, do not rerun the same validation command; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
     - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
     - After focused validation passes, immediately `git add -A`, commit, push the existing branch to its configured PR head, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
@@ -740,9 +748,11 @@ defmodule SymphonyElixir.PromptBuilder do
     #{indent(status)}
     - Recent passed validation/gate evidence:
     #{indent(event_summary)}
-    - First action: inspect the focused diff with `git diff -- <dirty-file>`, then run the smallest focused validation for that dirty file before committing.
+    - First action: inspect the focused diff with `git diff -- <dirty-file>` and compare it to the recent passed validation/gate evidence listed below.
+    - If the focused diff is unchanged since the listed passed evidence, do not rerun the same validation command before committing; use the recorded evidence and proceed to commit, push, PR review request/update, and Linear handoff.
+    - Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
     - Do not run file-discovery commands such as `git ls-files`, `rg`, `grep`, `find`, or `ls`; the dirty file path is already listed in `git status`.
-    - Commit and push only after focused validation passes.
+    - Commit and push only after focused validation passes or after this checkpoint lists current passed evidence covering the focused dirty files.
     - Do not query broad Linear/GitHub context or rerun broad validations before the focused validation unless the focused diff is incomplete or invalid.
     - After the push, request/update PR review and Linear handoff. If network/provider/permission blocks that handoff, record a retry blocker and stop.
     """
@@ -848,17 +858,17 @@ defmodule SymphonyElixir.PromptBuilder do
         nil -> nil
       end
 
-    last_blocked_index =
-      indexed
-      |> Enum.filter(fn {event, _index} -> blocking_event?(event) end)
-      |> List.last()
-      |> case do
-        {_event, index} -> index
-        nil -> nil
+    trailing_blockers =
+      if is_integer(last_passed_index) do
+        events
+        |> Enum.drop(last_passed_index + 1)
+        |> Enum.filter(&blocking_event?/1)
+      else
+        []
       end
 
-    is_integer(last_passed_index) and is_integer(last_blocked_index) and
-      last_blocked_index > last_passed_index
+    trailing_blockers != [] and
+      not Enum.all?(trailing_blockers, &ignorable_handoff_recovery_blocker?/1)
   end
 
   defp blocked_event_after_last_passed?(_events), do: false
@@ -877,6 +887,32 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp blocking_event?(_decoded), do: false
+
+  defp ignorable_handoff_recovery_blocker?(%{} = decoded) do
+    text = decoded |> blocker_signal_text() |> String.downcase()
+
+    harness_validation_blocker? =
+      String.contains?(text, [
+        "blocked before spec execution",
+        "turbopackinternalerror",
+        "symlink [project]/node_modules",
+        "points out of the filesystem root",
+        "workspace/toolchain filesystem symlink blocker"
+      ])
+
+    generated_cleanup_allowlist_probe? =
+      Map.get(decoded, "event") == "symphony.generated.cleanup" and
+        String.contains?(text, "not in the generated-clean allowlist")
+
+    harness_validation_blocker? or generated_cleanup_allowlist_probe?
+  end
+
+  defp ignorable_handoff_recovery_blocker?(_decoded), do: false
+
+  defp blocker_signal_text(decoded) when is_map(decoded) do
+    decoded
+    |> inspect(limit: :infinity, printable_limit: :infinity)
+  end
 
   defp passed_validation_event_decoded?(%{"event" => event} = decoded) when is_binary(event) do
     event in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
