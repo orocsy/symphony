@@ -27,6 +27,7 @@ DELIVERY_ROOT = Path(".orocsy") / "delivery"
 LEGACY_DELIVERY_ROOT = Path(".codex") / "delivery"
 LEGACY_MUTABLE_DELIVERY_PREFIX = ".codex/delivery"
 MUTABLE_DELIVERY_PREFIX = ".orocsy/delivery"
+TOKEN_TELEMETRY_ROOT = DELIVERY_ROOT / "token-telemetry"
 SCHEMA_VERSION = 1
 
 DEFAULT_FORBIDDEN_TERMS: tuple[str, ...] = ()
@@ -1115,6 +1116,137 @@ def load_events(repo: Path) -> list[dict[str, Any]]:
     return events
 
 
+def token_telemetry_root(repo: Path) -> Path:
+    return repo / TOKEN_TELEMETRY_ROOT
+
+
+def token_workers_path(repo: Path) -> Path:
+    return token_telemetry_root(repo) / "workers.jsonl"
+
+
+def token_spans_path(repo: Path) -> Path:
+    return token_telemetry_root(repo) / "spans.jsonl"
+
+
+def load_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+
+    records: list[dict[str, Any]] = []
+    for line in read_text(path).splitlines():
+        if not line.strip():
+            continue
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            records.append(decoded)
+    return records
+
+
+def int_field(record: dict[str, Any], key: str) -> int:
+    value = record.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def filter_token_records(
+    records: list[dict[str, Any]], *, issue: str = "", worker: str = ""
+) -> list[dict[str, Any]]:
+    filtered = records
+    if issue:
+        filtered = [record for record in filtered if str(record.get("issue") or "") == issue]
+    if worker:
+        filtered = [record for record in filtered if str(record.get("worker_session_id") or "") == worker]
+    return filtered
+
+
+def top_phase_text(summary: dict[str, Any]) -> str:
+    phases = summary.get("top_phases")
+    if not isinstance(phases, list) or not phases:
+        return "-"
+    phase = phases[0] if isinstance(phases[0], dict) else {}
+    name = phase.get("phase") or "-"
+    tokens = int_field(phase, "total_tokens")
+    return f"{name}:{tokens}"
+
+
+def loop_signature_text(summary: dict[str, Any]) -> str:
+    signatures = summary.get("loop_signatures")
+    if isinstance(signatures, list) and signatures:
+        return ",".join(str(signature) for signature in signatures)
+    return "-"
+
+
+def token_summary_payload(repo: Path, *, issue: str = "", worker: str = "", limit: int = 10) -> dict[str, Any]:
+    records = filter_token_records(load_jsonl_records(token_workers_path(repo)), issue=issue, worker=worker)
+    records = sorted(records, key=lambda record: int_field(record, "total_tokens"), reverse=True)
+    limited = records[: max(limit, 0)]
+    top = limited[0] if limited else None
+
+    return {
+        "status": "passed" if records else "warn",
+        "telemetry_root": str(token_telemetry_root(repo)),
+        "count": len(records),
+        "total_tokens": sum(int_field(record, "total_tokens") for record in records),
+        "top": top,
+        "workers": limited,
+    }
+
+
+def token_spans_payload(repo: Path, *, issue: str = "", worker: str = "", limit: int = 50) -> dict[str, Any]:
+    records = filter_token_records(load_jsonl_records(token_spans_path(repo)), issue=issue, worker=worker)
+    records = sorted(records, key=lambda record: int_field(record, "total_tokens_delta"), reverse=True)
+
+    return {
+        "status": "passed" if records else "warn",
+        "telemetry_root": str(token_telemetry_root(repo)),
+        "count": len(records),
+        "spans": records[: max(limit, 0)],
+    }
+
+
+def emit_token_summary(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    print(f"Orocsy token summary: {payload['status']}")
+    print(f"telemetry_root: {payload['telemetry_root']}")
+    print(f"workers: {payload['count']}")
+    print(f"total_tokens: {payload['total_tokens']}")
+    for summary in payload["workers"]:
+        issue = summary.get("issue") or "-"
+        worker = summary.get("worker_session_id") or "-"
+        status = summary.get("status") or "-"
+        total = int_field(summary, "total_tokens")
+        cached = int_field(summary, "cached_input_tokens")
+        counted = int_field(summary, "counted_guard_tokens")
+        print(
+            f"- {issue} worker={worker} turn={summary.get('turn') or '-'}"
+            f" status={status} total={total} cached={cached} counted={counted}"
+            f" top_phase={top_phase_text(summary)} loops={loop_signature_text(summary)}"
+        )
+
+
+def emit_token_spans(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    print(f"Orocsy token spans: {payload['status']}")
+    print(f"telemetry_root: {payload['telemetry_root']}")
+    print(f"spans: {payload['count']}")
+    for span in payload["spans"]:
+        issue = span.get("issue") or "-"
+        worker = span.get("worker_session_id") or "-"
+        phase = span.get("phase") or "-"
+        kind = span.get("kind") or "-"
+        total = int_field(span, "total_tokens_delta")
+        fingerprint = span.get("command_fingerprint") or "-"
+        print(f"- {issue} worker={worker} phase={phase} kind={kind} total_delta={total} command={fingerprint}")
+
+
 def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1419,6 +1551,20 @@ def finding_text(finding: Finding) -> str:
     location = f" [{finding.path}]" if finding.path else ""
     detail = f" ({finding.detail})" if finding.detail else ""
     return f"{finding.gate}: {finding.severity}: {finding.message}{location}{detail}"
+
+
+def command_tokens_summary(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    payload = token_summary_payload(repo, issue=args.issue, worker=args.worker, limit=args.limit)
+    emit_token_summary(payload, json_output=args.json)
+    return 0
+
+
+def command_tokens_spans(args: argparse.Namespace) -> int:
+    repo = repo_path(args.repo)
+    payload = token_spans_payload(repo, issue=args.issue, worker=args.worker, limit=args.limit)
+    emit_token_spans(payload, json_output=args.json)
+    return 0
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -1988,6 +2134,22 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("--inbox", action="store_true", help="Create a correction inbox item on failure")
     gate_parser.add_argument("--json", action="store_true", help="Print JSON output")
     gate_parser.set_defaults(func=command_gate)
+
+    tokens_parser = subparsers.add_parser("tokens", help="Token telemetry report commands")
+    tokens_subparsers = tokens_parser.add_subparsers(dest="tokens_command", required=True)
+    tokens_summary_parser = tokens_subparsers.add_parser("summary", help="Summarize worker token telemetry")
+    tokens_summary_parser.add_argument("--issue", default="", help="Filter by issue identifier")
+    tokens_summary_parser.add_argument("--worker", default="", help="Filter by worker session id")
+    tokens_summary_parser.add_argument("--limit", type=int, default=10, help="Maximum worker summaries to print")
+    tokens_summary_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    tokens_summary_parser.set_defaults(func=command_tokens_summary)
+
+    tokens_spans_parser = tokens_subparsers.add_parser("spans", help="List highest token telemetry spans")
+    tokens_spans_parser.add_argument("--issue", default="", help="Filter by issue identifier")
+    tokens_spans_parser.add_argument("--worker", default="", help="Filter by worker session id")
+    tokens_spans_parser.add_argument("--limit", type=int, default=50, help="Maximum spans to print")
+    tokens_spans_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    tokens_spans_parser.set_defaults(func=command_tokens_spans)
 
     eval_parser = subparsers.add_parser("eval", help="LLM/human eval rubric commands")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)

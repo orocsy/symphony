@@ -5508,6 +5508,102 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server writes redacted token telemetry spans for token updates and commands" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-token-telemetry-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-93")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(Path.join([workspace, "src", "app", "api"]))
+      File.write!(Path.join([workspace, "src", "app", "api", "secret.ts"]), "export const value = 1\n")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-93"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-93"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n \\"1,40p\\" src/app/api/secret.ts --token sk_live_secret"}}}'
+            printf '%s\\n' '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"input_tokens":900,"cached_input_tokens":700,"output_tokens":250,"total_tokens":1150}}}}'
+            printf '%s\\n' '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"input_tokens":950,"cached_input_tokens":725,"output_tokens":275,"total_tokens":1225}}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_max_turn_total_tokens: 0
+      )
+
+      issue = %Issue{
+        id: "issue-token-telemetry",
+        identifier: "MT-93",
+        title: "Token telemetry",
+        description: "Ensure token usage is persisted without raw command arguments",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-93",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Record token telemetry", issue)
+
+      spans_path = Path.join(workspace, ".orocsy/delivery/token-telemetry/spans.jsonl")
+
+      spans =
+        spans_path
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(spans, &(&1["kind"] == "worker_start"))
+
+      command_span = Enum.find(spans, &(&1["kind"] == "command"))
+      assert command_span["phase"] == "code_read"
+      assert command_span["command_fingerprint"] == "sed-read-src-app-api-secret.ts"
+      assert command_span["files"] == ["src/app/api/secret.ts"]
+      refute inspect(command_span) =~ "sk_live_secret"
+
+      token_spans = Enum.filter(spans, &(&1["kind"] == "token_update"))
+      assert Enum.map(token_spans, & &1["total_tokens_delta"]) == [1150, 75]
+      assert Enum.map(token_spans, & &1["cached_input_tokens_delta"]) == [700, 25]
+      assert Enum.map(token_spans, & &1["counted_guard_tokens_delta"]) == [200, 25]
+      assert Enum.all?(token_spans, &(&1["command_fingerprint"] == "sed-read-src-app-api-secret.ts"))
+      refute File.read!(spans_path) =~ "sk_live_secret"
+
+      workers_path = Path.join(workspace, ".orocsy/delivery/token-telemetry/workers.jsonl")
+      worker_summary = workers_path |> File.read!() |> String.split("\n", trim: true) |> List.last() |> Jason.decode!()
+
+      assert worker_summary["status"] == "blocked_no_durable_progress"
+      assert worker_summary["total_tokens"] == 1225
+      assert [%{"phase" => "code_read", "total_tokens" => 1225}] = worker_summary["top_phases"]
+      assert File.regular?(Path.join(workspace, ".orocsy/delivery/token-telemetry/summaries/MT-93-thread-93-turn-93-turn-1.md"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server fails when command execution approval is required under safer defaults" do
     test_root =
       Path.join(
