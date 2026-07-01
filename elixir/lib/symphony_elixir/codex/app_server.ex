@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, DispatchPreflight, PathSafety, SSH, Workspace}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, DispatchPreflight, PathSafety, SSH, TokenTelemetry, Workspace}
 
   @initialize_id 1
   @thread_start_id 2
@@ -133,7 +133,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           forbidden_command_patterns: forbidden_command_patterns,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
-          workspace: workspace
+          workspace: workspace,
+          worker_host: worker_host
         },
         prompt,
         issue,
@@ -157,6 +158,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
+        telemetry = start_token_telemetry(workspace, issue, thread_id, turn_id, opts, worker_host)
+        command_guard = Map.put(command_guard, :token_telemetry, telemetry)
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
         emit_message(
@@ -170,32 +173,36 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approvals, command_guard) do
-          {:ok, result} ->
-            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+        try do
+          case await_turn_completion(port, on_message, tool_executor, auto_approvals, command_guard) do
+            {:ok, result} ->
+              Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-            {:ok,
-             %{
-               result: result,
-               session_id: session_id,
-               thread_id: thread_id,
-               turn_id: turn_id
-             }}
+              {:ok,
+               %{
+                 result: result,
+                 session_id: session_id,
+                 thread_id: thread_id,
+                 turn_id: turn_id
+               }}
 
-          {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            {:error, reason} ->
+              Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
-            emit_message(
-              on_message,
-              :turn_ended_with_error,
-              %{
-                session_id: session_id,
-                reason: reason
-              },
-              metadata
-            )
+              emit_message(
+                on_message,
+                :turn_ended_with_error,
+                %{
+                  session_id: session_id,
+                  reason: reason
+                },
+                metadata
+              )
 
-            {:error, reason}
+              {:error, reason}
+          end
+        after
+          TokenTelemetry.stop(telemetry)
         end
 
       {:error, reason} ->
@@ -1448,10 +1455,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
+        observe_token_telemetry(command_guard, payload)
         emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
         {:ok, :turn_completed}
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
+        observe_token_telemetry(command_guard, payload)
+
         emit_turn_event(
           on_message,
           :turn_failed,
@@ -1464,6 +1474,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_failed, Map.get(payload, "params")}}
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
+        observe_token_telemetry(command_guard, payload)
+
         emit_turn_event(
           on_message,
           :turn_cancelled,
@@ -1476,6 +1488,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_cancelled, Map.get(payload, "params")}}
 
       {:ok, %{"method" => "error"} = payload} ->
+        observe_token_telemetry(command_guard, payload)
+
         emit_turn_event(
           on_message,
           :codex_error,
@@ -1489,6 +1503,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
+        observe_token_telemetry(command_guard, payload)
+
         if turn_aborted_payload?(payload) do
           handle_turn_aborted_payload(on_message, payload, payload_string, port)
         else
@@ -1522,6 +1538,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         end
 
       {:ok, payload} ->
+        observe_token_telemetry(command_guard, payload)
+
         if turn_aborted_payload?(payload) do
           handle_turn_aborted_payload(on_message, payload, payload_string, port)
         else
@@ -1555,6 +1573,29 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, command_guard)
     end
+  end
+
+  defp observe_token_telemetry(%{token_telemetry: telemetry}, payload) do
+    TokenTelemetry.observe(telemetry, payload)
+  end
+
+  defp observe_token_telemetry(_command_guard, _payload), do: :ok
+
+  defp start_token_telemetry(workspace, issue, thread_id, turn_id, opts, nil) do
+    TokenTelemetry.start_turn(workspace, issue, thread_id, turn_id, turn_number: Keyword.get(opts, :turn_number, 1))
+  end
+
+  defp start_token_telemetry(workspace, issue, thread_id, turn_id, opts, worker_host) when is_binary(worker_host) do
+    Logger.info("Token telemetry disabled for remote worker_host=#{worker_host}; remote telemetry writes are not implemented")
+
+    TokenTelemetry.disabled_turn(
+      workspace,
+      issue,
+      thread_id,
+      turn_id,
+      turn_number: Keyword.get(opts, :turn_number, 1),
+      reason: :remote_worker_unsupported
+    )
   end
 
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do

@@ -276,6 +276,102 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertIn(payload["status"], {"passed", "warn"})
             self.assertTrue(any(gate["gate"] == "leaks" for gate in payload["gates"]))
 
+    def test_tokens_summary_reports_highest_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            telemetry_root = repo / ".orocsy/delivery/token-telemetry"
+            telemetry_root.mkdir(parents=True)
+            workers = [
+                {
+                    "issue": "COD-1",
+                    "worker_session_id": "worker-1",
+                    "turn": 1,
+                    "status": "productive",
+                    "total_tokens": 1200,
+                    "cached_input_tokens": 600,
+                    "counted_guard_tokens": 500,
+                    "top_phases": [{"phase": "edit", "total_tokens": 900}],
+                    "loop_signatures": [],
+                },
+                {
+                    "issue": "COD-2",
+                    "worker_session_id": "worker-2",
+                    "turn": 2,
+                    "status": "blocked_no_durable_progress",
+                    "total_tokens": 5000,
+                    "cached_input_tokens": 4000,
+                    "counted_guard_tokens": 900,
+                    "top_phases": [{"phase": "code_read", "total_tokens": 3500}],
+                    "loop_signatures": ["no_durable_progress", "read_loop"],
+                },
+            ]
+            (telemetry_root / "workers.jsonl").write_text(
+                "\n".join(json.dumps(worker) for worker in workers) + "\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["--repo", str(repo), "tokens", "summary", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["total_tokens"], 6200)
+            self.assertEqual(payload["top"]["issue"], "COD-2")
+            self.assertEqual(payload["workers"][0]["worker_session_id"], "worker-2")
+
+            issue_code, issue_output = self.run_cli(["--repo", str(repo), "tokens", "summary", "--issue", "COD-1"])
+            self.assertEqual(issue_code, 0)
+            self.assertIn("COD-1", issue_output)
+            self.assertNotIn("COD-2", issue_output)
+
+    def test_tokens_spans_filters_worker_and_sorts_by_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            telemetry_root = repo / ".orocsy/delivery/token-telemetry"
+            telemetry_root.mkdir(parents=True)
+            spans = [
+                {
+                    "issue": "COD-1",
+                    "worker_session_id": "worker-a",
+                    "phase": "startup",
+                    "kind": "token_update",
+                    "total_tokens_delta": 50,
+                    "command_fingerprint": None,
+                },
+                {
+                    "issue": "COD-1",
+                    "worker_session_id": "worker-a",
+                    "phase": "code_read",
+                    "kind": "token_update",
+                    "total_tokens_delta": 200,
+                    "command_fingerprint": "sed-read-src-app-ts",
+                },
+                {
+                    "issue": "COD-2",
+                    "worker_session_id": "worker-b",
+                    "phase": "validation",
+                    "kind": "token_update",
+                    "total_tokens_delta": 700,
+                    "command_fingerprint": "pnpm",
+                },
+            ]
+            (telemetry_root / "spans.jsonl").write_text(
+                "\n".join(json.dumps(span) for span in spans) + "\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(
+                ["--repo", str(repo), "tokens", "spans", "--worker", "worker-a", "--json"]
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["spans"][0]["total_tokens_delta"], 200)
+            self.assertEqual({span["worker_session_id"] for span in payload["spans"]}, {"worker-a"})
+
     def test_eval_rubric_emits_json_contract(self) -> None:
         code, output = self.run_cli(["eval", "rubric", "miu-quality", "--json"])
 

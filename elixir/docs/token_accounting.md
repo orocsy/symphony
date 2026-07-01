@@ -2,6 +2,10 @@
 
 This document explains how Codex reports token usage through the app-server protocol and how Symphony should account for it.
 
+For the proposed higher-level worker spend attribution, loop detection, CLI
+reports, and correction attachment design, see
+[`token_usage_telemetry_design.md`](token_usage_telemetry_design.md).
+
 It is based on the current Codex source in `codex-rs`, especially:
 
 - `app-server/README.md`
