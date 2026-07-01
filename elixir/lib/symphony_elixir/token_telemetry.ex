@@ -513,7 +513,10 @@ defmodule SymphonyElixir.TokenTelemetry do
   defp reasoning_method?(_method, _payload), do: false
 
   defp phase_for_command(command) do
-    normalized = String.downcase(command)
+    normalized =
+      command
+      |> unwrap_shell_command()
+      |> String.downcase()
 
     cond do
       String.contains?(normalized, ["apply_patch", "mix format"]) ->
@@ -554,10 +557,50 @@ defmodule SymphonyElixir.TokenTelemetry do
   end
 
   defp command_fingerprint_prefix(command) when is_binary(command) do
-    Enum.find_value(@command_fingerprint_patterns, command_head(command), fn {regex, label} ->
-      if Regex.match?(regex, command), do: label
+    normalized = unwrap_shell_command(command)
+
+    Enum.find_value(@command_fingerprint_patterns, command_head(normalized), fn {regex, label} ->
+      if Regex.match?(regex, normalized), do: label
     end)
   end
+
+  defp unwrap_shell_command(command) when is_binary(command) do
+    normalized = normalize_command(command) || command
+
+    normalized
+    |> String.split(~r/\s+/, trim: true)
+    |> drop_leading_assignments()
+    |> case do
+      [shell, flag | inner] when inner != [] ->
+        if shell_wrapper_token?(shell) and shell_flag?(flag) do
+          inner
+          |> Enum.join(" ")
+          |> trim_shell_quotes()
+        else
+          normalized
+        end
+
+      _tokens ->
+        normalized
+    end
+  end
+
+  defp unwrap_shell_command(_command), do: ""
+
+  defp shell_wrapper_token?(token) when is_binary(token) do
+    token
+    |> trim_shell_quotes()
+    |> Path.basename()
+    |> then(&(&1 in ["bash", "zsh", "sh"]))
+  end
+
+  defp shell_wrapper_token?(_token), do: false
+
+  defp shell_flag?(token) when is_binary(token) do
+    token |> trim_shell_quotes() |> then(&(&1 in ["-c", "-lc"]))
+  end
+
+  defp shell_flag?(_token), do: false
 
   defp command_head(command) when is_binary(command) do
     command
@@ -568,7 +611,7 @@ defmodule SymphonyElixir.TokenTelemetry do
       basename = Path.basename(token)
 
       cond do
-        token in ["bash", "zsh", "sh", "-lc"] or basename in ["bash", "zsh", "sh", "-lc"] ->
+        shell_wrapper_token?(token) or shell_flag?(token) or shell_flag?(basename) ->
           nil
 
         String.starts_with?(token, "-") ->
@@ -833,7 +876,7 @@ defmodule SymphonyElixir.TokenTelemetry do
 
     %{
       dirty_files: current_turn_dirty_files(workspace, baseline),
-      new_commits: git_new_commits(workspace) -- baseline.new_commits,
+      new_commits: current_turn_new_commits(workspace, baseline),
       events: durable_progress_events(workspace, started_at)
     }
   end
@@ -846,13 +889,14 @@ defmodule SymphonyElixir.TokenTelemetry do
     %{
       dirty_files: dirty_files,
       dirty_fingerprints: git_dirty_fingerprints(workspace, dirty_files),
+      head: git_head(workspace),
       new_commits: git_new_commits(workspace)
     }
   end
 
   defp git_progress_baseline(_workspace), do: empty_git_progress_baseline()
 
-  defp empty_git_progress_baseline, do: %{dirty_files: [], dirty_fingerprints: %{}, new_commits: []}
+  defp empty_git_progress_baseline, do: %{dirty_files: [], dirty_fingerprints: %{}, head: nil, new_commits: []}
 
   defp current_turn_dirty_files(workspace, baseline) do
     dirty_files = git_dirty_files(workspace)
@@ -862,6 +906,13 @@ defmodule SymphonyElixir.TokenTelemetry do
     Enum.filter(dirty_files, fn path ->
       Map.get(baseline_fingerprints, path) != Map.get(current_fingerprints, path)
     end)
+  end
+
+  defp current_turn_new_commits(workspace, baseline) do
+    case Map.get(baseline, :head) do
+      head when is_binary(head) -> git_commits_not_reachable_from(workspace, [head])
+      _head -> git_new_commits(workspace) -- Map.get(baseline, :new_commits, [])
+    end
   end
 
   defp worker_status(%{dirty_files: [_ | _]}), do: "productive"
@@ -933,6 +984,15 @@ defmodule SymphonyElixir.TokenTelemetry do
     _error -> []
   end
 
+  defp git_head(workspace) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {_output, _exit_code} -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
   defp git_dirty_fingerprints(workspace, dirty_files) when is_binary(workspace) and is_list(dirty_files) do
     Map.new(dirty_files, &{&1, dirty_file_fingerprint(workspace, &1)})
   end
@@ -979,8 +1039,14 @@ defmodule SymphonyElixir.TokenTelemetry do
 
   defp git_new_commits(workspace) do
     base_refs =
-      ["@{upstream}", "origin/main", "main"]
+      ["origin/main", "main"]
       |> Enum.filter(&git_ref_exists?(workspace, &1))
+
+    git_commits_not_reachable_from(workspace, base_refs)
+  end
+
+  defp git_commits_not_reachable_from(workspace, base_refs) when is_list(base_refs) do
+    base_refs = Enum.filter(base_refs, &git_ref_exists?(workspace, &1))
 
     if base_refs == [] do
       []
@@ -1049,14 +1115,25 @@ defmodule SymphonyElixir.TokenTelemetry do
   end
 
   defp durable_progress_event?(event) when is_map(event) do
-    event_name(event)
-    |> case do
-      "tool.finished" -> true
-      "gate." <> _rest -> true
-      "eval." <> _rest -> true
-      "handoff." <> _rest -> true
-      _ -> false
+    cond do
+      lifecycle_only_tool_finished?(event) ->
+        false
+
+      true ->
+        event_name(event)
+        |> case do
+          "tool.finished" -> true
+          "gate." <> _rest -> true
+          "eval." <> _rest -> true
+          "handoff." <> _rest -> true
+          _ -> false
+        end
     end
+  end
+
+  defp lifecycle_only_tool_finished?(event) when is_map(event) do
+    event_name(event) == "tool.finished" and
+      Map.get(event, "tool") in ["first-turn-miu-handoff", "technical-miu-trace"]
   end
 
   defp event_name(event) do

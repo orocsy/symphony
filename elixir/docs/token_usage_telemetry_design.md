@@ -66,7 +66,7 @@ Orocsy and git.
 | Turn | One user-message-to-worker interaction inside the worker session. |
 | Item | A Codex stream item such as reasoning, agent message, command execution, MCP call, or token update. |
 | Span | A normalized time interval with token deltas, phase, issue, worker, files, command, and progress state. |
-| Durable progress | Dirty files, local commits/ahead state, or passed Orocsy events such as `tool.finished`, `gate.*`, `eval.*`, or `handoff.*` from the current run window. |
+| Durable progress | Dirty files, commits made after turn start, or passed Orocsy events such as `tool.finished`, `gate.*`, `eval.*`, or `handoff.*` from the current run window, excluding lifecycle-only checkpoints such as `first-turn-miu-handoff` and `technical-miu-trace`. |
 | Loop signature | A repeated high-token pattern with little or no durable progress. |
 
 ## Runtime Outcomes
@@ -208,9 +208,10 @@ and there is no current-window durable progress.
 Evidence:
 
 - no dirty files
-- no new commits
+- no commits made after turn start
 - no passed `tool.finished`, `gate.*`, `eval.*`, or `handoff.*` event from the
-  current run window
+  current run window, excluding lifecycle-only checkpoints such as
+  `first-turn-miu-handoff` and `technical-miu-trace`
 
 Action:
 

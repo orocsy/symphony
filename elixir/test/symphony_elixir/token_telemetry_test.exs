@@ -63,6 +63,19 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     refute summary.command_fingerprint =~ "beta"
   end
 
+  test "classifies shell-wrapped commands by their inner command" do
+    read_summary =
+      TokenTelemetry.command_summary(~s(/bin/zsh -lc "sed -n '1,40p' lib/app.ex"))
+
+    validation_summary =
+      TokenTelemetry.command_summary(~s(bash -lc "pnpm test"))
+
+    assert read_summary.phase == "code_read"
+    assert read_summary.command_fingerprint == "sed-read-lib-app.ex"
+    assert validation_summary.phase == "validation"
+    assert validation_summary.command_fingerprint == "pnpm"
+  end
+
   test "writes blocked summary when tokens have no durable progress" do
     workspace = temp_workspace("blocked-summary")
 
@@ -193,6 +206,39 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     end
   end
 
+  test "counts commits pushed during the turn as handoff progress" do
+    workspace = temp_workspace("pushed-commit-summary")
+    remote = temp_workspace("pushed-commit-remote")
+
+    try do
+      File.rm_rf!(remote)
+      git!(System.tmp_dir!(), ["init", "--bare", remote])
+
+      init_git_repo!(workspace)
+      git!(workspace, ["remote", "add", "origin", remote])
+      git!(workspace, ["push", "-u", "origin", "main"])
+      git!(workspace, ["switch", "-c", "orocsy/mt-pushed"])
+      git!(workspace, ["push", "-u", "origin", "orocsy/mt-pushed"])
+
+      telemetry = start_test_turn(workspace)
+      File.write!(Path.join(workspace, "feature.txt"), "pushed progress\n")
+      git!(workspace, ["add", "feature.txt"])
+      git!(workspace, ["commit", "-m", "Add pushed progress"])
+      git!(workspace, ["push"])
+      observe_token_total(telemetry, 3_000)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+
+      assert summary["status"] == "handoff_recovery"
+      assert summary["dirty_files"] == []
+      assert length(summary["new_commits"]) == 1
+    after
+      File.rm_rf(workspace)
+      File.rm_rf(remote)
+    end
+  end
+
   test "does not count preexisting local commits as turn progress" do
     workspace = temp_workspace("commit-baseline")
 
@@ -277,6 +323,38 @@ defmodule SymphonyElixir.TokenTelemetryTest do
       refute Jason.encode!(event) =~ "--flag"
     after
       File.rm_rf(workspace)
+    end
+  end
+
+  test "ignores lifecycle-only Orocsy checkpoints as durable progress" do
+    for tool <- ["first-turn-miu-handoff", "technical-miu-trace"] do
+      workspace = temp_workspace("lifecycle-event-summary")
+
+      try do
+        telemetry = start_test_turn(workspace)
+        events_dir = Path.join(workspace, ".orocsy/delivery/events")
+        File.mkdir_p!(events_dir)
+
+        File.write!(
+          Path.join(events_dir, "events.jsonl"),
+          Jason.encode!(%{
+            "event" => "tool.finished",
+            "status" => "passed",
+            "tool" => tool,
+            "ts" => DateTime.utc_now() |> DateTime.add(1, :second) |> DateTime.to_iso8601()
+          }) <> "\n"
+        )
+
+        observe_token_total(telemetry, 1_500)
+        TokenTelemetry.stop(telemetry)
+
+        summary = read_worker_summary!(workspace)
+
+        assert summary["status"] == "blocked_no_durable_progress"
+        assert summary["durable_progress_events"] == []
+      after
+        File.rm_rf(workspace)
+      end
     end
   end
 
