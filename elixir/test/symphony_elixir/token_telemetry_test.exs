@@ -53,6 +53,16 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     refute summary.command_fingerprint =~ "beta"
   end
 
+  test "redacts shell-wrapped environment assignments in fallback fingerprints" do
+    summary =
+      TokenTelemetry.command_summary(~s(bash -lc 'FIRST_VALUE=alpha SECOND_VALUE=beta python script.py'))
+
+    assert summary.command_fingerprint == "python"
+    refute summary.command_fingerprint =~ "alpha"
+    refute summary.command_fingerprint =~ "SECOND_VALUE"
+    refute summary.command_fingerprint =~ "beta"
+  end
+
   test "writes blocked summary when tokens have no durable progress" do
     workspace = temp_workspace("blocked-summary")
 
@@ -75,23 +85,27 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     end
   end
 
-  test "seeds continuation turns from the first cumulative token update" do
+  test "seeds continuation turns from prior thread usage" do
     workspace = temp_workspace("continuation-baseline")
 
     try do
-      telemetry = start_test_turn(workspace, turn_number: 2)
-      observe_token_total(telemetry, 1_000)
-      observe_token_total(telemetry, 1_200)
-      TokenTelemetry.stop(telemetry)
+      first_turn = start_test_turn(workspace, turn_id: "turn-1", turn_number: 1)
+      observe_token_total(first_turn, 1_000)
+      TokenTelemetry.stop(first_turn)
+
+      second_turn = start_test_turn(workspace, turn_id: "turn-2", turn_number: 2)
+      observe_token_total(second_turn, 1_200)
+      TokenTelemetry.stop(second_turn)
 
       summary = read_worker_summary!(workspace)
       token_spans = workspace |> read_spans!() |> Enum.filter(&(&1["kind"] == "token_update"))
+      continuation_spans = Enum.filter(token_spans, &(&1["turn"] == 2))
 
       assert summary["total_tokens"] == 200
       assert summary["input_tokens"] == 200
       assert summary["cached_input_tokens"] == 100
       assert [%{"phase" => "startup", "total_tokens" => 200}] = summary["top_phases"]
-      assert Enum.map(token_spans, & &1["total_tokens_delta"]) == [200]
+      assert Enum.map(continuation_spans, & &1["total_tokens_delta"]) == [200]
     after
       File.rm_rf(workspace)
     end
@@ -131,6 +145,26 @@ defmodule SymphonyElixir.TokenTelemetryTest do
 
       assert summary["status"] == "blocked_no_durable_progress"
       assert summary["dirty_files"] == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "counts edits to preexisting dirty files as turn progress" do
+    workspace = temp_workspace("dirty-baseline-edit")
+
+    try do
+      init_git_repo!(workspace)
+      File.write!(Path.join(workspace, "preexisting.txt"), "preexisting dirty work\n")
+      telemetry = start_test_turn(workspace)
+      File.write!(Path.join(workspace, "preexisting.txt"), "edited during turn\n")
+      observe_token_total(telemetry, 2_000)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+
+      assert summary["status"] == "productive"
+      assert summary["dirty_files"] == ["preexisting.txt"]
     after
       File.rm_rf(workspace)
     end
@@ -324,11 +358,13 @@ defmodule SymphonyElixir.TokenTelemetryTest do
   end
 
   defp start_test_turn(workspace, opts \\ []) do
+    {turn_id, opts} = Keyword.pop(opts, :turn_id, "turn-93")
+
     TokenTelemetry.start_turn(
       workspace,
       %{id: "issue-token-telemetry", identifier: "MT-93"},
       "thread-93",
-      "turn-93",
+      turn_id,
       opts
     )
   end
