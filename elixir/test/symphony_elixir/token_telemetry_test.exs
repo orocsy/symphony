@@ -43,6 +43,16 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     end
   end
 
+  test "redacts multiple leading environment assignments in fallback fingerprints" do
+    summary =
+      TokenTelemetry.command_summary("FIRST_VALUE=alpha SECOND_VALUE=beta python script.py")
+
+    assert summary.command_fingerprint == "python"
+    refute summary.command_fingerprint =~ "alpha"
+    refute summary.command_fingerprint =~ "SECOND_VALUE"
+    refute summary.command_fingerprint =~ "beta"
+  end
+
   test "writes blocked summary when tokens have no durable progress" do
     workspace = temp_workspace("blocked-summary")
 
@@ -60,6 +70,28 @@ defmodule SymphonyElixir.TokenTelemetryTest do
       assert summary["new_commits"] == []
       assert summary["durable_progress_events"] == []
       assert [%{"phase" => "startup", "total_tokens" => 1_000}] = summary["top_phases"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "seeds continuation turns from the first cumulative token update" do
+    workspace = temp_workspace("continuation-baseline")
+
+    try do
+      telemetry = start_test_turn(workspace, turn_number: 2)
+      observe_token_total(telemetry, 1_000)
+      observe_token_total(telemetry, 1_200)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+      token_spans = workspace |> read_spans!() |> Enum.filter(&(&1["kind"] == "token_update"))
+
+      assert summary["total_tokens"] == 200
+      assert summary["input_tokens"] == 200
+      assert summary["cached_input_tokens"] == 100
+      assert [%{"phase" => "startup", "total_tokens" => 200}] = summary["top_phases"]
+      assert Enum.map(token_spans, & &1["total_tokens_delta"]) == [200]
     after
       File.rm_rf(workspace)
     end
@@ -85,6 +117,25 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     end
   end
 
+  test "does not count preexisting dirty files as turn progress" do
+    workspace = temp_workspace("dirty-baseline")
+
+    try do
+      init_git_repo!(workspace)
+      File.write!(Path.join(workspace, "preexisting.txt"), "preexisting dirty work\n")
+      telemetry = start_test_turn(workspace)
+      observe_token_total(telemetry, 2_000)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+
+      assert summary["status"] == "blocked_no_durable_progress"
+      assert summary["dirty_files"] == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "classifies local commits before push as handoff recovery" do
     workspace = temp_workspace("commit-summary")
 
@@ -103,6 +154,29 @@ defmodule SymphonyElixir.TokenTelemetryTest do
       assert summary["status"] == "handoff_recovery"
       assert summary["dirty_files"] == []
       assert length(summary["new_commits"]) == 1
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not count preexisting local commits as turn progress" do
+    workspace = temp_workspace("commit-baseline")
+
+    try do
+      init_git_repo!(workspace)
+      git!(workspace, ["switch", "-c", "orocsy/mt-preexisting"])
+      File.write!(Path.join(workspace, "preexisting.txt"), "preexisting commit\n")
+      git!(workspace, ["add", "preexisting.txt"])
+      git!(workspace, ["commit", "-m", "Add preexisting progress"])
+
+      telemetry = start_test_turn(workspace)
+      observe_token_total(telemetry, 2_500)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+
+      assert summary["status"] == "blocked_no_durable_progress"
+      assert summary["new_commits"] == []
     after
       File.rm_rf(workspace)
     end
@@ -138,6 +212,40 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     end
   end
 
+  test "redacts Orocsy progress tool metadata" do
+    workspace = temp_workspace("progress-event-redaction")
+
+    try do
+      telemetry = start_test_turn(workspace)
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(events_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "tool.finished",
+          "status" => "passed",
+          "tool" => "FIRST_VALUE=alpha pnpm test --flag hidden",
+          "ts" => DateTime.utc_now() |> DateTime.add(1, :second) |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      observe_token_total(telemetry, 1_500)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+      [event] = summary["durable_progress_events"]
+
+      assert summary["status"] == "productive"
+      refute Map.has_key?(event, "tool")
+      assert event["tool_fingerprint"] == "pnpm"
+      refute Jason.encode!(event) =~ "alpha"
+      refute Jason.encode!(event) =~ "--flag"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "records loop signatures for repeated non-progress command phases" do
     cases = [
       {"sed -n '1,40p' src/app/page.tsx", "read_loop"},
@@ -168,12 +276,60 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     end
   end
 
-  defp start_test_turn(workspace) do
+  test "does not mark repeated commands as loops when the turn is productive" do
+    workspace = temp_workspace("productive-repeat")
+
+    try do
+      init_git_repo!(workspace)
+      telemetry = start_test_turn(workspace)
+      observe_command(telemetry, "pnpm test")
+      observe_token_total(telemetry, 1_000)
+      File.write!(Path.join(workspace, "progress.txt"), "productive edit\n")
+      observe_command(telemetry, "pnpm test")
+      observe_token_total(telemetry, 2_000)
+      TokenTelemetry.stop(telemetry)
+
+      summary = read_worker_summary!(workspace)
+
+      assert summary["status"] == "productive"
+      refute "validation_loop" in summary["loop_signatures"]
+      refute "no_durable_progress" in summary["loop_signatures"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "clears stale command context when reasoning resumes" do
+    workspace = temp_workspace("reasoning-context")
+
+    try do
+      telemetry = start_test_turn(workspace)
+      observe_command(telemetry, "sed -n '1,40p' src/app/page.tsx")
+      observe_token_total(telemetry, 1_000)
+      observe_reasoning(telemetry)
+      observe_token_total(telemetry, 2_000)
+      TokenTelemetry.stop(telemetry)
+
+      token_spans = workspace |> read_spans!() |> Enum.filter(&(&1["kind"] == "token_update"))
+      [command_span, reasoning_span] = token_spans
+
+      assert command_span["command_fingerprint"] == "sed-read-src-app-page.tsx"
+      assert command_span["files"] == ["src/app/page.tsx"]
+      assert reasoning_span["phase"] == "reasoning"
+      assert reasoning_span["command_fingerprint"] == nil
+      assert reasoning_span["files"] == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  defp start_test_turn(workspace, opts \\ []) do
     TokenTelemetry.start_turn(
       workspace,
       %{id: "issue-token-telemetry", identifier: "MT-93"},
       "thread-93",
-      "turn-93"
+      "turn-93",
+      opts
     )
   end
 
@@ -181,6 +337,13 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     TokenTelemetry.observe(telemetry, %{
       "method" => "codex/event/exec_command_begin",
       "params" => %{"msg" => %{"command" => command}}
+    })
+  end
+
+  defp observe_reasoning(telemetry) do
+    TokenTelemetry.observe(telemetry, %{
+      "method" => "item/reasoning/summaryPartAdded",
+      "params" => %{"itemId" => "reasoning-1"}
     })
   end
 
@@ -207,6 +370,14 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     |> String.split("\n", trim: true)
     |> List.last()
     |> Jason.decode!()
+  end
+
+  defp read_spans!(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/token-telemetry/spans.jsonl")
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
   end
 
   defp temp_workspace(name) do

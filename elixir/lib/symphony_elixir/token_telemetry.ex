@@ -35,6 +35,7 @@ defmodule SymphonyElixir.TokenTelemetry do
     :worker_session_id,
     :started_at,
     :state_pid,
+    disabled_reason: nil,
     enabled: false
   ]
 
@@ -61,6 +62,7 @@ defmodule SymphonyElixir.TokenTelemetry do
           worker_session_id: String.t() | nil,
           started_at: DateTime.t() | nil,
           state_pid: pid() | nil,
+          disabled_reason: atom() | nil,
           enabled: boolean()
         }
 
@@ -71,7 +73,7 @@ defmodule SymphonyElixir.TokenTelemetry do
     with true <- is_binary(workspace),
          :ok <- File.mkdir_p(spans_dir(workspace)),
          :ok <- File.mkdir_p(summaries_dir(workspace)),
-         {:ok, pid} <- Agent.start_link(fn -> initial_state() end) do
+         {:ok, pid} <- Agent.start_link(fn -> initial_state(workspace, opts) end) do
       telemetry = %{telemetry | enabled: true, state_pid: pid}
       append_span(telemetry, start_span(telemetry))
       telemetry
@@ -83,6 +85,15 @@ defmodule SymphonyElixir.TokenTelemetry do
     error in [File.Error, RuntimeError, ArgumentError] ->
       Logger.warning("Token telemetry disabled for workspace=#{inspect(workspace)} error=#{Exception.message(error)}")
       build_turn(workspace, issue, thread_id, turn_id, opts)
+  end
+
+  @spec disabled_turn(Path.t(), map() | nil, String.t(), String.t(), keyword()) :: t()
+  def disabled_turn(workspace, issue, thread_id, turn_id, opts \\ []) do
+    reason = Keyword.get(opts, :reason, :unsupported)
+
+    workspace
+    |> build_turn(issue, thread_id, turn_id, opts)
+    |> Map.put(:disabled_reason, reason)
   end
 
   @spec observe(t(), map()) :: :ok
@@ -159,17 +170,35 @@ defmodule SymphonyElixir.TokenTelemetry do
     }
   end
 
-  defp initial_state do
+  defp initial_state(workspace, opts) do
     %{
       sequence: 1,
-      last_usage: zero_usage(),
+      last_usage: initial_usage(opts),
+      turn_usage: zero_usage(),
+      skip_first_usage?: seed_first_usage_baseline?(opts),
       phase_totals: %{},
       command_counts_by_phase: %{},
+      git_baseline: git_progress_baseline(workspace),
       current_phase: "startup",
       current_item_id: nil,
       current_command_fingerprint: nil,
       current_files: []
     }
+  end
+
+  defp initial_usage(opts) do
+    opts
+    |> Keyword.get(:initial_usage)
+    |> normalize_usage()
+    |> case do
+      nil -> zero_usage()
+      usage -> usage
+    end
+  end
+
+  defp seed_first_usage_baseline?(opts) do
+    turn_number = Keyword.get(opts, :turn_number, 1)
+    is_integer(turn_number) and turn_number > 1 and is_nil(Keyword.get(opts, :initial_usage))
   end
 
   defp spans_for_payload(%__MODULE__{} = telemetry, state, payload) do
@@ -209,12 +238,12 @@ defmodule SymphonyElixir.TokenTelemetry do
 
       method in ["item/started", "item/completed", "item/tool/call"] ->
         phase = phase_for_method(method)
-        state = %{state | current_phase: phase, current_item_id: item_id}
+        state = state |> Map.put(:current_phase, phase) |> Map.put(:current_item_id, item_id) |> clear_command_context()
 
         {[base_span(telemetry, state, item_kind(method), phase, %{})], state}
 
       is_binary(method) and reasoning_method?(method, payload) ->
-        state = %{state | current_phase: "reasoning", current_item_id: item_id}
+        state = state |> Map.put(:current_phase, "reasoning") |> Map.put(:current_item_id, item_id) |> clear_command_context()
         {[], state}
 
       true ->
@@ -228,31 +257,42 @@ defmodule SymphonyElixir.TokenTelemetry do
         {[], state}
 
       current_usage ->
-        delta = delta_from_cumulative(state.last_usage, current_usage)
-        state = %{state | last_usage: current_usage}
-
-        if positive_usage?(delta) do
-          state = %{
-            state
-            | phase_totals: Map.update(state.phase_totals, state.current_phase, delta.total_tokens, &(&1 + delta.total_tokens))
-          }
-
-          span =
-            base_span(telemetry, state, "token_update", state.current_phase, %{
-              "input_tokens_delta" => delta.input_tokens,
-              "cached_input_tokens_delta" => delta.cached_input_tokens,
-              "output_tokens_delta" => delta.output_tokens,
-              "total_tokens_delta" => delta.total_tokens,
-              "counted_guard_tokens_delta" => max(delta.input_tokens - delta.cached_input_tokens, 0),
-              "command_fingerprint" => state.current_command_fingerprint,
-              "files" => state.current_files
-            })
-
-          {[span], state}
+        if state.skip_first_usage? do
+          {[], %{state | last_usage: current_usage, skip_first_usage?: false}}
         else
-          {[], state}
+          delta = delta_from_cumulative(state.last_usage, current_usage)
+          state = %{state | last_usage: current_usage}
+
+          if positive_usage?(delta) do
+            state = %{
+              state
+              | turn_usage: add_usage(state.turn_usage, delta),
+                phase_totals: Map.update(state.phase_totals, state.current_phase, delta.total_tokens, &(&1 + delta.total_tokens))
+            }
+
+            span =
+              base_span(telemetry, state, "token_update", state.current_phase, %{
+                "input_tokens_delta" => delta.input_tokens,
+                "cached_input_tokens_delta" => delta.cached_input_tokens,
+                "output_tokens_delta" => delta.output_tokens,
+                "total_tokens_delta" => delta.total_tokens,
+                "counted_guard_tokens_delta" => max(delta.input_tokens - delta.cached_input_tokens, 0),
+                "command_fingerprint" => state.current_command_fingerprint,
+                "files" => state.current_files
+              })
+
+            {[span], state}
+          else
+            {[], state}
+          end
         end
     end
+  end
+
+  defp clear_command_context(state) do
+    state
+    |> Map.put(:current_command_fingerprint, nil)
+    |> Map.put(:current_files, [])
   end
 
   defp start_span(%__MODULE__{} = telemetry) do
@@ -377,6 +417,15 @@ defmodule SymphonyElixir.TokenTelemetry do
     usage.input_tokens > 0 or usage.cached_input_tokens > 0 or usage.output_tokens > 0 or usage.total_tokens > 0
   end
 
+  defp add_usage(left, right) do
+    %{
+      input_tokens: Map.get(left, :input_tokens, 0) + Map.get(right, :input_tokens, 0),
+      cached_input_tokens: Map.get(left, :cached_input_tokens, 0) + Map.get(right, :cached_input_tokens, 0),
+      output_tokens: Map.get(left, :output_tokens, 0) + Map.get(right, :output_tokens, 0),
+      total_tokens: Map.get(left, :total_tokens, 0) + Map.get(right, :total_tokens, 0)
+    }
+  end
+
   defp phase_for_method("item/tool/call"), do: "tool"
   defp phase_for_method(_method), do: "reasoning"
 
@@ -440,8 +489,8 @@ defmodule SymphonyElixir.TokenTelemetry do
 
   defp command_head(command) when is_binary(command) do
     command
-    |> String.replace(~r/^[A-Z0-9_]+=[^\s]+\s+/, "")
     |> String.split(~r/\s+/, trim: true)
+    |> drop_leading_assignments()
     |> Enum.find_value(fn token ->
       token = token |> String.trim(~s("'")) |> Path.basename()
 
@@ -456,6 +505,18 @@ defmodule SymphonyElixir.TokenTelemetry do
       token -> token |> String.replace(~r/[^A-Za-z0-9_.-]/, "-") |> String.downcase()
     end
   end
+
+  defp drop_leading_assignments(tokens) when is_list(tokens) do
+    Enum.drop_while(tokens, &assignment_word?/1)
+  end
+
+  defp assignment_word?(token) when is_binary(token) do
+    token
+    |> String.trim(~s("'"))
+    |> then(&Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=.*/, &1))
+  end
+
+  defp assignment_word?(_token), do: false
 
   defp command_files(command, workspace) do
     ~r/(?:^|[\s"'=])((?:\.\/|\/)?[A-Za-z0-9_@~.\-\/\[\]]+\.(?:ex|exs|heex|ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss|html|txt))(?=$|[\s"',:])/
@@ -650,8 +711,8 @@ defmodule SymphonyElixir.TokenTelemetry do
   defp write_worker_summary(_telemetry, _state), do: :ok
 
   defp worker_summary(%__MODULE__{} = telemetry, state) do
-    progress = progress_evidence(telemetry)
-    usage = state.last_usage
+    progress = progress_evidence(telemetry, state)
+    usage = Map.get(state, :turn_usage, state.last_usage)
     counted_guard_tokens = max(usage.input_tokens - usage.cached_input_tokens, 0)
     status = worker_status(progress)
 
@@ -679,16 +740,29 @@ defmodule SymphonyElixir.TokenTelemetry do
     }
   end
 
-  defp progress_evidence(%__MODULE__{workspace: workspace, started_at: started_at})
+  defp progress_evidence(%__MODULE__{workspace: workspace, started_at: started_at}, state)
        when is_binary(workspace) and not is_nil(started_at) do
+    baseline = Map.get(state, :git_baseline, empty_git_progress_baseline())
+
     %{
-      dirty_files: git_dirty_files(workspace),
-      new_commits: git_new_commits(workspace),
+      dirty_files: git_dirty_files(workspace) -- baseline.dirty_files,
+      new_commits: git_new_commits(workspace) -- baseline.new_commits,
       events: durable_progress_events(workspace, started_at)
     }
   end
 
-  defp progress_evidence(_telemetry), do: %{dirty_files: [], new_commits: [], events: []}
+  defp progress_evidence(_telemetry, _state), do: %{dirty_files: [], new_commits: [], events: []}
+
+  defp git_progress_baseline(workspace) when is_binary(workspace) do
+    %{
+      dirty_files: git_dirty_files(workspace),
+      new_commits: git_new_commits(workspace)
+    }
+  end
+
+  defp git_progress_baseline(_workspace), do: empty_git_progress_baseline()
+
+  defp empty_git_progress_baseline, do: %{dirty_files: [], new_commits: []}
 
   defp worker_status(%{dirty_files: [_ | _]}), do: "productive"
   defp worker_status(%{new_commits: [_ | _]}), do: "handoff_recovery"
@@ -708,11 +782,14 @@ defmodule SymphonyElixir.TokenTelemetry do
   defp count_command(state, _phase, _fingerprint), do: state
 
   defp loop_signatures(status, state) do
-    no_progress_signatures(status) ++ command_loop_signatures(state)
+    no_progress_signatures(status) ++ stalled_command_loop_signatures(status, state)
   end
 
   defp no_progress_signatures("blocked_no_durable_progress"), do: ["no_durable_progress"]
   defp no_progress_signatures(_status), do: []
+
+  defp stalled_command_loop_signatures("blocked_no_durable_progress", state), do: command_loop_signatures(state)
+  defp stalled_command_loop_signatures(_status, _state), do: []
 
   defp command_loop_signatures(%{command_counts_by_phase: counts}) when is_map(counts) do
     [
@@ -818,8 +895,7 @@ defmodule SymphonyElixir.TokenTelemetry do
       [
         %{
           "event" => event_name(event),
-          "tool" => Map.get(event, "tool"),
-          "phase" => Map.get(event, "phase"),
+          "tool_fingerprint" => tool_fingerprint(event),
           "ts" => DateTime.to_iso8601(occurred_at)
         }
       ]
@@ -846,6 +922,13 @@ defmodule SymphonyElixir.TokenTelemetry do
       name when is_binary(name) -> name
       _ -> ""
     end
+  end
+
+  defp tool_fingerprint(event) do
+    event
+    |> Map.get("tool")
+    |> command_summary()
+    |> Map.get(:command_fingerprint)
   end
 
   defp datetime_from_iso8601(value) when is_binary(value) do

@@ -6993,6 +6993,9 @@ defmodule SymphonyElixir.AppServerTest do
                  false
                end
              end)
+
+      refute File.exists?(Path.join(remote_workspace, ".orocsy/delivery/token-telemetry/spans.jsonl"))
+      refute File.exists?(Path.join(remote_workspace, ".orocsy/delivery/token-telemetry/workers.jsonl"))
     after
       File.rm_rf(test_root)
     end

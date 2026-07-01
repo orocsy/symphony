@@ -133,7 +133,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           forbidden_command_patterns: forbidden_command_patterns,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
-          workspace: workspace
+          workspace: workspace,
+          worker_host: worker_host
         },
         prompt,
         issue,
@@ -157,7 +158,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
-        telemetry = TokenTelemetry.start_turn(workspace, issue, thread_id, turn_id, turn_number: Keyword.get(opts, :turn_number, 1))
+        telemetry = start_token_telemetry(workspace, issue, thread_id, turn_id, opts, worker_host)
         command_guard = Map.put(command_guard, :token_telemetry, telemetry)
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -1579,6 +1580,23 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp observe_token_telemetry(_command_guard, _payload), do: :ok
+
+  defp start_token_telemetry(workspace, issue, thread_id, turn_id, opts, nil) do
+    TokenTelemetry.start_turn(workspace, issue, thread_id, turn_id, turn_number: Keyword.get(opts, :turn_number, 1))
+  end
+
+  defp start_token_telemetry(workspace, issue, thread_id, turn_id, opts, worker_host) when is_binary(worker_host) do
+    Logger.info("Token telemetry disabled for remote worker_host=#{worker_host}; remote telemetry writes are not implemented")
+
+    TokenTelemetry.disabled_turn(
+      workspace,
+      issue,
+      thread_id,
+      turn_id,
+      turn_number: Keyword.get(opts, :turn_number, 1),
+      reason: :remote_worker_unsupported
+    )
+  end
 
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
     emit_message(
