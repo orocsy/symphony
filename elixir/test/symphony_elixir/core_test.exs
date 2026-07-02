@@ -1456,7 +1456,7 @@ defmodule SymphonyElixir.CoreTest do
         Enum.find(corrections, &(&1["source"] == "symphony.runtime.provider-usage-limit"))
 
       assert provider_correction
-      assert provider_correction["next_action"] == "retry"
+      assert provider_correction["next_action"] == "block"
       assert provider_correction["summary"] =~ "usageLimitExceeded"
       assert Workspace.blocking_correction_in_workspace?(workspace)
 

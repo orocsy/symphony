@@ -3145,7 +3145,7 @@ defmodule SymphonyElixir.Orchestrator do
           action: :block,
           kind: "provider-usage-limit",
           source_status: "blocked",
-          next_action: "retry",
+          next_action: "block",
           summary: "Symphony stopped because the Codex worker reported usageLimitExceeded before producing code/test progress or validation evidence.",
           required_corrections: [
             "Confirm Codex worker quota/credits are available for the same account/session used by Symphony.",
