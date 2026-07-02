@@ -325,6 +325,58 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             self.assertIn("COD-1", issue_output)
             self.assertNotIn("COD-2", issue_output)
 
+    def test_tokens_summary_reconstructs_missing_worker_summaries_from_spans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            telemetry_root = repo / ".orocsy/delivery/token-telemetry"
+            telemetry_root.mkdir(parents=True)
+            spans = [
+                {
+                    "issue": "COD-1",
+                    "worker_session_id": "worker-a",
+                    "phase": "code_read",
+                    "kind": "token_update",
+                    "total_tokens_delta": 300,
+                    "cached_input_tokens_delta": 250,
+                    "counted_guard_tokens_delta": 40,
+                },
+                {
+                    "issue": "COD-1",
+                    "worker_session_id": "worker-a",
+                    "phase": "code_read",
+                    "kind": "token_update",
+                    "total_tokens_delta": 200,
+                    "cached_input_tokens_delta": 150,
+                    "counted_guard_tokens_delta": 25,
+                },
+                {
+                    "issue": "COD-2",
+                    "worker_session_id": "worker-b",
+                    "phase": "validation",
+                    "kind": "token_update",
+                    "total_tokens_delta": 100,
+                    "cached_input_tokens_delta": 0,
+                    "counted_guard_tokens_delta": 90,
+                },
+            ]
+            (telemetry_root / "spans.jsonl").write_text(
+                "\n".join(json.dumps(span) for span in spans) + "\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["--repo", str(repo), "tokens", "summary", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["total_tokens"], 600)
+            self.assertEqual(payload["top"]["worker_session_id"], "worker-a")
+            self.assertEqual(payload["top"]["status"], "span_summary_missing_worker_record")
+            self.assertEqual(payload["top"]["cached_input_tokens"], 400)
+            self.assertEqual(payload["top"]["counted_guard_tokens"], 65)
+            self.assertEqual(payload["top"]["top_phases"][0], {"phase": "code_read", "total_tokens": 500})
+
     def test_tokens_spans_filters_worker_and_sorts_by_delta(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

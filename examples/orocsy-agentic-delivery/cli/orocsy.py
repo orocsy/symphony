@@ -1178,8 +1178,57 @@ def loop_signature_text(summary: dict[str, Any]) -> str:
     return "-"
 
 
+def reconstruct_token_worker_records_from_spans(
+    spans: list[dict[str, Any]], existing_worker_ids: set[str]
+) -> list[dict[str, Any]]:
+    reconstructed: dict[str, dict[str, Any]] = {}
+    phase_totals: dict[str, dict[str, int]] = {}
+
+    for span in spans:
+        worker_id = str(span.get("worker_session_id") or "")
+        if not worker_id or worker_id in existing_worker_ids:
+            continue
+
+        summary = reconstructed.setdefault(
+            worker_id,
+            {
+                "issue": span.get("issue") or "",
+                "worker_session_id": worker_id,
+                "turn": span.get("turn"),
+                "status": "span_summary_missing_worker_record",
+                "total_tokens": 0,
+                "cached_input_tokens": 0,
+                "counted_guard_tokens": 0,
+                "top_phases": [],
+                "loop_signatures": ["missing_worker_summary"],
+                "summary_source": "spans",
+            },
+        )
+        summary["total_tokens"] += int_field(span, "total_tokens_delta")
+        summary["cached_input_tokens"] += int_field(span, "cached_input_tokens_delta")
+        summary["counted_guard_tokens"] += int_field(span, "counted_guard_tokens_delta")
+
+        phase = str(span.get("phase") or "-")
+        worker_phase_totals = phase_totals.setdefault(worker_id, {})
+        worker_phase_totals[phase] = worker_phase_totals.get(phase, 0) + int_field(span, "total_tokens_delta")
+
+    for worker_id, summary in reconstructed.items():
+        summary["top_phases"] = [
+            {"phase": phase, "total_tokens": tokens}
+            for phase, tokens in sorted(
+                phase_totals.get(worker_id, {}).items(), key=lambda item: item[1], reverse=True
+            )
+            if tokens > 0
+        ]
+
+    return list(reconstructed.values())
+
+
 def token_summary_payload(repo: Path, *, issue: str = "", worker: str = "", limit: int = 10) -> dict[str, Any]:
     records = filter_token_records(load_jsonl_records(token_workers_path(repo)), issue=issue, worker=worker)
+    spans = filter_token_records(load_jsonl_records(token_spans_path(repo)), issue=issue, worker=worker)
+    existing_worker_ids = {str(record.get("worker_session_id") or "") for record in records}
+    records.extend(reconstruct_token_worker_records_from_spans(spans, existing_worker_ids))
     records = sorted(records, key=lambda record: int_field(record, "total_tokens"), reverse=True)
     limited = records[: max(limit, 0)]
     top = limited[0] if limited else None
