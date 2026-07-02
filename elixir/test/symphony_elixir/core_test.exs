@@ -1470,6 +1470,114 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "forbidden command failures park even when a retryable product correction is open" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-forbidden-command-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-forbidden-command-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-FORBIDDEN-COMMAND",
+        state: "Rework",
+        title: "Forbidden command worker",
+        description: "Worker should park command guard failures before redispatch.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, product_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "controller-pr103-codex-review",
+                 source_status: "failed",
+                 summary: "Fix src/features/swipe/SwipeExperience.tsx before validation retry.",
+                 findings: [
+                   "src/features/swipe/SwipeExperience.tsx still needs a bounded code/test fix."
+                 ],
+                 required_corrections: [
+                   "Edit src/features/swipe/SwipeExperience.tsx and rerun tests/unit/swipe-experience-request.test.ts."
+                 ],
+                 next_action: "retry"
+               })
+
+      ref = make_ref()
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{issue_id => running_entry},
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      reason =
+        {:forbidden_command, "/bin/zsh -lc 'git diff --stat origin/main -- src/features/swipe/SwipeExperience.tsx src/app/api/cards/handler.ts'",
+         "(^|\\s|[\"'])git\\s+diff(\\s|$)(?![^\"'\\n]*--exit-code origin/main HEAD -- src/app/api/cards/handler\\.ts)"}
+
+      {:noreply, state} =
+        Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      corrections =
+        workspace
+        |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+        |> Path.wildcard()
+        |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+
+      assert Enum.any?(
+               corrections,
+               &(&1["correction_id"] == product_correction["correction_id"] and
+                   &1["next_action"] == "retry")
+             )
+
+      permission_correction =
+        Enum.find(corrections, &(&1["source"] == "symphony.runtime.permission"))
+
+      assert permission_correction
+      assert permission_correction["next_action"] == "block"
+      assert permission_correction["summary"] =~ "command denied"
+      assert Enum.join(permission_correction["findings"], "\n") =~ "forbidden_command"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "permission"
+      assert body =~ "forbidden_command"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "retryable worker failures park after the configured retry budget" do
     test_root =
       Path.join(
@@ -8576,6 +8684,497 @@ defmodule SymphonyElixir.CoreTest do
       assert resolved["status"] == "resolved"
       assert resolved["resolution_summary"] =~ "permission_guard_resolved_by_orchestration_review_polling_policy"
       refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker with no-progress telemetry parks correction before retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS",
+        state: "In Progress",
+        title: "Normal no-progress worker",
+        description: "A worker can finish normally while still doing no durable work.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      session_id = "thread-normal-no-progress-turn-normal-no-progress"
+      started_at = DateTime.utc_now() |> DateTime.add(-20, :second) |> DateTime.truncate(:second)
+      ended_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => session_id,
+          "thread_id" => "thread-normal-no-progress",
+          "turn_id" => "turn-normal-no-progress",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 42_451,
+          "input_tokens" => 41_706,
+          "cached_input_tokens" => 22_272,
+          "output_tokens" => 745,
+          "counted_guard_tokens" => 19_434,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "handoff", "total_tokens" => 22_061},
+            %{"phase" => "command", "total_tokens" => 20_390}
+          ],
+          "loop_signatures" => ["no_durable_progress", "handoff_loop"]
+        }) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            session_id: session_id,
+            codex_total_tokens: 42_451,
+            codex_cached_input_tokens: 22_272
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 42_451
+      assert correction["guard"]["durable_progress_guard_tokens"] == 19_434
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker parks no-progress correction when session id update is missing" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-missing-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-missing-session"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-MISSING-SESSION",
+        state: "In Progress",
+        title: "Normal no-progress worker missing session",
+        description: "A session update can race normal worker completion.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at = DateTime.utc_now() |> DateTime.add(-30, :second) |> DateTime.truncate(:second)
+      stale_started_at = DateTime.add(running_started_at, -120, :second)
+      started_at = DateTime.add(running_started_at, 8, :second)
+      ended_at = DateTime.add(started_at, 16, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      stale_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "old-thread-old-turn",
+          "started_at" => DateTime.to_iso8601(stale_started_at),
+          "ended_at" => DateTime.to_iso8601(DateTime.add(stale_started_at, 10, :second)),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 99_999,
+          "cached_input_tokens" => 0,
+          "counted_guard_tokens" => 99_999,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => []
+        })
+
+      current_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "current-thread-current-turn",
+          "thread_id" => "current-thread",
+          "turn_id" => "current-turn",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 43_117,
+          "input_tokens" => 42_079,
+          "cached_input_tokens" => 39_680,
+          "output_tokens" => 1_038,
+          "counted_guard_tokens" => 2_399,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "code_read", "total_tokens" => 22_352},
+            %{"phase" => "command", "total_tokens" => 20_765}
+          ],
+          "loop_signatures" => ["no_durable_progress", "read_loop"]
+        })
+
+      File.write!(Path.join(workers_dir, "workers.jsonl"), stale_summary <> "\n" <> current_summary <> "\n")
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: nil,
+            codex_total_tokens: 43_117,
+            codex_cached_input_tokens: 39_680
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 43_117
+      assert correction["guard"]["durable_progress_guard_tokens"] == 43_117
+      assert correction["guard"]["cached_input_tokens"] == 39_680
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker uses newer issue summary when stored session is stale" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-stale-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-stale-session"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-STALE-SESSION",
+        state: "In Progress",
+        title: "Normal no-progress worker with stale session",
+        description: "A stored session id can point at a prior turn while the latest issue summary is blocked.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+      old_started_at = DateTime.add(running_started_at, 5, :second)
+      old_ended_at = DateTime.add(old_started_at, 10, :second)
+      current_started_at = DateTime.add(old_ended_at, 5, :second)
+      current_ended_at = DateTime.add(current_started_at, 18, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      old_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-stale-turn-old",
+          "thread_id" => "thread-stale",
+          "turn_id" => "turn-old",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(old_started_at),
+          "ended_at" => DateTime.to_iso8601(old_ended_at),
+          "status" => "completed",
+          "total_tokens" => 1_200,
+          "cached_input_tokens" => 0,
+          "counted_guard_tokens" => 1_200,
+          "durable_progress_events" => ["tool.finished"],
+          "dirty_files" => [],
+          "new_commits" => []
+        })
+
+      current_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-stale-turn-current",
+          "thread_id" => "thread-stale",
+          "turn_id" => "turn-current",
+          "turn" => 2,
+          "started_at" => DateTime.to_iso8601(current_started_at),
+          "ended_at" => DateTime.to_iso8601(current_ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 20_512,
+          "input_tokens" => 20_088,
+          "cached_input_tokens" => 2_432,
+          "output_tokens" => 424,
+          "counted_guard_tokens" => 17_656,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "command", "total_tokens" => 20_512}
+          ],
+          "loop_signatures" => ["no_durable_progress"]
+        })
+
+      File.write!(Path.join(workers_dir, "workers.jsonl"), old_summary <> "\n" <> current_summary <> "\n")
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: "thread-stale-turn-old",
+            codex_total_tokens: 20_512,
+            codex_cached_input_tokens: 2_432
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 20_512
+      assert correction["guard"]["durable_progress_guard_tokens"] == 17_656
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker with retryable correction parks repeated no-progress attempt" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-open-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-open-retry-correction"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-OPEN-RETRY",
+        state: "Rework",
+        title: "Normal no-progress worker with open retry correction",
+        description: "A retryable product correction should not hide a stuck worker loop.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, product_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "controller-pr103-codex-review",
+                 source_status: "failed",
+                 summary: "Fix src/features/swipe/SwipeExperience.tsx so guest preferences are not sent to /api/cards.",
+                 findings: [
+                   "Current review feedback requires a scoped edit in src/features/swipe/SwipeExperience.tsx."
+                 ],
+                 required_corrections: [
+                   "Edit src/features/swipe/SwipeExperience.tsx and run tests/unit/swipe-experience-request.test.ts."
+                 ],
+                 next_action: "retry"
+               })
+
+      running_started_at = DateTime.utc_now() |> DateTime.add(-30, :second) |> DateTime.truncate(:second)
+      started_at = DateTime.add(running_started_at, 8, :second)
+      ended_at = DateTime.add(started_at, 16, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "retry-thread-retry-turn",
+          "thread_id" => "retry-thread",
+          "turn_id" => "retry-turn",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 42_249,
+          "input_tokens" => 41_686,
+          "cached_input_tokens" => 22_272,
+          "output_tokens" => 563,
+          "counted_guard_tokens" => 19_414,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "handoff", "total_tokens" => 21_880},
+            %{"phase" => "command", "total_tokens" => 20_369}
+          ],
+          "loop_signatures" => ["no_durable_progress", "handoff_loop"]
+        }) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: nil,
+            codex_total_tokens: 42_249,
+            codex_cached_input_tokens: 22_272
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      open_corrections = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert length(open_corrections) == 2
+
+      assert Enum.any?(
+               open_corrections,
+               &(&1["correction_id"] == product_correction["correction_id"] and
+                   &1["next_action"] == "retry")
+             )
+
+      runtime_correction =
+        Enum.find(open_corrections, &(&1["source"] == "symphony.runtime.no-durable-progress"))
+
+      assert runtime_correction
+      assert runtime_correction["source_status"] == "blocked"
+      assert runtime_correction["next_action"] == "block"
+      assert runtime_correction["guard"]["total_tokens"] == 42_249
+      assert runtime_correction["guard"]["durable_progress_guard_tokens"] == 19_414
     after
       File.rm_rf(test_root)
     end

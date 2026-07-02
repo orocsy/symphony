@@ -1122,6 +1122,7 @@ defmodule SymphonyElixir.ReviewMonitor do
     - Issue: `#{issue.identifier}`
     - PR: ##{feedback.pr_number} #{feedback.pr_url}
     - Reviewed head: `#{short_sha(feedback.head_sha)}`
+    - Marker: `review_rework_needed`
     - Next action: Symphony should fix accepted current-code findings on the existing PR branch, revalidate, push, request `@codex review` again, and return to Human Review only after a fresh review scan is clean.
 
     Active feedback:

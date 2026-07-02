@@ -146,31 +146,40 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case reason do
             :normal ->
-              if workflow_blocked_by_open_correction?(running_entry) do
-                Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; open Orocsy correction blocks continuation until resolved")
+              cond do
+                workflow_blocked_by_non_dispatchable_correction?(running_entry) ->
+                  Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; open Orocsy correction blocks continuation until resolved")
 
-                state
-                |> complete_issue(issue_id)
-                |> release_issue_claim(issue_id)
-              else
-                if normal_completion_handoff_stop?(running_entry) do
+                  state
+                  |> complete_issue(issue_id)
+                  |> release_issue_claim(issue_id)
+
+                normal_completion_handoff_stop?(running_entry) ->
                   Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; pushed handoff checkpoint blocks continuation until review/Linear state changes")
 
                   state
                   |> complete_issue(issue_id)
                   |> release_issue_claim(issue_id)
-                else
-                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-                  state
-                  |> complete_issue(issue_id)
-                  |> schedule_issue_retry(issue_id, 1, %{
-                    identifier: running_entry.identifier,
-                    delay_type: :continuation,
-                    worker_host: Map.get(running_entry, :worker_host),
-                    workspace_path: Map.get(running_entry, :workspace_path)
-                  })
-                end
+                true ->
+                  case normal_completion_no_progress_failure(running_entry) do
+                    {:block, no_progress_reason, failure} ->
+                      Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id} with no durable progress above token threshold; parking for workflow correction")
+
+                      park_failed_issue(state, issue_id, running_entry, no_progress_reason, failure)
+
+                    :ok ->
+                      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+                      state
+                      |> complete_issue(issue_id)
+                      |> schedule_issue_retry(issue_id, 1, %{
+                        identifier: running_entry.identifier,
+                        delay_type: :continuation,
+                        worker_host: Map.get(running_entry, :worker_host),
+                        workspace_path: Map.get(running_entry, :workspace_path)
+                      })
+                  end
               end
 
             _ ->
@@ -178,6 +187,14 @@ defmodule SymphonyElixir.Orchestrator do
                 provider_usage_limit_failure?(reason) ->
                   Logger.warning(
                     "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} after Codex provider usage limit; parking until worker quota is available"
+                  )
+
+                  state
+                  |> handle_agent_failure(issue_id, running_entry, reason)
+
+                agent_failure_must_park_before_open_correction?(reason, running_entry) ->
+                  Logger.warning(
+                    "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} with a blocking runtime failure; parking despite any retryable product correction"
                   )
 
                   state
@@ -3047,6 +3064,346 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp agent_failure_must_park_before_open_correction?(reason, running_entry) do
+    reason
+    |> classify_agent_failure()
+    |> maybe_recover_token_budget_handoff(running_entry)
+    |> Map.get(:action)
+    |> Kernel.==(:block)
+  end
+
+  defp normal_completion_no_progress_failure(running_entry) do
+    codex_config = Config.settings!().codex
+    timeout_ms = codex_config.durable_progress_timeout_ms
+    min_tokens = effective_no_durable_progress_min_tokens(running_entry, codex_config.durable_progress_min_tokens)
+
+    with true <- is_integer(timeout_ms) and timeout_ms > 0,
+         true <- is_integer(min_tokens) and min_tokens > 0,
+         workspace when is_binary(workspace) <- Map.get(running_entry, :workspace_path),
+         {:ok, %{} = summary} <- latest_worker_summary_for_running_entry(workspace, running_entry),
+         true <- summary["status"] == "blocked_no_durable_progress",
+         summary_counted_tokens when is_integer(summary_counted_tokens) <- integer_like(summary["counted_guard_tokens"]) do
+      elapsed_ms = worker_summary_elapsed_ms(summary) || runtime_elapsed_ms(running_entry, DateTime.utc_now()) || 0
+      total_tokens = integer_like(summary["total_tokens"]) || Map.get(running_entry, :codex_total_tokens, 0)
+      cached_input_tokens = integer_like(summary["cached_input_tokens"]) || Map.get(running_entry, :codex_cached_input_tokens, 0)
+
+      counted_tokens =
+        normal_completion_guard_tokens(
+          workspace,
+          running_entry,
+          summary,
+          summary_counted_tokens,
+          total_tokens,
+          min_tokens
+        )
+
+      first_event_max_tokens = effective_first_event_max_tokens(running_entry, codex_config.durable_progress_first_event_max_tokens)
+      first_event_tokens = max(counted_tokens, first_event_progress_tokens(running_entry, total_tokens))
+      validation_failure = validation_failure_for_guard(running_entry)
+
+      cond do
+        normal_completion_first_event_budget_exceeded?(
+          running_entry,
+          first_event_tokens,
+          first_event_max_tokens
+        ) ->
+          failure =
+            missing_first_durable_event_failure(
+              elapsed_ms,
+              total_tokens,
+              first_event_tokens,
+              first_event_max_tokens,
+              cached_input_tokens
+            )
+
+          reason = {:missing_first_durable_event, elapsed_ms, first_event_tokens, first_event_max_tokens}
+
+          {:block, reason, failure}
+
+        validation_failure != nil and counted_tokens >= min_tokens ->
+          failure =
+            validation_blocker_failure(
+              validation_failure,
+              elapsed_ms,
+              elapsed_ms,
+              total_tokens,
+              counted_tokens,
+              cached_input_tokens,
+              timeout_ms,
+              min_tokens
+            )
+
+          reason =
+            {:validation_failure_blocker, elapsed_ms, elapsed_ms, counted_tokens, timeout_ms, min_tokens}
+
+          {:block, reason, failure}
+
+        counted_tokens >= min_tokens ->
+          failure =
+            elapsed_ms
+            |> no_durable_progress_failure(
+              elapsed_ms,
+              total_tokens,
+              counted_tokens,
+              cached_input_tokens,
+              timeout_ms,
+              min_tokens
+            )
+            |> maybe_recover_no_durable_progress_handoff(running_entry)
+
+          reason = {:normal_completion_no_durable_progress, elapsed_ms, elapsed_ms, counted_tokens, timeout_ms, min_tokens}
+
+          {:block, reason, failure}
+
+        true ->
+          :ok
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp normal_completion_guard_tokens(
+         workspace,
+         running_entry,
+         summary,
+         summary_counted_tokens,
+         total_tokens,
+         min_tokens
+       ) do
+    accumulated_tokens = accumulated_worker_summary_counted_tokens(workspace, running_entry, summary)
+
+    counted_tokens =
+      [summary_counted_tokens, accumulated_tokens]
+      |> Enum.filter(&is_integer/1)
+      |> Enum.max(fn -> 0 end)
+
+    if counted_tokens < min_tokens and total_tokens >= min_tokens and normal_completion_cached_loop_summary?(summary) do
+      total_tokens
+    else
+      counted_tokens
+    end
+  end
+
+  defp normal_completion_cached_loop_summary?(%{} = summary) do
+    phases =
+      summary
+      |> Map.get("top_phases", [])
+      |> Enum.flat_map(fn
+        %{"phase" => phase} when is_binary(phase) -> [phase]
+        _ -> []
+      end)
+
+    loop_signatures =
+      summary
+      |> Map.get("loop_signatures", [])
+      |> Enum.filter(&is_binary/1)
+
+    Enum.any?(loop_signatures, &(&1 in ["read_loop", "handoff_loop", "review_loop", "validation_loop"])) or
+      Enum.any?(phases, &(&1 in ["code_read", "command", "handoff", "review_handoff", "validation"]))
+  end
+
+  defp normal_completion_first_event_budget_exceeded?(running_entry, first_event_tokens, first_event_max_tokens) do
+    pushed_handoff_wait_checkpoint? = pushed_handoff_wait_checkpoint?(running_entry)
+
+    no_first_event? =
+      not substantive_first_progress_observed?(running_entry) and
+        not handoff_recovery_progress_observed?(running_entry) and
+        not pushed_handoff_wait_checkpoint?
+
+    is_integer(first_event_max_tokens) and first_event_max_tokens > 0 and
+      first_event_tokens >= first_event_max_tokens and no_first_event? and
+      not review_request_wait_checkpoint?(running_entry)
+  end
+
+  defp latest_worker_summary_for_running_entry(workspace, running_entry)
+       when is_binary(workspace) and is_map(running_entry) do
+    case running_entry_session_id(running_entry) do
+      session_id when is_binary(session_id) and session_id != "n/a" ->
+        newest_worker_summary_result(
+          latest_worker_summary_for_session(workspace, session_id),
+          latest_worker_summary_for_issue(workspace, running_entry)
+        )
+
+      _ ->
+        latest_worker_summary_for_issue(workspace, running_entry)
+    end
+  end
+
+  defp latest_worker_summary_for_running_entry(_workspace, _running_entry), do: :error
+
+  defp newest_worker_summary_result({:ok, %{} = session_summary}, {:ok, %{} = issue_summary}) do
+    if worker_summary_after?(issue_summary, session_summary) do
+      {:ok, issue_summary}
+    else
+      {:ok, session_summary}
+    end
+  end
+
+  defp newest_worker_summary_result({:ok, %{} = summary}, _issue_result), do: {:ok, summary}
+  defp newest_worker_summary_result(_session_result, {:ok, %{} = summary}), do: {:ok, summary}
+  defp newest_worker_summary_result(_session_result, _issue_result), do: :error
+
+  defp worker_summary_after?(%{} = candidate, %{} = current) do
+    with %DateTime{} = candidate_time <- worker_summary_sort_time(candidate),
+         %DateTime{} = current_time <- worker_summary_sort_time(current) do
+      DateTime.compare(candidate_time, current_time) == :gt
+    else
+      _ -> false
+    end
+  end
+
+  defp worker_summary_after?(_candidate, _current), do: false
+
+  defp worker_summary_sort_time(%{} = summary) do
+    (summary["ended_at"] || summary["started_at"])
+    |> datetime_from_iso8601()
+  end
+
+  defp worker_summary_sort_time(_summary), do: nil
+
+  defp latest_worker_summary_for_session(workspace, session_id)
+       when is_binary(workspace) and is_binary(session_id) do
+    path = Path.join(workspace, ".orocsy/delivery/token-telemetry/workers.jsonl")
+
+    case File.read(path) do
+      {:ok, content} ->
+        summary =
+          content
+          |> String.split("\n", trim: true)
+          |> Enum.reverse()
+          |> Enum.find_value(fn line ->
+            with {:ok, %{} = summary} <- Jason.decode(line),
+                 true <- summary["worker_session_id"] == session_id do
+              summary
+            else
+              _ -> nil
+            end
+          end)
+
+        case summary do
+          %{} = summary -> {:ok, summary}
+          nil -> :error
+        end
+
+      {:error, _reason} ->
+        :error
+    end
+  rescue
+    _error -> :error
+  end
+
+  defp latest_worker_summary_for_session(_workspace, _session_id), do: :error
+
+  defp latest_worker_summary_for_issue(workspace, running_entry)
+       when is_binary(workspace) and is_map(running_entry) do
+    path = Path.join(workspace, ".orocsy/delivery/token-telemetry/workers.jsonl")
+
+    case File.read(path) do
+      {:ok, content} ->
+        summary =
+          content
+          |> String.split("\n", trim: true)
+          |> Enum.reverse()
+          |> Enum.find_value(fn line ->
+            with {:ok, %{} = summary} <- Jason.decode(line),
+                 true <- worker_summary_matches_running_entry?(summary, running_entry) do
+              summary
+            else
+              _ -> nil
+            end
+          end)
+
+        case summary do
+          %{} = summary -> {:ok, summary}
+          nil -> :error
+        end
+
+      {:error, _reason} ->
+        :error
+    end
+  rescue
+    _error -> :error
+  end
+
+  defp latest_worker_summary_for_issue(_workspace, _running_entry), do: :error
+
+  defp accumulated_worker_summary_counted_tokens(workspace, running_entry, %{} = current_summary)
+       when is_binary(workspace) and is_map(running_entry) do
+    path = Path.join(workspace, ".orocsy/delivery/token-telemetry/workers.jsonl")
+    thread_id = current_summary["thread_id"]
+
+    case File.read(path) do
+      {:ok, content} ->
+        content
+        |> String.split("\n", trim: true)
+        |> Enum.reduce(0, fn line, total ->
+          with {:ok, %{} = summary} <- Jason.decode(line),
+               true <- summary["status"] == "blocked_no_durable_progress",
+               true <- worker_summary_same_thread?(summary, thread_id),
+               true <- worker_summary_matches_running_entry?(summary, running_entry),
+               counted_tokens when is_integer(counted_tokens) <- integer_like(summary["counted_guard_tokens"]) do
+            total + counted_tokens
+          else
+            _ -> total
+          end
+        end)
+
+      {:error, _reason} ->
+        0
+    end
+  rescue
+    _error -> 0
+  end
+
+  defp accumulated_worker_summary_counted_tokens(_workspace, _running_entry, _current_summary), do: 0
+
+  defp worker_summary_same_thread?(%{} = summary, thread_id) when is_binary(thread_id) and thread_id != "" do
+    summary["thread_id"] == thread_id
+  end
+
+  defp worker_summary_same_thread?(%{} = summary, _thread_id) do
+    is_binary(summary["worker_session_id"])
+  end
+
+  defp worker_summary_matches_running_entry?(%{} = summary, running_entry) do
+    worker_summary_issue_matches?(summary, running_entry) and
+      worker_summary_started_after_running_entry?(summary, running_entry)
+  end
+
+  defp worker_summary_matches_running_entry?(_summary, _running_entry), do: false
+
+  defp worker_summary_issue_matches?(%{} = summary, running_entry) do
+    issue = Map.get(running_entry, :issue)
+    issue_id = if match?(%Issue{}, issue), do: issue.id
+    identifier = Map.get(running_entry, :identifier)
+
+    (is_binary(issue_id) and summary["linear_issue_id"] == issue_id) or
+      (is_binary(identifier) and summary["issue"] == identifier)
+  end
+
+  defp worker_summary_started_after_running_entry?(%{"started_at" => started_at}, running_entry) do
+    with %DateTime{} = summary_started <- datetime_from_iso8601(started_at),
+         %DateTime{} = running_started <- Map.get(running_entry, :started_at) do
+      DateTime.diff(summary_started, running_started, :second) >= -5
+    else
+      _ -> false
+    end
+  end
+
+  defp worker_summary_started_after_running_entry?(_summary, _running_entry), do: false
+
+  defp worker_summary_elapsed_ms(%{"started_at" => started_at, "ended_at" => ended_at}) do
+    with %DateTime{} = started <- datetime_from_iso8601(started_at),
+         %DateTime{} = ended <- datetime_from_iso8601(ended_at) do
+      max(0, DateTime.diff(ended, started, :millisecond))
+    else
+      _ -> nil
+    end
+  end
+
+  defp worker_summary_elapsed_ms(_summary), do: nil
+
   defp park_failed_issue(%State{} = state, issue_id, running_entry, reason, failure) do
     identifier = Map.get(running_entry, :identifier, issue_id)
     workspace_path = Map.get(running_entry, :workspace_path)
@@ -3160,9 +3517,9 @@ defmodule SymphonyElixir.Orchestrator do
           kind: "permission",
           source_status: "blocked",
           next_action: "block",
-          summary: "Symphony stopped because the Codex worker requested approval or interactive input that cannot be safely granted in non-interactive automation.",
+          summary: "Symphony stopped because the Codex worker requested approval, interactive input, or a command denied by the non-interactive automation guard.",
           required_corrections: [
-            "Review the requested approval/input and decide whether the workflow config should allow a narrower safe path.",
+            "Review the requested approval/input/forbidden command and decide whether the worker prompt or workflow config should allow a narrower safe path.",
             "Resolve this Orocsy correction before redispatching the issue."
           ]
         }
@@ -4464,6 +4821,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp workflow_blocked_by_open_correction?(_issue_or_running_entry, _metadata), do: false
+
+  defp workflow_blocked_by_non_dispatchable_correction?(issue_or_running_entry, metadata \\ %{})
+
+  defp workflow_blocked_by_non_dispatchable_correction?(%{issue: %Issue{} = issue} = running_entry, _metadata) do
+    metadata = %{
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    }
+
+    workflow_blocked_by_open_correction?(issue, metadata) and
+      not workflow_correction_gate_allows_dispatch?(issue, metadata)
+  end
+
+  defp workflow_blocked_by_non_dispatchable_correction?(%{identifier: identifier} = running_entry, _metadata)
+       when is_binary(identifier) do
+    metadata = %{
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    }
+
+    workflow_blocked_by_open_correction?(identifier, metadata) and
+      not workflow_correction_gate_allows_dispatch?(identifier, metadata)
+  end
+
+  defp workflow_blocked_by_non_dispatchable_correction?(issue_or_identifier, metadata) do
+    workflow_blocked_by_open_correction?(issue_or_identifier, metadata) and
+      not workflow_correction_gate_allows_dispatch?(issue_or_identifier, metadata)
+  end
 
   defp workflow_correction_gate_allows_dispatch?(issue_or_identifier, metadata \\ %{})
 
