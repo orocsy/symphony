@@ -8796,6 +8796,116 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "normally completed worker preserves validation blocker before first-event block" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-validation-before-first-event-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue_id = "issue-normal-validation-before-first-event"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-VALIDATION-FIRST-EVENT",
+        state: "In Progress",
+        title: "Normal validation failure before first-event block",
+        description: "Validation failure should remain the actionable runtime correction.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      session_id = "thread-validation-first-event-turn"
+      started_at = DateTime.utc_now() |> DateTime.add(-20, :second) |> DateTime.truncate(:second)
+      failed_at = DateTime.add(started_at, 8, :second)
+      ended_at = DateTime.add(started_at, 18, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => session_id,
+          "thread_id" => "thread-validation-first-event",
+          "turn_id" => "turn-validation-first-event",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 2_500,
+          "input_tokens" => 2_350,
+          "cached_input_tokens" => 0,
+          "output_tokens" => 150,
+          "counted_guard_tokens" => 500,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [%{"phase" => "validation", "total_tokens" => 2_500}],
+          "loop_signatures" => ["no_durable_progress", "validation_loop"]
+        }) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            session_id: session_id,
+            codex_total_tokens: 2_500,
+            codex_cached_input_tokens: 0,
+            last_validation_failure_at: failed_at,
+            last_validation_failure_command: "pnpm test -- tests/unit/cards.test.ts",
+            last_validation_failure_evidence: "expected allergies to stay bounded"
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.validation-blocker"
+      assert correction["source_status"] == "retryable"
+      assert correction["next_action"] == "retry"
+      assert correction["guard"]["command"] == "pnpm test -- tests/unit/cards.test.ts"
+      assert correction["guard"]["total_tokens"] == 2_500
+      assert correction["guard"]["durable_progress_guard_tokens"] == 500
+      refute correction["source"] == "symphony.runtime.missing-first-durable-event"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "normally completed worker parks no-progress correction when session id update is missing" do
     test_root =
       Path.join(
@@ -9023,6 +9133,131 @@ defmodule SymphonyElixir.CoreTest do
             started_at: running_started_at,
             workspace_path: workspace,
             session_id: "thread-stale-turn-old",
+            codex_total_tokens: 20_512,
+            codex_cached_input_tokens: 2_432
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 20_512
+      assert correction["guard"]["durable_progress_guard_tokens"] == 17_656
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker uses issue summary when stale session timestamp ties latest issue telemetry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-stale-session-tie-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-stale-session-tie"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-STALE-SESSION-TIE",
+        state: "In Progress",
+        title: "Normal no-progress stale session timestamp tie",
+        description: "Second-granularity telemetry ties should prefer the latest issue entry.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+      shared_started_at = DateTime.add(running_started_at, 5, :second)
+      shared_ended_at = DateTime.add(shared_started_at, 10, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      old_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-tie-turn-old",
+          "thread_id" => "thread-tie",
+          "turn_id" => "turn-old",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(shared_started_at),
+          "ended_at" => DateTime.to_iso8601(shared_ended_at),
+          "status" => "completed",
+          "total_tokens" => 1_200,
+          "cached_input_tokens" => 0,
+          "counted_guard_tokens" => 1_200,
+          "durable_progress_events" => ["tool.finished"],
+          "dirty_files" => [],
+          "new_commits" => []
+        })
+
+      current_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-tie-turn-current",
+          "thread_id" => "thread-tie",
+          "turn_id" => "turn-current",
+          "turn" => 2,
+          "started_at" => DateTime.to_iso8601(shared_started_at),
+          "ended_at" => DateTime.to_iso8601(shared_ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 20_512,
+          "input_tokens" => 20_088,
+          "cached_input_tokens" => 2_432,
+          "output_tokens" => 424,
+          "counted_guard_tokens" => 17_656,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "command", "total_tokens" => 20_512}
+          ],
+          "loop_signatures" => ["no_durable_progress"]
+        })
+
+      File.write!(Path.join(workers_dir, "workers.jsonl"), old_summary <> "\n" <> current_summary <> "\n")
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: "thread-tie-turn-old",
             codex_total_tokens: 20_512,
             codex_cached_input_tokens: 2_432
           }

@@ -3101,26 +3101,18 @@ defmodule SymphonyElixir.Orchestrator do
       first_event_tokens = max(counted_tokens, first_event_progress_tokens(running_entry, total_tokens))
       validation_failure = validation_failure_for_guard(running_entry)
 
-      cond do
+      first_event_budget_exceeded? =
         normal_completion_first_event_budget_exceeded?(
           running_entry,
           first_event_tokens,
           first_event_max_tokens
-        ) ->
-          failure =
-            missing_first_durable_event_failure(
-              elapsed_ms,
-              total_tokens,
-              first_event_tokens,
-              first_event_max_tokens,
-              cached_input_tokens
-            )
+        )
 
-          reason = {:missing_first_durable_event, elapsed_ms, first_event_tokens, first_event_max_tokens}
+      validation_blocker_guard? =
+        validation_failure != nil and (first_event_budget_exceeded? or counted_tokens >= min_tokens)
 
-          {:block, reason, failure}
-
-        validation_failure != nil and counted_tokens >= min_tokens ->
+      cond do
+        validation_blocker_guard? ->
           failure =
             validation_blocker_failure(
               validation_failure,
@@ -3135,6 +3127,20 @@ defmodule SymphonyElixir.Orchestrator do
 
           reason =
             {:validation_failure_blocker, elapsed_ms, elapsed_ms, counted_tokens, timeout_ms, min_tokens}
+
+          {:block, reason, failure}
+
+        first_event_budget_exceeded? ->
+          failure =
+            missing_first_durable_event_failure(
+              elapsed_ms,
+              total_tokens,
+              first_event_tokens,
+              first_event_max_tokens,
+              cached_input_tokens
+            )
+
+          reason = {:missing_first_durable_event, elapsed_ms, first_event_tokens, first_event_max_tokens}
 
           {:block, reason, failure}
 
@@ -3247,7 +3253,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp worker_summary_after?(%{} = candidate, %{} = current) do
     with %DateTime{} = candidate_time <- worker_summary_sort_time(candidate),
          %DateTime{} = current_time <- worker_summary_sort_time(current) do
-      DateTime.compare(candidate_time, current_time) == :gt
+      DateTime.compare(candidate_time, current_time) != :lt
     else
       _ -> false
     end
