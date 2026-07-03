@@ -605,7 +605,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     If the preflight PR is unknown, use bounded read-only `gh pr view`/`gh pr list` for the configured integration branch before deciding whether a same-branch PR handoff is missing. If you use `gh api` for PR lookup, it must include `--method GET`; never pass `-f`, `-F`, `--field`, or `--raw-field` without `--method GET`.
     If no PR exists for the configured integration branch after bounded lookup, create exactly one PR for that branch only when the branch contains the intended handoff commits; do not create a new branch.
     For full-suite Vitest validation, if the issue/preflight declares `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not rerun plain `pnpm test` after a `node_modules/.vite-temp` EPERM.
-    If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only `git diff --stat` plus focused diffs for the dirty files. If recent passed Orocsy validation/gate evidence already covers those dirty files and the diff has not changed since that evidence, do not rerun the same validation command before committing; stage, commit, push the existing PR branch, and request fresh review. Rerun exact focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
+    If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only focused `git diff -- <dirty-file>` reads for the dirty files; do not run `git log` or `git diff --stat` — the runtime denies them. If recent passed Orocsy validation/gate evidence already covers those dirty files and the diff has not changed since that evidence, do not rerun the same validation command before committing; stage, commit, push the existing PR branch, and request fresh review. Rerun exact focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
     In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
     If no unmerged files remain and the issue brief has a `Current Validation Rework` section or an open correction names validation failures, treat the turn as validation rework: inspect and edit only the named in-scope helper/test files before rerunning validation.
     In validation rework, do not just rerun the same failing validation command and create the same correction again. First restore the missing export, fallback behavior, or directly named assertion path from the issue brief/correction; then rerun the exact focused validation command.
@@ -623,6 +623,22 @@ defmodule SymphonyElixir.Codex.AppServer do
     """
     |> String.trim()
   end
+
+  @doc """
+  Returns the effective forbidden command patterns for a workspace, merging the
+  configured patterns with the dispatch-mode-specific additions. Used by the
+  prompt builder to surface the command policy to workers instead of leaving it
+  as an invisible tripwire.
+  """
+  @spec effective_forbidden_command_patterns_for(String.t()) :: [String.t()]
+  def effective_forbidden_command_patterns_for(workspace) when is_binary(workspace) do
+    patterns = Config.settings!().codex.forbidden_command_patterns
+    effective_forbidden_command_patterns(workspace, patterns)
+  rescue
+    _error -> []
+  end
+
+  def effective_forbidden_command_patterns_for(_workspace), do: []
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case dispatch_preflight_mode(workspace) do

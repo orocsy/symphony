@@ -11395,7 +11395,12 @@ defmodule SymphonyElixir.CoreTest do
 
       assert String.starts_with?(prompt, "Local handoff recovery checkpoint:")
       assert prompt =~ "no recent passed Orocsy validation/gate evidence"
-      assert prompt =~ "run the smallest validation needed for those changed files"
+      assert prompt =~ "run the smallest validation needed for the changed files listed above"
+      assert prompt =~ "Local commits ahead of `main` (runtime-provided; do not run `git log`)"
+      assert prompt =~ "Fix review feedback"
+      assert prompt =~ "Diffstat versus `main` (runtime-provided; do not run `git diff`)"
+      assert prompt =~ "Do not run `git log`, `git diff --stat`, or base-branch diff/history commands"
+      refute prompt =~ "inspect the focused local diff and local commits"
       assert prompt =~ "Do not restart or broaden implementation"
       assert prompt =~ "focused validation names exact in-scope files/assertions"
       assert prompt =~ "Ticket MT-203"
@@ -11475,6 +11480,146 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(workspace)
     end
+  end
+
+  test "prompt builder enforces open correction mode in review rework preflight prompts" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace_root = Path.join(System.tmp_dir!(), "symphony_workspaces")
+
+    workspace =
+      Path.join(
+        workspace_root,
+        "review-rework-open-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nCorrection fix.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Correction scoped fix"], cd: workspace, stderr_to_stdout: true)
+
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260703000000_1.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260703000000_1",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Fix the cards preference leakage.",
+          "findings" => ["requestCards must not send guest preferences."],
+          "required_corrections" => ["Remove guest preferences from requestCards."]
+        })
+      )
+
+      brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
+      File.mkdir_p!(brief_dir)
+
+      File.write!(
+        Path.join(brief_dir, "MT-204.md"),
+        "# MT-204 Brief\n\nRemove the no-op cards preference header.\n"
+      )
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/mt-204",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Resolve the open Orocsy correction before the review shortcut.",
+          "issue" => "MT-204",
+          "requirements" => %{
+            "issue_brief" => %{
+              "path" => ".codex/agentic/issue-briefs/MT-204.md",
+              "bytes" => 60
+            }
+          },
+          "review" => %{
+            "pr_number" => 5,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/5",
+            "head_sha" => "abcdef123456",
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 32,
+                "body" => "Remove the no-op cards preference header.",
+                "url" => "https://github.com/acme/nutribuddy/pull/5#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-204",
+        title: "Resolve open correction",
+        description: "Correction flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-204",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Open correction mode (runtime enforced):")
+      assert prompt =~ "correction-scoped-fix"
+      assert prompt =~ "Local commits ahead of `main` (runtime-provided; do not run `git log`)"
+      assert prompt =~ "Correction scoped fix"
+      assert prompt =~ "Runtime command policy (enforced by the Symphony command guard):"
+      assert prompt =~ "Issue brief (`.codex/agentic/issue-briefs/MT-204.md`), inlined by the runtime"
+      assert prompt =~ "Remove the no-op cards preference header."
+      assert prompt =~ "Open correction execution contract:"
+      assert prompt =~ "Runtime dispatch preflight:"
+      refute prompt =~ "Local handoff recovery checkpoint:"
+      refute prompt =~ "If a dirty/local handoff checkpoint appears above, follow that checkpoint first"
+      refute prompt =~ "inspect the focused local diff and local commits"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder prepends runtime policy violation interrupt when recovering a denied command" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "MT-206",
+      title: "Policy violation recovery",
+      description: "Recovery flow",
+      state: "Rework",
+      url: "https://example.org/issues/MT-206",
+      labels: []
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        policy_violation: %{
+          command: "/bin/zsh -lc 'git log --oneline origin/main..HEAD'",
+          pattern: "(^|\\s|[\"'])git\\s+log(\\s|$)",
+          attempt: 1,
+          max_attempts: 2
+        }
+      )
+
+    assert String.starts_with?(prompt, "Runtime command policy interrupt (recovery attempt 1 of 2):")
+    assert prompt =~ "Denied command: `/bin/zsh -lc 'git log --oneline origin/main..HEAD'`"
+    assert prompt =~ "Do not run that command again"
+    assert prompt =~ "Ticket MT-206"
   end
 
   test "prompt builder suppresses pushed handoff checkpoint in review rework preflight prompts" do

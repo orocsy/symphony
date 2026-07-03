@@ -761,7 +761,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
     - First task: #{preflight["first_task"]}
     - Open Orocsy corrections: #{format_corrections(open_corrections)}
-    - Dirty workspace recovery is the only task. Use `git status --short --branch`, `git diff --stat`, and focused `git diff -- <dirty-file>` reads before any edit.
+    - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
     - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
     - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}

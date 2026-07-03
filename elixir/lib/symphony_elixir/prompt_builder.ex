@@ -3,7 +3,8 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, DispatchPreflight, Workflow}
+  alias SymphonyElixir.{Config, DispatchPreflight, Workflow, Workspace}
+  alias SymphonyElixir.Codex.AppServer
 
   @render_opts [strict_variables: true, strict_filters: true]
   @recent_event_limit 80
@@ -50,7 +51,9 @@ defmodule SymphonyElixir.PromptBuilder do
           prompt
       end
 
-    maybe_prepend_dispatch_preflight(prompt, workspace)
+    prompt
+    |> maybe_prepend_dispatch_preflight(workspace)
+    |> maybe_prepend_policy_violation(opts)
   end
 
   @spec workspace_recovery_checkpoint(String.t() | nil) :: String.t()
@@ -58,18 +61,19 @@ defmodule SymphonyElixir.PromptBuilder do
     with true <- File.dir?(workspace),
          {:ok, status} <- git_status(workspace) do
       event_summary = recent_passed_event_summary(workspace)
+      git_context = runtime_git_context(workspace)
       pushed_handoff? = pushed_handoff_risk?(status)
       local_handoff? = local_handoff_risk?(status) or (not pushed_handoff? and local_commit_handoff_risk?(workspace))
 
       cond do
         local_handoff? and event_summary != "" ->
-          dirty_validated_handoff_checkpoint(status, event_summary)
+          dirty_validated_handoff_checkpoint(status, event_summary, git_context)
 
         local_handoff? ->
-          unvalidated_local_handoff_checkpoint(status)
+          unvalidated_local_handoff_checkpoint(status, git_context)
 
         pushed_handoff? and event_summary != "" ->
-          pushed_validated_handoff_checkpoint(status, event_summary)
+          pushed_validated_handoff_checkpoint(status, event_summary, git_context)
 
         true ->
           ""
@@ -266,14 +270,24 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_prepend_dispatch_preflight(prompt, workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => "review_rework"}} ->
-        [
-          review_rework_handoff_checkpoint(workspace),
-          DispatchPreflight.prompt_context(workspace),
-          review_rework_micro_prompt()
-        ]
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.join("\n\n")
+      {:ok, %{"mode" => "review_rework"} = preflight} ->
+        if open_blocking_corrections(workspace) == [] do
+          [
+            review_rework_handoff_checkpoint(workspace),
+            DispatchPreflight.prompt_context(workspace),
+            review_rework_micro_prompt()
+          ]
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.join("\n\n")
+        else
+          [
+            open_correction_mode_contract(workspace, preflight),
+            DispatchPreflight.prompt_context(workspace),
+            open_correction_micro_prompt(preflight)
+          ]
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.join("\n\n")
+        end
 
       {:ok, %{"mode" => "integration_check"}} ->
         checkpoint = workspace_recovery_checkpoint(workspace)
@@ -321,6 +335,254 @@ defmodule SymphonyElixir.PromptBuilder do
     - If the listed feedback is already resolved or outdated at the current head, record that classification, update the handoff state, and stop without editing.
     """
     |> String.trim()
+  end
+
+  defp open_blocking_corrections(workspace) when is_binary(workspace) do
+    Workspace.open_blocking_corrections_in_workspace(workspace)
+  rescue
+    _error -> []
+  end
+
+  defp open_blocking_corrections(_workspace), do: []
+
+  defp open_correction_mode_contract(workspace, preflight) do
+    checkpoint_event = correction_checkpoint_event(preflight)
+
+    sections =
+      [
+        """
+        Open correction mode (runtime enforced):
+
+        - This workspace has open Orocsy corrections. Resolving the newest applicable correction is the only first task. All handoff checkpoints and review shortcuts are suspended until the correction is resolved.
+        - Do not inspect commit history, diffs versus the base branch, PR/GitHub/Linear state, or handoff status first. The runtime-provided git context below already covers the repository state; use it as-is instead of running git discovery commands.
+        - Required worker checkpoint: immediately after the first scoped code/test edit, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "#{checkpoint_event}"`.
+        """
+        |> String.trim(),
+        runtime_workspace_context(workspace),
+        runtime_command_policy_section(workspace),
+        inline_issue_brief(workspace, preflight)
+      ]
+      |> Enum.reject(&(&1 == ""))
+
+    Enum.join(sections, "\n\n")
+  end
+
+  defp correction_checkpoint_event(%{"checkpoint_event" => event}) when is_binary(event) and event != "", do: event
+  defp correction_checkpoint_event(_preflight), do: "correction-scoped-fix"
+
+  defp runtime_workspace_context(workspace) do
+    status_section =
+      case git_status(workspace) do
+        {:ok, status} when status != "" ->
+          "- `git status --short --branch` (runtime-provided):\n#{indent(status)}"
+
+        _ ->
+          ""
+      end
+
+    [status_section, runtime_git_context(workspace)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+    |> case do
+      "" -> ""
+      context -> "Runtime-provided workspace context (do not re-derive it with git commands):\n\n" <> context
+    end
+  end
+
+  @command_policy_pattern_max_bytes 200
+
+  defp runtime_command_policy_section(workspace) do
+    patterns = effective_command_policy_patterns(workspace)
+
+    if patterns == [] do
+      ""
+    else
+      {readable, generated} = Enum.split_with(patterns, &(byte_size(&1) <= @command_policy_pattern_max_bytes))
+
+      rendered = Enum.map_join(readable, "\n", &"  #{&1}")
+
+      generated_note =
+        if generated == [] do
+          ""
+        else
+          "\n- Plus #{length(generated)} generated workspace path guard(s) that restrict `sed`/read commands to the exact files named by the correction, brief, and review feedback. Read only those named files."
+        end
+
+      """
+      Runtime command policy (enforced by the Symphony command guard):
+
+      - Commands matching any regex below are denied in this mode. Running one interrupts the worker turn and, after repeated violations, parks the issue for human review.
+      #{rendered}#{generated_note}
+      - The runtime-provided context above replaces the output of the denied git history/diff commands. Do not attempt equivalents or workarounds; make the scoped correction fix instead.
+      """
+      |> String.trim()
+    end
+  end
+
+  defp effective_command_policy_patterns(workspace) do
+    AppServer.effective_forbidden_command_patterns_for(workspace)
+  rescue
+    _error -> []
+  end
+
+  defp inline_issue_brief(workspace, preflight) do
+    with path when is_binary(path) and path != "" <- issue_brief_path_for_preflight(workspace, preflight),
+         full_path = Path.join(workspace, path),
+         true <- File.regular?(full_path),
+         {:ok, content} <- File.read(full_path) do
+      content = content |> String.trim() |> trim_issue_brief()
+
+      """
+      Issue brief (`#{path}`), inlined by the runtime — do not re-read it from disk:
+
+      #{content}
+      """
+      |> String.trim()
+    else
+      _ -> ""
+    end
+  rescue
+    _error -> ""
+  end
+
+  defp issue_brief_path_for_preflight(workspace, preflight) do
+    preflight_brief_path =
+      preflight
+      |> Map.get("requirements", %{})
+      |> case do
+        %{"issue_brief" => %{"path" => path}} when is_binary(path) -> path
+        _ -> nil
+      end
+
+    identifier =
+      case Map.get(preflight, "issue") do
+        identifier when is_binary(identifier) and identifier != "" -> identifier
+        _ -> nil
+      end
+
+    candidates =
+      [
+        preflight_brief_path,
+        identifier && Path.join(".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"),
+        ".orocsy/delivery/issue-brief.md"
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    Enum.find(candidates, fn candidate -> File.regular?(Path.join(workspace, candidate)) end)
+  end
+
+  defp open_correction_micro_prompt(preflight) do
+    checkpoint_event = correction_checkpoint_event(preflight)
+
+    """
+    Open correction execution contract:
+
+    - The open Orocsy correction overrides all review-rework shortcuts and handoff checkpoints. Do not append `review-feedback-classified`, do not retry browser validation-only runs, and do not commit, push, or request review before the correction fix and its evidence exist.
+    - Read only the exact code/test files named by the correction and the inlined issue brief above. Make the smallest in-scope fix or record a scoped blocker. Do not stop after analysis.
+    - Immediately after the first scoped code/test edit, append the `#{checkpoint_event}` durable event exactly as specified above.
+    - Then run only the focused validation named by the correction/brief, record the evidence, resolve the correction, and continue the PR review handoff (commit, push the same branch, request fresh review, update Linear).
+    - Do not run `git log`, base-branch `git diff`, `git diff --stat`, `rg`, `grep`, `find`, `ls`, `gh api`, shell pipelines, or chained shell commands; the runtime denies them in this mode and the needed context is already inlined above.
+    - If validation, git push, GitHub, Linear, PATH, auth, or approval fails, record the exact command/failure and next action in an Orocsy blocker/correction before stopping.
+    - Never move the issue to a terminal Linear state from this mode; a fresh review request is not proof of a clean review.
+    """
+    |> String.trim()
+  end
+
+  defp maybe_prepend_policy_violation(prompt, opts) when is_binary(prompt) do
+    case Keyword.get(opts, :policy_violation) do
+      %{command: command, pattern: pattern, attempt: attempt, max_attempts: max_attempts} ->
+        final_warning =
+          if attempt >= max_attempts do
+            "- This is the final in-run recovery attempt. Another denied command parks the issue for human review."
+          else
+            "- Running another denied command interrupts the turn again and, after #{max_attempts} violations, parks the issue for human review."
+          end
+
+        """
+        Runtime command policy interrupt (recovery attempt #{attempt} of #{max_attempts}):
+
+        - The previous worker turn was interrupted because it ran a command denied by the runtime command guard.
+        - Denied command: `#{command}`
+        - Matched policy: `#{pattern}`
+        - Do not run that command again, and do not run other git history/diff/discovery commands. The runtime-provided context in this prompt already contains the repository state.
+        - Continue directly with the smallest in-scope fix for the open correction or current task, then its focused validation.
+        #{final_warning}
+        """
+        |> String.trim()
+        |> Kernel.<>("\n\n" <> prompt)
+
+      _ ->
+        prompt
+    end
+  end
+
+  defp maybe_prepend_policy_violation(prompt, _opts), do: prompt
+
+  @git_context_commit_limit 10
+  @git_context_diffstat_limit 20
+
+  defp runtime_git_context(workspace) when is_binary(workspace) do
+    case git_context_base(workspace) do
+      nil ->
+        ""
+
+      base ->
+        [
+          git_context_section(
+            "Local commits ahead of `#{base}` (runtime-provided; do not run `git log`)",
+            git_lines(workspace, ["log", "--oneline", "--no-decorate", "#{base}..HEAD"], @git_context_commit_limit)
+          ),
+          git_context_section(
+            "Diffstat versus `#{base}` (runtime-provided; do not run `git diff`)",
+            git_lines(workspace, ["diff", "--stat", "#{base}...HEAD"], @git_context_diffstat_limit)
+          ),
+          git_context_section(
+            "Uncommitted diffstat versus `HEAD` (runtime-provided)",
+            git_lines(workspace, ["diff", "--stat", "HEAD"], @git_context_diffstat_limit)
+          )
+        ]
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.join("\n")
+    end
+  end
+
+  defp runtime_git_context(_workspace), do: ""
+
+  defp git_context_base(workspace) do
+    Enum.find(["origin/main", "main"], &git_ref_exists?(workspace, &1))
+  end
+
+  defp git_context_section(_title, ""), do: ""
+
+  defp git_context_section(title, content) do
+    "- #{title}:\n#{indent(content)}"
+  end
+
+  defp git_lines(workspace, args, limit) do
+    case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} ->
+        lines =
+          output
+          |> String.trim()
+          |> String.split("\n", trim: true)
+
+        shown = Enum.take(lines, limit)
+        hidden = length(lines) - length(shown)
+
+        suffix =
+          if hidden > 0 do
+            "\n[... #{hidden} more lines truncated by the runtime]"
+          else
+            ""
+          end
+
+        Enum.join(shown, "\n") <> suffix
+
+      {_error, _exit_code} ->
+        ""
+    end
+  rescue
+    _error -> ""
   end
 
   defp strip_leading_checkpoint(prompt, "") when is_binary(prompt), do: prompt
@@ -534,9 +796,9 @@ defmodule SymphonyElixir.PromptBuilder do
     Continuation context:
 
     - This is retry attempt ##{attempt} because the issue is still active after an interrupted or failed agent turn.
-    - Resume from the current workspace state; inspect `git status --short --branch`, recent commits, and `.orocsy/delivery/events/events.jsonl` before editing.
+    - Resume from the current workspace state; inspect `git status --short --branch` and `.orocsy/delivery/events/events.jsonl` before editing. Use the runtime-provided checkpoint context in this prompt for commit/diff state; do not run `git log` or `git diff --stat`.
     - If the workspace is dirty or ahead and recent `tool.finished`, `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope` events passed, treat that as a dirty handoff checkpoint.
-    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read. If the checkpoint already lists passed validation/gate evidence for the dirty files and the diff has not changed since that evidence, do not rerun the same validation command; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
+    - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch` and a focused `git diff -- <dirty-file>` read; commit and diffstat context is already provided by the runtime checkpoint. If the checkpoint already lists passed validation/gate evidence for the dirty files and the diff has not changed since that evidence, do not rerun the same validation command; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
     - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
     - After focused validation passes, immediately `git add -A`, commit, push the existing branch to its configured PR head, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
@@ -568,7 +830,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
     Allowed context:
 
-    - `git status --short --branch`, current branch/head, focused diffs/commits, and exact files named by current review feedback.
+    - `git status --short --branch`, current branch/head, the runtime-provided commit list/diffstat in the checkpoint above, focused `git diff -- <file>` reads, and exact files named by current review feedback. Do not run `git log` or `git diff --stat`; the runtime denies them.
     - The existing PR for the current branch, including current Codex/GitHub review threads, comments, reviews, and head SHA.
     - Focused tests or type/lint checks that cover changed review-fix files.
 
@@ -739,16 +1001,18 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp orchestration_status_path?(_path), do: false
 
-  defp dirty_validated_handoff_checkpoint(status, event_summary) do
+  defp dirty_validated_handoff_checkpoint(status, event_summary, git_context) do
     """
     Dirty validated handoff checkpoint:
 
     - Current workspace has local work that must be handed off before more investigation.
     - `git status --short --branch`:
     #{indent(status)}
+    #{git_context}
     - Recent passed validation/gate evidence:
     #{indent(event_summary)}
-    - First action: inspect the focused diff with `git diff -- <dirty-file>` and compare it to the recent passed validation/gate evidence listed below.
+    - The commit list and diffstat above are runtime-provided. Do not run `git log`, `git diff --stat`, or base-branch diff/history commands; the runtime denies them and interrupts the turn.
+    - First action: inspect the focused diff with `git diff -- <dirty-file>` and compare it to the recent passed validation/gate evidence listed above.
     - If the focused diff is unchanged since the listed passed evidence, do not rerun the same validation command before committing; use the recorded evidence and proceed to commit, push, PR review request/update, and Linear handoff.
     - Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
     - Do not run file-discovery commands such as `git ls-files`, `rg`, `grep`, `find`, or `ls`; the dirty file path is already listed in `git status`.
@@ -759,14 +1023,16 @@ defmodule SymphonyElixir.PromptBuilder do
     |> String.trim()
   end
 
-  defp unvalidated_local_handoff_checkpoint(status) do
+  defp unvalidated_local_handoff_checkpoint(status, git_context) do
     """
     Local handoff recovery checkpoint:
 
     - Current workspace has local work but no recent passed Orocsy validation/gate evidence was found.
     - `git status --short --branch`:
     #{indent(status)}
-    - First action: inspect the focused local diff and local commits, then run the smallest validation needed for those changed files.
+    #{git_context}
+    - The commit list and diffstat above are runtime-provided. Do not run `git log`, `git diff --stat`, or base-branch diff/history commands; the runtime denies them and interrupts the turn.
+    - First action: run the smallest validation needed for the changed files listed above, using a focused `git diff -- <dirty-file>` read only when a dirty file needs inspection.
     - If the focused diff is complete and validation passes, commit any dirty intended files, push the branch, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
     - Do not restart or broaden implementation. Edit again only when the focused diff is incomplete, invalid, focused validation names exact in-scope files/assertions, or a current review thread requires another code change.
@@ -775,15 +1041,17 @@ defmodule SymphonyElixir.PromptBuilder do
     |> String.trim()
   end
 
-  defp pushed_validated_handoff_checkpoint(status, event_summary) do
+  defp pushed_validated_handoff_checkpoint(status, event_summary, git_context) do
     """
     Pushed validated handoff checkpoint:
 
     - Current workspace is clean on a pushed non-main branch with recent passed validation/gate evidence.
     - `git status --short --branch`:
     #{indent(status)}
+    #{git_context}
     - Recent passed validation/gate evidence:
     #{indent(event_summary)}
+    - The commit list and diffstat above are runtime-provided. Do not run `git log`, `git diff --stat`, or base-branch diff/history commands; the runtime denies them and interrupts the turn.
     - First action: verify whether a PR already exists for this branch. If none exists, create one against `main`.
     - Do not redo implementation, broad context scans, or broad validations before the PR/Linear handoff.
     - Request/update PR review and update Linear with branch, PR, commit, validation, and blockers.

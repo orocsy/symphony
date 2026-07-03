@@ -114,18 +114,90 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  @max_policy_violation_recoveries 2
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, 0)
+  end
+
+  # A denied command used to kill the whole run and park the issue behind a
+  # human-resolved correction, so the worker never learned which command was
+  # denied and every redispatch replayed the same violation. Recover in-run
+  # instead: restart the worker with an explicit policy-violation prelude naming
+  # the denied command, bounded by @max_policy_violation_recoveries before the
+  # existing parking path takes over.
+  defp run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, recovery_count) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, worker_host)
-      after
-        AppServer.stop_session(session)
+    result =
+      with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+        try do
+          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, worker_host)
+        after
+          AppServer.stop_session(session)
+        end
       end
+
+    case result do
+      {:error, {:forbidden_command, command, pattern}} when recovery_count < @max_policy_violation_recoveries ->
+        attempt = recovery_count + 1
+
+        Logger.warning(
+          "Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{@max_policy_violation_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}"
+        )
+
+        record_policy_violation_event(workspace, issue, command, pattern, attempt, worker_host)
+
+        send_codex_update(codex_update_recipient, issue, %{
+          event: :policy_violation_recovery,
+          command: command,
+          pattern: pattern,
+          attempt: attempt,
+          max_attempts: @max_policy_violation_recoveries,
+          timestamp: DateTime.utc_now()
+        })
+
+        opts =
+          Keyword.put(opts, :policy_violation, %{
+            command: command,
+            pattern: pattern,
+            attempt: attempt,
+            max_attempts: @max_policy_violation_recoveries
+          })
+
+        run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, attempt)
+
+      other ->
+        other
     end
   end
+
+  defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, nil)
+       when is_binary(workspace) do
+    event = %{
+      "event" => "runtime.command-policy-violation",
+      "status" => "warn",
+      "tool" => "command-guard",
+      "ts" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      "issue" => identifier,
+      "command" => command,
+      "pattern" => pattern,
+      "recovery_attempt" => attempt,
+      "source" => "symphony.runtime.command-guard",
+      "schema_version" => 1
+    }
+
+    path = Path.join(workspace, @delivery_event_path)
+    File.write!(path, Jason.encode!(event) <> "\n", [:append])
+    :ok
+  rescue
+    error ->
+      Logger.warning("Failed to record command policy violation event: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_policy_violation_event(_workspace, _issue, _command, _pattern, _attempt, _worker_host), do: :ok
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, worker_host) do
     prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)
@@ -447,7 +519,7 @@ defmodule SymphonyElixir.AgentRunner do
       - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
       - Resume from the current workspace and workpad state instead of restarting from scratch.
       - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read before handoff. Do not rerun the same validation command before committing when the checkpoint already lists passed `gate.post-miu`/`tool.finished` evidence for the dirty files and the diff has not changed since that evidence; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
+      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run only `git status --short --branch` and a focused `git diff -- <dirty-file>` read before handoff; do not run `git log` or `git diff --stat` — the runtime denies them and the checkpoint context above already lists commit/diffstat state. Do not rerun the same validation command before committing when the checkpoint already lists passed `gate.post-miu`/`tool.finished` evidence for the dirty files and the diff has not changed since that evidence; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
       - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
       - After focused validation passes, immediately stage, commit, push the existing branch, and request/update PR review.
       - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.
