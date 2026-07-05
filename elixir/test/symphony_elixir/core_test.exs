@@ -12657,6 +12657,87 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder uses review preflight base branch for runtime git context" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-base-context-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace)
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDevelop base.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Develop base"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/develop", "HEAD"], cd: workspace)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-207"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDevelop base.\n\nReview fix.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDevelop base.\n\nReview fix.\n\nPending handoff.\n")
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/mt-207",
+          "issue" => "MT-207",
+          "requirements" => %{"base_branch" => "develop"}
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-207",
+        title: "Review rework base context",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-207",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert prompt =~ "Local commits ahead of `origin/develop` (runtime-provided; do not run `git log`)"
+      assert prompt =~ "Diffstat versus `origin/develop` (runtime-provided; do not run `git diff`)"
+      refute prompt =~ "Local commits ahead of `origin/main`"
+      refute prompt =~ "Diffstat versus `origin/main`"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder enforces open correction mode in review rework preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
@@ -12808,6 +12889,63 @@ defmodule SymphonyElixir.CoreTest do
                "If a dirty/local handoff checkpoint appears above, follow that checkpoint first"
 
       refute prompt =~ "inspect the focused local diff and local commits"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "review rework command policy covers design document correction paths" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-design-path-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(Path.join(workspace, "design"))
+      File.write!(Path.join(workspace, "DESIGN.md"), "# Design\n")
+      File.write!(Path.join(workspace, "design/Mobile Top Area.html"), "<main></main>\n")
+      File.write!(Path.join(workspace, "design/state.svg"), "<svg></svg>\n")
+      File.write!(Path.join(workspace, "design/export.png"), "png-bytes\n")
+
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(inbox)
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(inbox, "correction_20260703000000_design.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260703000000_design",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Update DESIGN.md and design/Mobile Top Area.html.",
+          "required_corrections" => [
+            "Check `DESIGN.md`, `design/Mobile Top Area.html`, `design/state.svg`, and `design/export.png`."
+          ]
+        })
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework", "issue" => "MT-DESIGN"})
+      )
+
+      patterns = AppServer.effective_forbidden_command_patterns_for(workspace)
+      rendered = Enum.join(patterns, "\n")
+
+      assert rendered =~ "git\\s+log"
+      assert rendered =~ "git\\s+diff\\s+--stat"
+      assert rendered =~ "origin/"
+      assert rendered =~ "DESIGN\\.md"
+      assert rendered =~ "design/Mobile\\ Top\\ Area\\.html"
+      assert rendered =~ "design/state\\.svg"
+      assert rendered =~ "design/export\\.png"
     after
       File.rm_rf(workspace)
     end

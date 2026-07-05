@@ -668,8 +668,44 @@ defmodule SymphonyElixir.PromptBuilder do
   defp runtime_git_context(_workspace), do: ""
 
   defp git_context_base(workspace) do
-    Enum.find(["origin/main", "main"], &git_ref_exists?(workspace, &1))
+    workspace
+    |> git_context_base_candidates()
+    |> Enum.find(&git_ref_exists?(workspace, &1))
   end
+
+  defp git_context_base_candidates(workspace) when is_binary(workspace) do
+    preflight_base_candidates(workspace) ++ ["origin/main", "main"]
+  end
+
+  defp git_context_base_candidates(_workspace), do: ["origin/main", "main"]
+
+  defp preflight_base_candidates(workspace) do
+    with {:ok, %{} = preflight} <- DispatchPreflight.read(workspace),
+         base when is_binary(base) and base != "" <- preflight_base_branch(preflight) do
+      base
+      |> String.trim()
+      |> base_branch_ref_candidates()
+    else
+      _ -> []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp preflight_base_branch(%{} = preflight) do
+    requirements = Map.get(preflight, "requirements", %{})
+
+    [
+      Map.get(requirements, "base_branch"),
+      Map.get(requirements, "integration_branch"),
+      Map.get(preflight, "base_branch"),
+      Map.get(preflight, "target_branch")
+    ]
+    |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
+  end
+
+  defp base_branch_ref_candidates("origin/" <> _ = base), do: [base, String.replace_prefix(base, "origin/", "")]
+  defp base_branch_ref_candidates(base), do: ["origin/#{base}", base]
 
   defp git_context_section(_title, ""), do: ""
 

@@ -54,6 +54,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
     "(^|\\s|[\"'])find(\\s|$)",
+    "(^|\\s|[\"'])git\\s+log(\\s|$)",
+    "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
+    "(^|\\s|[\"'])git\\s+diff(\\s|$)(?![^\"'\\n]*\\s--\\s)(?=[^\"'\\n]*(?:origin/|main|develop|release/|@\\{upstream\\}))",
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
     "(^|\\s|[\"'])ls(\\s|$)"
   ]
@@ -909,7 +912,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp paths_from_requirement_text(_text), do: []
 
   defp paths_from_review_rework_text(text) when is_binary(text) do
-    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss|html|svg|png))}
     |> Regex.scan(text)
     |> Enum.flat_map(fn captures ->
       captures
@@ -1116,7 +1119,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       ".yml",
       ".yaml",
       ".css",
-      ".scss"
+      ".scss",
+      ".html",
+      ".svg",
+      ".png"
     ]
   end
 
@@ -1313,7 +1319,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     path != "" and
       review_rework_supported_file?(path) and
       (String.contains?(path, "/") or review_rework_root_config_path?(path)) and
-      not String.contains?(path, [" ", "\t", "\n", "\r"]) and
+      not String.contains?(path, ["\t", "\n", "\r"]) and
       not String.starts_with?(path, ["http://", "https://", "origin/"])
   end
 
@@ -1332,7 +1338,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       "wrangler.json",
       "wrangler.jsonc",
       "package.json",
-      "tsconfig.json"
+      "tsconfig.json",
+      "DESIGN.md",
+      "README.md",
+      "AGENTS.md"
     ] or String.starts_with?(path, "vitest.config.")
   end
 
