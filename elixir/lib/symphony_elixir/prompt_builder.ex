@@ -29,6 +29,7 @@ defmodule SymphonyElixir.PromptBuilder do
       workspace
       |> workspace_recovery_checkpoint()
       |> maybe_clear_in_progress_checkpoint(issue, workspace)
+      |> maybe_clear_clean_rework_checkpoint(issue, workspace)
 
     workflow = Workflow.current()
 
@@ -63,7 +64,10 @@ defmodule SymphonyElixir.PromptBuilder do
       event_summary = recent_passed_event_summary(workspace)
       git_context = runtime_git_context(workspace)
       pushed_handoff? = pushed_handoff_risk?(status)
-      local_handoff? = local_handoff_risk?(status) or (not pushed_handoff? and local_commit_handoff_risk?(workspace))
+
+      local_handoff? =
+        local_handoff_risk?(status) or
+          (not pushed_handoff? and local_commit_handoff_risk?(workspace))
 
       cond do
         local_handoff? and event_summary != "" ->
@@ -96,6 +100,18 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_clear_in_progress_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
 
+  defp maybe_clear_clean_rework_checkpoint(checkpoint, issue, workspace)
+       when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
+    if issue_rework?(issue) and clean_worktree?(workspace) and
+         local_handoff_checkpoint?(checkpoint) do
+      ""
+    else
+      checkpoint
+    end
+  end
+
+  defp maybe_clear_clean_rework_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
+
   defp issue_in_progress?(%{state: state}) when is_binary(state) do
     state
     |> String.trim()
@@ -114,6 +130,21 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp issue_implementation?(_issue), do: false
 
+  defp issue_rework?(%{state: state}) when is_binary(state) do
+    state
+    |> String.downcase()
+    |> String.contains?("rework")
+  end
+
+  defp issue_rework?(_issue), do: false
+
+  defp local_handoff_checkpoint?(checkpoint) when is_binary(checkpoint) do
+    String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:") or
+      String.starts_with?(checkpoint, "Local handoff recovery checkpoint:")
+  end
+
+  defp local_handoff_checkpoint?(_checkpoint), do: false
+
   defp clean_worktree?(workspace) when is_binary(workspace) do
     with {:ok, status} <- git_status(workspace) do
       substantive_status_lines(status) == []
@@ -124,7 +155,11 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp clean_worktree?(_workspace), do: false
 
-  @spec render_issue_template(String.t(), SymphonyElixir.Linear.Issue.t() | map() | String.t() | nil, keyword()) ::
+  @spec render_issue_template(
+          String.t(),
+          SymphonyElixir.Linear.Issue.t() | map() | String.t() | nil,
+          keyword()
+        ) ::
           String.t()
   def render_issue_template(template, issue_or_identifier, opts \\ []) when is_binary(template) do
     template = parse_template!(template)
@@ -166,7 +201,9 @@ defmodule SymphonyElixir.PromptBuilder do
     }
   end
 
-  defp issue_template_context(identifier) when is_binary(identifier), do: %{id: nil, identifier: identifier}
+  defp issue_template_context(identifier) when is_binary(identifier),
+    do: %{id: nil, identifier: identifier}
+
   defp issue_template_context(_), do: %{id: nil, identifier: "issue"}
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
@@ -206,7 +243,8 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
-  defp render_prompt_template(prompt, issue, opts) when byte_size(prompt) > @workflow_prompt_inline_max_bytes do
+  defp render_prompt_template(prompt, issue, opts)
+       when byte_size(prompt) > @workflow_prompt_inline_max_bytes do
     compact_workflow_prompt(issue, prompt, opts)
   end
 
@@ -262,7 +300,11 @@ defmodule SymphonyElixir.PromptBuilder do
         "unknown"
 
       text ->
-        trim_text(text, @compact_issue_description_max_bytes, "[Linear issue description compacted by Symphony prompt builder. Use the issue brief or Linear only if required fields are missing.]")
+        trim_text(
+          text,
+          @compact_issue_description_max_bytes,
+          "[Linear issue description compacted by Symphony prompt builder. Use the issue brief or Linear only if required fields are missing.]"
+        )
     end
   end
 
@@ -282,7 +324,7 @@ defmodule SymphonyElixir.PromptBuilder do
         else
           [
             open_correction_mode_contract(workspace, preflight),
-            DispatchPreflight.prompt_context(workspace),
+            open_correction_dispatch_context(workspace, preflight),
             open_correction_micro_prompt(preflight)
           ]
           |> Enum.reject(&(&1 == ""))
@@ -354,11 +396,11 @@ defmodule SymphonyElixir.PromptBuilder do
         Open correction mode (runtime enforced):
 
         - This workspace has open Orocsy corrections. Resolving the newest applicable correction is the only first task. All handoff checkpoints and review shortcuts are suspended until the correction is resolved.
-        - Do not inspect commit history, diffs versus the base branch, PR/GitHub/Linear state, or handoff status first. The runtime-provided git context below already covers the repository state; use it as-is instead of running git discovery commands.
+        - Do not inspect commit history, diffs versus the base branch, PR/GitHub/Linear state, or handoff status first. The runtime-provided status below is enough to confirm the workspace state.
         - Required worker checkpoint: immediately after the first scoped code/test edit, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "#{checkpoint_event}"`.
         """
         |> String.trim(),
-        runtime_workspace_context(workspace),
+        runtime_workspace_status_context(workspace),
         runtime_command_policy_section(workspace),
         inline_issue_brief(workspace, preflight)
       ]
@@ -367,27 +409,92 @@ defmodule SymphonyElixir.PromptBuilder do
     Enum.join(sections, "\n\n")
   end
 
-  defp correction_checkpoint_event(%{"checkpoint_event" => event}) when is_binary(event) and event != "", do: event
+  defp correction_checkpoint_event(%{"checkpoint_event" => event})
+       when is_binary(event) and event != "", do: event
+
   defp correction_checkpoint_event(_preflight), do: "correction-scoped-fix"
 
-  defp runtime_workspace_context(workspace) do
-    status_section =
-      case git_status(workspace) do
-        {:ok, status} when status != "" ->
-          "- `git status --short --branch` (runtime-provided):\n#{indent(status)}"
+  defp runtime_workspace_status_context(workspace) do
+    case git_status(workspace) do
+      {:ok, status} when status != "" ->
+        """
+        Runtime-provided workspace context (do not re-derive it with git commands):
 
-        _ ->
-          ""
-      end
+        - `git status --short --branch` (runtime-provided):
+        #{indent(status)}
+        """
+        |> String.trim()
 
-    [status_section, runtime_git_context(workspace)]
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.join("\n")
-    |> case do
-      "" -> ""
-      context -> "Runtime-provided workspace context (do not re-derive it with git commands):\n\n" <> context
+      _ ->
+        ""
     end
   end
+
+  defp open_correction_dispatch_context(workspace, preflight) when is_map(preflight) do
+    review = preflight["review"] || %{}
+
+    open_corrections =
+      case preflight["open_corrections"] do
+        corrections when is_list(corrections) and corrections != [] ->
+          corrections
+
+        _ ->
+          open_blocking_corrections(workspace)
+      end
+
+    """
+    Runtime correction dispatch preflight:
+
+    - Mode: review rework with open correction
+    - Preflight file: `.orocsy/delivery/state/dispatch-preflight.json`
+    - Branch: `#{preflight["branch"] || "unknown"}`
+    - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
+    - Reviewed head: `#{short_sha(review["head_sha"])}`
+    - Worker-required checkpoint: `#{correction_checkpoint_event(preflight)}` after the first scoped code/test edit or a scoped blocker.
+    - First task: #{preflight["first_task"] || "Resolve the open Orocsy correction."}
+    - Open Orocsy corrections: #{format_prompt_corrections(open_corrections)}
+    - Runtime preflight is not worker progress and is not proof that review classification, validation, push, or handoff is complete.
+
+    Current-head review feedback is intentionally omitted in open-correction mode. The correction and inlined issue brief are the only first-turn scope.
+    """
+    |> String.trim()
+  end
+
+  defp open_correction_dispatch_context(_workspace, _preflight), do: ""
+
+  defp format_prompt_corrections([]), do: "none"
+
+  defp format_prompt_corrections(corrections) when is_list(corrections) do
+    corrections
+    |> Enum.take(3)
+    |> Enum.map_join("\n", &format_prompt_correction/1)
+  end
+
+  defp format_prompt_corrections(_corrections), do: "unknown"
+
+  defp format_prompt_correction(correction) when is_map(correction) do
+    id = correction["correction_id"] || "open-correction"
+    summary = correction["summary"] || "Open correction"
+    required = correction["required_corrections"] || []
+
+    required_lines =
+      required
+      |> Enum.take(4)
+      |> Enum.map_join(
+        "\n",
+        &"  Required: #{trim_text(to_string(&1), 800, "[required correction truncated]")}"
+      )
+
+    ["- #{id}: #{summary}", required_lines]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp format_prompt_correction(correction), do: "- #{inspect(correction)}"
+
+  defp short_sha(sha) when is_binary(sha) and byte_size(sha) >= 10, do: binary_part(sha, 0, 10)
+  defp short_sha(sha) when is_binary(sha) and sha != "", do: sha
+  defp short_sha(_sha), do: "unknown"
 
   @command_policy_pattern_max_bytes 200
 
@@ -397,7 +504,8 @@ defmodule SymphonyElixir.PromptBuilder do
     if patterns == [] do
       ""
     else
-      {readable, generated} = Enum.split_with(patterns, &(byte_size(&1) <= @command_policy_pattern_max_bytes))
+      {readable, generated} =
+        Enum.split_with(patterns, &(byte_size(&1) <= @command_policy_pattern_max_bytes))
 
       rendered = Enum.map_join(readable, "\n", &"  #{&1}")
 
@@ -426,7 +534,8 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp inline_issue_brief(workspace, preflight) do
-    with path when is_binary(path) and path != "" <- issue_brief_path_for_preflight(workspace, preflight),
+    with path when is_binary(path) and path != "" <-
+           issue_brief_path_for_preflight(workspace, preflight),
          full_path = Path.join(workspace, path),
          true <- File.regular?(full_path),
          {:ok, content} <- File.read(full_path) do
@@ -463,7 +572,8 @@ defmodule SymphonyElixir.PromptBuilder do
     candidates =
       [
         preflight_brief_path,
-        identifier && Path.join(".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"),
+        identifier &&
+          Path.join(".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"),
         ".orocsy/delivery/issue-brief.md"
       ]
       |> Enum.reject(&is_nil/1)
@@ -478,9 +588,10 @@ defmodule SymphonyElixir.PromptBuilder do
     Open correction execution contract:
 
     - The open Orocsy correction overrides all review-rework shortcuts and handoff checkpoints. Do not append `review-feedback-classified`, do not retry browser validation-only runs, and do not commit, push, or request review before the correction fix and its evidence exist.
-    - Read only the exact code/test files named by the correction and the inlined issue brief above. Make the smallest in-scope fix or record a scoped blocker. Do not stop after analysis.
+    - Before the first edit, read only the exact source files named by the correction and the inlined issue brief. Do not read test files first unless a source file is missing a required local type or helper.
+    - Make the smallest in-scope source edit or record a scoped blocker. Do not stop after analysis and do not spend the first turn reading every allowed file.
     - Immediately after the first scoped code/test edit, append the `#{checkpoint_event}` durable event exactly as specified above.
-    - Then run only the focused validation named by the correction/brief, record the evidence, resolve the correction, and continue the PR review handoff (commit, push the same branch, request fresh review, update Linear).
+    - After the checkpoint, update the exact test files named by the correction/brief, then run only the focused validation, record the evidence, resolve the correction, and continue the PR review handoff (commit, push the same branch, request fresh review, update Linear).
     - Do not run `git log`, base-branch `git diff`, `git diff --stat`, `rg`, `grep`, `find`, `ls`, `gh api`, shell pipelines, or chained shell commands; the runtime denies them in this mode and the needed context is already inlined above.
     - If validation, git push, GitHub, Linear, PATH, auth, or approval fails, record the exact command/failure and next action in an Orocsy blocker/correction before stopping.
     - Never move the issue to a terminal Linear state from this mode; a fresh review request is not proof of a clean review.
@@ -530,11 +641,19 @@ defmodule SymphonyElixir.PromptBuilder do
         [
           git_context_section(
             "Local commits ahead of `#{base}` (runtime-provided; do not run `git log`)",
-            git_lines(workspace, ["log", "--oneline", "--no-decorate", "#{base}..HEAD"], @git_context_commit_limit)
+            git_lines(
+              workspace,
+              ["log", "--oneline", "--no-decorate", "#{base}..HEAD"],
+              @git_context_commit_limit
+            )
           ),
           git_context_section(
             "Diffstat versus `#{base}` (runtime-provided; do not run `git diff`)",
-            git_lines(workspace, ["diff", "--stat", "#{base}...HEAD"], @git_context_diffstat_limit)
+            git_lines(
+              workspace,
+              ["diff", "--stat", "#{base}...HEAD"],
+              @git_context_diffstat_limit
+            )
           ),
           git_context_section(
             "Uncommitted diffstat versus `HEAD` (runtime-provided)",
@@ -587,7 +706,8 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp strip_leading_checkpoint(prompt, "") when is_binary(prompt), do: prompt
 
-  defp strip_leading_checkpoint(prompt, checkpoint) when is_binary(prompt) and is_binary(checkpoint) do
+  defp strip_leading_checkpoint(prompt, checkpoint)
+       when is_binary(prompt) and is_binary(checkpoint) do
     if String.starts_with?(prompt, checkpoint) do
       prompt
       |> String.replace_prefix(checkpoint, "")
@@ -604,7 +724,11 @@ defmodule SymphonyElixir.PromptBuilder do
     |> workspace_recovery_checkpoint()
     |> case do
       checkpoint when is_binary(checkpoint) ->
-        if dirty_or_local_handoff_checkpoint?(checkpoint), do: checkpoint, else: ""
+        cond do
+          clean_worktree?(workspace) and dirty_or_local_handoff_checkpoint?(checkpoint) -> ""
+          dirty_or_local_handoff_checkpoint?(checkpoint) -> checkpoint
+          true -> ""
+        end
 
       _checkpoint ->
         ""
@@ -636,7 +760,8 @@ defmodule SymphonyElixir.PromptBuilder do
     |> String.trim()
   end
 
-  defp maybe_prepend_retry_prelude(prompt, attempt) when is_binary(prompt) and is_integer(attempt) and attempt > 0 do
+  defp maybe_prepend_retry_prelude(prompt, attempt)
+       when is_binary(prompt) and is_integer(attempt) and attempt > 0 do
     if retry_prelude_present?(prompt, attempt) do
       prompt
     else
@@ -661,13 +786,15 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
-  defp issue_brief_reference(%{identifier: identifier}, workspace) when is_binary(identifier) and is_binary(workspace) do
+  defp issue_brief_reference(%{identifier: identifier}, workspace)
+       when is_binary(identifier) and is_binary(workspace) do
     relative_paths = [
       Path.join([".codex/agentic/issue-briefs", "#{safe_issue_identifier(identifier)}.md"]),
       ".orocsy/delivery/issue-brief.md"
     ]
 
-    with relative_path when is_binary(relative_path) <- Enum.find(relative_paths, &File.regular?(Path.join(workspace, &1))),
+    with relative_path when is_binary(relative_path) <-
+           Enum.find(relative_paths, &File.regular?(Path.join(workspace, &1))),
          path = Path.join(workspace, relative_path),
          {:ok, stat} <- File.stat(path) do
       %{
@@ -691,13 +818,18 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp trim_issue_brief(content) when byte_size(content) > @issue_brief_max_bytes do
-    trim_text(content, @issue_brief_max_bytes, "[Issue brief truncated by Symphony prompt builder.]")
+    trim_text(
+      content,
+      @issue_brief_max_bytes,
+      "[Issue brief truncated by Symphony prompt builder.]"
+    )
   end
 
   defp trim_issue_brief(content), do: content
 
   defp trim_text(content, max_bytes, notice)
-       when is_binary(content) and is_integer(max_bytes) and max_bytes > 0 and byte_size(content) > max_bytes do
+       when is_binary(content) and is_integer(max_bytes) and max_bytes > 0 and
+              byte_size(content) > max_bytes do
     binary_part(content, 0, max_bytes) <> "\n\n#{notice}"
   end
 
@@ -845,7 +977,9 @@ defmodule SymphonyElixir.PromptBuilder do
     |> String.trim()
   end
 
-  defp attempt_label(attempt) when is_integer(attempt) and attempt > 0, do: "retry attempt ##{attempt}"
+  defp attempt_label(attempt) when is_integer(attempt) and attempt > 0,
+    do: "retry attempt ##{attempt}"
+
   defp attempt_label(_attempt), do: "the first turn"
 
   defp issue_value(%_{} = issue, key), do: issue |> Map.from_struct() |> issue_value(key)
@@ -875,7 +1009,10 @@ defmodule SymphonyElixir.PromptBuilder do
   defp truncate_issue_description(_description), do: "unknown"
 
   defp git_status(workspace) do
-    case System.cmd("git", ["status", "--short", "--branch", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true) do
+    case System.cmd("git", ["status", "--short", "--branch", "--untracked-files=all"],
+           cd: workspace,
+           stderr_to_stdout: true
+         ) do
       {status, 0} -> {:ok, String.trim(status)}
       {error, _exit_code} -> {:error, error}
     end
@@ -915,7 +1052,10 @@ defmodule SymphonyElixir.PromptBuilder do
   defp local_commit_handoff_risk?(_workspace), do: false
 
   defp git_ref_exists?(workspace, ref) do
-    case System.cmd("git", ["rev-parse", "--verify", "--quiet", ref], cd: workspace, stderr_to_stdout: true) do
+    case System.cmd("git", ["rev-parse", "--verify", "--quiet", ref],
+           cd: workspace,
+           stderr_to_stdout: true
+         ) do
       {_output, 0} -> true
       {_output, _exit_code} -> false
     end
@@ -1199,7 +1339,16 @@ defmodule SymphonyElixir.PromptBuilder do
          decoded
          |> validation_signal_text()
          |> String.downcase()
-         |> String.contains?(["validation", "test", "vitest", "typecheck", "lint", "build", "playwright", "e2e"]))
+         |> String.contains?([
+           "validation",
+           "test",
+           "vitest",
+           "typecheck",
+           "lint",
+           "build",
+           "playwright",
+           "e2e"
+         ]))
   end
 
   defp tool_finished_validation_event?(_decoded), do: false
@@ -1212,7 +1361,10 @@ defmodule SymphonyElixir.PromptBuilder do
   defp event_summary_line(%{} = decoded) do
     ts = Map.get(decoded, "ts", "unknown-time")
     event = Map.get(decoded, "event", "event")
-    detail = Map.get(decoded, "tool") || Map.get(decoded, "step") || Map.get(decoded, "gate") || Map.get(decoded, "rubric") || "passed"
+
+    detail =
+      Map.get(decoded, "tool") || Map.get(decoded, "step") || Map.get(decoded, "gate") ||
+        Map.get(decoded, "rubric") || "passed"
 
     "- #{ts} #{event}: #{detail}"
   end
