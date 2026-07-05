@@ -58,7 +58,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
     "(^|\\s|[\"'])git\\s+diff(\\s|$)(?![^\"'\\n]*\\s--\\s)(?=[^\"'\\n]*(?:origin/|main|develop|release/|@\\{upstream\\}))",
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
-    "(^|\\s|[\"'])ls(\\s|$)"
+    "(^|\\s|[\"'])ls(\\s|$)",
+    "(;|&&|\\|\\||\\|)"
   ]
   @fresh_implementation_forbidden_command_patterns [
     "(^|\\s|[\"'])rg(\\s|$)",

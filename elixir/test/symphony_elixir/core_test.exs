@@ -1567,10 +1567,12 @@ defmodule SymphonyElixir.CoreTest do
       assert Workspace.blocking_correction_in_workspace?(workspace)
 
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
 
       assert_receive {:memory_tracker_comment, ^issue_id, body}
       assert body =~ "provider-usage-limit"
       assert body =~ "usageLimitExceeded"
+      refute_receive {:memory_tracker_state_update, ^issue_id, _state}, 50
     after
       File.rm_rf(test_root)
     end
@@ -12804,9 +12806,24 @@ defmodule SymphonyElixir.CoreTest do
           "status" => "open",
           "next_action" => "retry",
           "resolved_at" => nil,
+          "created_at" => "2026-07-03T00:00:00Z",
           "summary" => "Fix the cards preference leakage.",
           "findings" => ["requestCards must not send guest preferences."],
           "required_corrections" => ["Remove guest preferences from requestCards."]
+        })
+      )
+
+      File.write!(
+        Path.join(inbox, "correction_20260704000000_2.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260704000000_2",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "created_at" => "2026-07-04T00:00:00Z",
+          "summary" => "Fix the newest chat state contract.",
+          "findings" => ["DESIGN.md must include rejected feedback state."],
+          "required_corrections" => ["Update DESIGN.md chat contract."]
         })
       )
 
@@ -12875,10 +12892,17 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Remove the no-op cards preference header."
       assert prompt =~ "Open correction execution contract:"
       assert prompt =~ "Runtime correction dispatch preflight:"
+      assert prompt =~ "Fix the newest chat state contract."
+      assert prompt =~ "DESIGN.md must include rejected feedback state."
+      assert prompt =~ "Update DESIGN.md chat contract."
       assert prompt =~ "Fix the cards preference leakage."
       assert prompt =~ "Remove guest preferences from requestCards."
+      assert prompt =~ "requestCards must not send guest preferences."
+
+      assert :binary.match(prompt, "Fix the newest chat state contract.") <
+               :binary.match(prompt, "Fix the cards preference leakage.")
+
       assert prompt =~ "Do not read test files first"
-      refute prompt =~ "requestCards must not send guest preferences."
       refute prompt =~ "Runtime dispatch preflight:"
       refute prompt =~ "Current-head review feedback:"
       refute prompt =~ "Target feedback file(s):"
@@ -12942,6 +12966,8 @@ defmodule SymphonyElixir.CoreTest do
       assert rendered =~ "git\\s+log"
       assert rendered =~ "git\\s+diff\\s+--stat"
       assert rendered =~ "origin/"
+      assert rendered =~ "&&"
+      assert rendered =~ "\\|"
       assert rendered =~ "DESIGN\\.md"
       assert rendered =~ "design/Mobile\\ Top\\ Area\\.html"
       assert rendered =~ "design/state\\.svg"

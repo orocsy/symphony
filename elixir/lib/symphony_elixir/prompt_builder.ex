@@ -466,6 +466,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp format_prompt_corrections(corrections) when is_list(corrections) do
     corrections
+    |> newest_corrections_first()
     |> Enum.take(3)
     |> Enum.map_join("\n", &format_prompt_correction/1)
   end
@@ -475,7 +476,16 @@ defmodule SymphonyElixir.PromptBuilder do
   defp format_prompt_correction(correction) when is_map(correction) do
     id = correction["correction_id"] || "open-correction"
     summary = correction["summary"] || "Open correction"
+    findings = correction["findings"] || []
     required = correction["required_corrections"] || []
+
+    finding_lines =
+      findings
+      |> Enum.take(4)
+      |> Enum.map_join(
+        "\n",
+        &"  Finding: #{trim_text(to_string(&1), 800, "[finding truncated]")}"
+      )
 
     required_lines =
       required
@@ -485,12 +495,34 @@ defmodule SymphonyElixir.PromptBuilder do
         &"  Required: #{trim_text(to_string(&1), 800, "[required correction truncated]")}"
       )
 
-    ["- #{id}: #{summary}", required_lines]
+    ["- #{id}: #{summary}", finding_lines, required_lines]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
 
   defp format_prompt_correction(correction), do: "- #{inspect(correction)}"
+
+  defp newest_corrections_first(corrections) do
+    Enum.sort_by(corrections, &correction_sort_key/1, :desc)
+  end
+
+  defp correction_sort_key(%{} = correction) do
+    cond do
+      is_binary(correction["created_at"]) and correction["created_at"] != "" ->
+        correction["created_at"]
+
+      is_binary(correction["correction_id"]) and correction["correction_id"] != "" ->
+        correction["correction_id"]
+
+      is_binary(correction["path"]) ->
+        Path.basename(correction["path"])
+
+      true ->
+        ""
+    end
+  end
+
+  defp correction_sort_key(_correction), do: ""
 
   defp short_sha(sha) when is_binary(sha) and byte_size(sha) >= 10, do: binary_part(sha, 0, 10)
   defp short_sha(sha) when is_binary(sha) and sha != "", do: sha

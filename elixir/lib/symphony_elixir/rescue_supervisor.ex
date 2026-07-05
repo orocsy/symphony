@@ -48,6 +48,9 @@ defmodule SymphonyElixir.RescueSupervisor do
         corrections != [] and pending_codex_review_correction?(corrections) ->
           handle_pending_codex_review_corrections(issue, workspace, corrections)
 
+        corrections != [] and provider_usage_limit_correction?(corrections) ->
+          keep_provider_usage_limit_corrections_parked(issue)
+
         corrections != [] and validation_blocker_correction?(corrections) ->
           classify_validation_blocker(issue, workspace, corrections)
 
@@ -1148,6 +1151,27 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp validation_blocker_correction?(_correction), do: false
+
+  defp provider_usage_limit_correction?(corrections) when is_list(corrections) do
+    Enum.any?(corrections, &provider_usage_limit_correction?/1)
+  end
+
+  defp provider_usage_limit_correction?(%{} = correction) do
+    source = correction["source"] || ""
+    summary = correction["summary"] || ""
+    findings = correction["findings"] |> string_values() |> Enum.join(" ")
+
+    String.contains?(source, "provider-usage-limit") or
+      String.contains?(summary, "usageLimitExceeded") or
+      String.contains?(findings, "usageLimitExceeded")
+  end
+
+  defp provider_usage_limit_correction?(_correction), do: false
+
+  defp keep_provider_usage_limit_corrections_parked(%Issue{} = issue) do
+    Logger.warning("Rescue supervisor kept #{issue.identifier} parked because Codex provider usage limit is still recorded as an open correction")
+    [issue.id]
+  end
 
   defp validation_failure_text?(text) when is_binary(text) do
     String.match?(text, ~r/\b(fail(?:ed|s|ure)?|error|blocked|invalid|not handoff-ready)\b/i)

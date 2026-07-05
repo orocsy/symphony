@@ -113,6 +113,7 @@ defmodule SymphonyElixir.Workspace do
       workspace
       |> local_correction_files()
       |> Enum.flat_map(&read_local_blocking_correction/1)
+      |> newest_corrections_first()
     else
       _ -> []
     end
@@ -1007,6 +1008,28 @@ defmodule SymphonyElixir.Workspace do
       _ -> []
     end
   end
+
+  defp newest_corrections_first(corrections) do
+    Enum.sort_by(corrections, &correction_sort_key/1, :desc)
+  end
+
+  defp correction_sort_key(%{} = correction) do
+    cond do
+      is_binary(correction["created_at"]) and correction["created_at"] != "" ->
+        correction["created_at"]
+
+      is_binary(correction["correction_id"]) and correction["correction_id"] != "" ->
+        correction["correction_id"]
+
+      is_binary(correction["path"]) ->
+        Path.basename(correction["path"])
+
+      true ->
+        ""
+    end
+  end
+
+  defp correction_sort_key(_correction), do: ""
 
   defp open_blocking_correction?(%{} = correction) do
     normalize_correction_field(correction["status"]) == "open" and
