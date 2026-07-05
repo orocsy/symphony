@@ -4739,13 +4739,20 @@ defmodule SymphonyElixir.Orchestrator do
       !issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
-  defp normal_completion_handoff_stop?(%{workspace_path: workspace}) when is_binary(workspace) do
-    case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
-        pushed_validated_handoff_stop?(workspace) or review_classification_handoff_stop?(workspace)
-
-      _ ->
+  defp normal_completion_handoff_stop?(%{workspace_path: workspace} = running_entry)
+       when is_binary(workspace) do
+    cond do
+      workflow_blocked_by_open_correction?(running_entry) ->
         false
+
+      true ->
+        case DispatchPreflight.read(workspace) do
+          {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
+            pushed_validated_handoff_stop?(workspace) or review_classification_handoff_stop?(workspace)
+
+          _ ->
+            false
+        end
     end
   rescue
     _error -> false

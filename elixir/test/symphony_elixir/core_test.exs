@@ -10441,6 +10441,163 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "open correction blocks pushed review gate no-progress shortcut" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pushed-review-gate-open-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue_id = "issue-pushed-review-gate-open-correction"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-PUSHED-GATE-CORRECTION",
+        state: "Rework",
+        title: "Pushed review gate with open correction",
+        description: "Open review correction must override pushed handoff checkpoint",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      old_time = DateTime.utc_now() |> DateTime.add(-180, :second)
+      old_iso = DateTime.to_iso8601(old_time)
+      old_file_time = old_time |> DateTime.to_naive() |> NaiveDateTime.to_erl()
+      started_at = DateTime.utc_now() |> DateTime.add(-240, :second)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "DESIGN.md"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "DESIGN.md"], cd: workspace)
+
+      commit_env = [
+        {"GIT_AUTHOR_DATE", old_iso},
+        {"GIT_COMMITTER_DATE", old_iso}
+      ]
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 env: commit_env,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "orocsy/mt-pushed-gate-correction"], cd: workspace)
+
+      File.write!(Path.join(workspace, "DESIGN.md"), "baseline\nready\n")
+      assert {_output, 0} = System.cmd("git", ["add", "DESIGN.md"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Add pushed checkpoint"],
+                 cd: workspace,
+                 env: commit_env,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["update-ref", "refs/remotes/origin/orocsy/mt-pushed-gate-correction", "HEAD"],
+                 cd: workspace
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-pushed-gate-correction"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework", "issue" => issue.identifier})
+      )
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        [
+          ~s({"event":"gate.post-miu","status":"passed","step":"focused validation passed","ts":"#{old_iso}"}\n),
+          ~s({"event":"tool.finished","tool":"codex-review-requested","status":"passed","ts":"#{old_iso}"}\n)
+        ]
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_open.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_open",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Edit DESIGN.md to address current Codex review feedback.",
+          "required_corrections" => ["Update DESIGN.md and run validation."]
+        })
+      )
+
+      workspace
+      |> Path.join(".git/logs/**/*")
+      |> Path.wildcard()
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.each(&File.touch!(&1, old_file_time))
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 50_000
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.completed, issue_id)
+      refute [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "quiet high-token worker with stale local handoff checkpoint creates handoff retry correction" do
     test_root =
       Path.join(
