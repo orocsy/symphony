@@ -4950,7 +4950,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> String.downcase()
 
     Regex.match?(
-      ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:src|app|apps|packages|lib|tests|docs|design|skills)/[a-z0-9_\-./ \[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)},
+      ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:package\.json|tsconfig\.json|opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|vitest\.config\.[a-z0-9]+)\b|\b(?:src|app|apps|packages|lib|tests|docs|design|skills)/[a-z0-9_\-./ \[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)},
       text
     ) and
       Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)

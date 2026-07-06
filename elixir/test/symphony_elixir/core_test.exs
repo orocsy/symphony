@@ -157,6 +157,51 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.should_dispatch_issue_for_test(unblocked, state)
   end
 
+  test "dispatch gate allows retry corrections that target root config files" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-root-config-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-root-config-retry",
+        identifier: "COD-ROOTCONFIG",
+        title: "Root config retry correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, "COD-ROOTCONFIG")
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260706000000_root_config.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260706000000_root_config",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Fix package.json test script.",
+          "required_corrections" => ["Update package.json and rerun validation."]
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "dispatch gate parks Rework while a fresh Codex review request is pending" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

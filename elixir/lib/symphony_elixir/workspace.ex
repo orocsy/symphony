@@ -782,9 +782,9 @@ defmodule SymphonyElixir.Workspace do
   defp description_existing_pr_branch(description) do
     if shared_existing_branch_contract?(description) do
       [
+        description_existing_shared_branch_field(description),
         description_scalar_section(description, "Integration Branch"),
-        description_contract_field(description, ["Branch", "Integration Branch", "Integration"]),
-        description_existing_shared_branch_field(description)
+        description_contract_field(description, ["Branch", "Integration Branch", "Integration"])
       ]
       |> Enum.find_value(fn
         value when is_binary(value) ->
@@ -805,7 +805,8 @@ defmodule SymphonyElixir.Workspace do
       line = clean_contract_line(line)
       downcased = String.downcase(line)
 
-      if String.contains?(downcased, "shared branch") or String.contains?(downcased, "existing branch") do
+      if (String.contains?(downcased, "shared branch") or String.contains?(downcased, "existing branch")) and
+           String.contains?(line, ":") do
         line
         |> String.split(":", parts: 2)
         |> case do
