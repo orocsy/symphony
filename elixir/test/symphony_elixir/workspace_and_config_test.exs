@@ -1464,6 +1464,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace uses existing shared PR branch when child ticket contract forbids a new branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-shared-pr-branch-contract-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      shared_branch = "orocsy/cod-246-preference-miu-guest-setup-controls"
+      generated_child_branch = "orocsy/cod-265-cod-246a-test-spec-cards-request-uses-guest-safety-draft"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", shared_branch], cd: source_repo, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(source_repo, "tests/unit"))
+      File.write!(Path.join(source_repo, "tests/unit/swipe-experience-request.test.ts"), "export const shared = true;\n")
+      assert {_output, 0} = System.cmd("git", ["add", "tests/unit/swipe-experience-request.test.ts"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add shared PR work"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Ready for Symphony",
+        branch_name: generated_child_branch,
+        description: """
+        ## Base Branch
+        `#{shared_branch}` on PR #103.
+
+        ## Integration Branch
+        Same shared branch: `#{shared_branch}`.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - `tests/unit/swipe-experience-request.test.ts`
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == shared_branch
+      refute String.trim(current_branch) == generated_child_branch
+      assert File.regular?(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace creates missing Linear branch from template branch contract base" do
     test_root =
       Path.join(

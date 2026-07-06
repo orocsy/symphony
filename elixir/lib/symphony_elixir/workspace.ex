@@ -742,10 +742,46 @@ defmodule SymphonyElixir.Workspace do
     _error -> false
   end
 
+  defp issue_branch_name(%{description: description, branch_name: branch}) when is_binary(description) and is_binary(branch) do
+    description_existing_pr_branch(description) || clean_branch_name(branch)
+  end
+
+  defp issue_branch_name(%{"description" => description, "branch_name" => branch})
+       when is_binary(description) and is_binary(branch) do
+    description_existing_pr_branch(description) || clean_branch_name(branch)
+  end
+
   defp issue_branch_name(%{branch_name: branch}) when is_binary(branch), do: clean_branch_name(branch)
   defp issue_branch_name(%{"branch_name" => branch}) when is_binary(branch), do: clean_branch_name(branch)
   defp issue_branch_name(%{"branch" => branch}) when is_binary(branch), do: clean_branch_name(branch)
   defp issue_branch_name(_issue), do: ""
+
+  defp description_existing_pr_branch(description) do
+    if shared_existing_branch_contract?(description) do
+      [
+        description_scalar_section(description, "Integration Branch"),
+        description_scalar_section(description, "Base Branch"),
+        description_contract_field(description, ["Integration Branch", "Branch", "Base"])
+      ]
+      |> Enum.find_value(fn
+        value when is_binary(value) ->
+          branch = clean_branch_name(clean_contract_value(value) || value)
+          if branch == "", do: nil, else: branch
+
+        _ ->
+          nil
+      end)
+    end
+  end
+
+  defp shared_existing_branch_contract?(description) do
+    normalized = String.downcase(description || "")
+
+    String.contains?(normalized, "use the existing branch/pr") or
+      String.contains?(normalized, "existing branch/pr only") or
+      String.contains?(normalized, "same shared branch") or
+      String.contains?(normalized, "shared branch/pr")
+  end
 
   defp git_command(workspace, args) when is_binary(workspace) and is_list(args) do
     timeout_ms = Config.settings!().hooks.timeout_ms
