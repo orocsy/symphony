@@ -5833,6 +5833,105 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight keeps test-spec child tickets out of shared PR review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-test-spec-shared-pr-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265-preflight",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Rework",
+        branch_name: "orocsy/cod-265-generated-child-branch",
+        description: """
+        ## Ticket Type
+        test-spec
+
+        ## Base Branch
+        `orocsy/cod-246-preference-miu-guest-setup-controls` on PR #103.
+
+        ## Integration Branch
+        Same shared branch: `orocsy/cod-246-preference-miu-guest-setup-controls`.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - tests/unit/swipe-experience-request.test.ts
+        - tests/integration/cards-route.test.ts
+
+        ### MIU 1 - Frontend request contract
+        Add failing tests for the first cards request payload.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => "61f167a7821990d822f3d06f3d610c7c87a67431",
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "**Apply guest safety preferences before loading cards**",
+                 "commit_id" => "61f167a7821990d822f3d06f3d610c7c87a67431",
+                 "path" => "src/features/swipe/SwipeExperience.tsx",
+                 "line" => 105,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert preflight["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert get_in(preflight, ["review", "feedback_count"]) == 0
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "fresh implementation"
+      refute prompt =~ "Review rework execution contract"
+      refute prompt =~ "Apply guest safety preferences before loading cards"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight adds chromium guidance for playwright chrome sandbox corrections" do
     workspace =
       Path.join(

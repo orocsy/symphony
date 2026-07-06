@@ -249,7 +249,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
-      review_feedback?(inspection) ->
+      review_feedback?(inspection) and not test_spec_issue?(requirements) ->
         "review_rework"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
@@ -310,6 +310,19 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp implementation_issue?(_requirements), do: false
+
+  defp test_spec_issue?(requirements) when is_map(requirements) do
+    ticket_type =
+      requirements
+      |> Map.get("ticket_type", "")
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    ticket_type in ["test-spec", "test spec", "test"]
+  end
+
+  defp test_spec_issue?(_requirements), do: false
 
   defp requirement_state(requirements) when is_map(requirements) do
     requirements
@@ -608,7 +621,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "created_at" => now_iso8601(),
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
-      "branch" => requirements["branch"] || issue_value(issue, :branch_name),
+      "branch" => fresh_implementation_branch(workspace, issue, requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" =>
         "Start with the first MIU and the first declared write-scope path only; make a scoped code/test change and then record technical-miu-trace, or record an explicit blocker before broad project scanning. Trace-only/read-only MIU notes are not durable progress.",
@@ -625,6 +638,49 @@ defmodule SymphonyElixir.DispatchPreflight do
         "feedback" => []
       }
     }
+  end
+
+  defp fresh_implementation_branch(workspace, issue, requirements) do
+    current_branch(workspace) ||
+      shared_existing_branch_from_requirements(requirements) ||
+      requirements["branch"] ||
+      issue_value(issue, :branch_name)
+  end
+
+  defp shared_existing_branch_from_requirements(requirements) when is_map(requirements) do
+    integration_branch = requirements["integration_branch"] |> to_string()
+
+    if integration_branch |> String.downcase() |> String.contains?("same shared branch") do
+      clean_branch_token(integration_branch)
+    end
+  end
+
+  defp shared_existing_branch_from_requirements(_requirements), do: nil
+
+  defp clean_branch_token(value) do
+    value = to_string(value)
+
+    value =
+      case Regex.run(~r/`([^`]+)`/, value, capture: :all_but_first) do
+        [code] -> code
+        _ -> value
+      end
+
+    value
+    |> String.replace(~r/^same shared branch:\s*/i, "")
+    |> String.trim()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> to_string()
+    |> String.trim("`")
+    |> String.trim_trailing(".")
+    |> String.trim_trailing(",")
+    |> String.trim_trailing(";")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      branch -> branch
+    end
   end
 
   defp write_preflight(workspace, preflight) do
