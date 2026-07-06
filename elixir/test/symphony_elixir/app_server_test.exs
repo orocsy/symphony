@@ -2643,10 +2643,13 @@ defmodule SymphonyElixir.AppServerTest do
     try do
       workspace = Path.join(test_root, "workspace")
       preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
 
       File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
       File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+      File.mkdir_p!(Path.join(workspace, "src/app/api/cards"))
 
       File.write!(
         Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"),
@@ -2656,6 +2659,21 @@ defmodule SymphonyElixir.AppServerTest do
       File.write!(
         Path.join(workspace, "src/features/swipe/SwipeDeck.tsx"),
         "export function SwipeDeck() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, "src/app/api/cards/route.ts"), "export const GET = () => Response.json([]);\n")
+
+      File.write!(
+        Path.join(inbox_dir, "correction_20260706060118_guard.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260706060118_guard",
+          "status" => "resolved",
+          "source" => "symphony.runtime.command-guard-loop",
+          "resolved_at" => "2026-07-06T06:05:39Z",
+          "summary" => "Previous failed runtime guard mentioned src/app/api/cards/route.ts.",
+          "findings" => ["Worker read src/app/api/cards/route.ts before stopping."],
+          "required_corrections" => ["Validation failed before product progress."]
+        })
       )
 
       File.write!(
@@ -2690,11 +2708,14 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert joined =~ "SwipeExperience"
       refute joined =~ "SwipeDeck"
+      refute joined =~ "route"
 
       sideways_command = "sed -n 260,560p src/features/swipe/SwipeDeck.tsx"
+      leaked_route_command = "sed -n 1,220p src/app/api/cards/route.ts"
       allowed_command = "sed -n 1,220p src/features/swipe/SwipeExperience.tsx"
 
       assert Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), sideways_command))
+      assert Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), leaked_route_command))
       refute Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), allowed_command))
     after
       File.rm_rf(test_root)

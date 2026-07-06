@@ -727,7 +727,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     (review_rework_feedback_paths(preflight) ++
        review_rework_implementation_write_scope_paths(preflight) ++
        review_rework_implementation_validation_paths(preflight) ++
-       review_rework_correction_paths(workspace) ++
+       review_rework_correction_paths(workspace, :open_only) ++
        review_rework_validation_metadata_paths(workspace))
     |> Enum.uniq()
   end
@@ -806,21 +806,23 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp review_rework_referenced_api_route_paths(_preflight, _workspace), do: []
 
-  defp review_rework_correction_paths(workspace) when is_binary(workspace) do
+  defp review_rework_correction_paths(workspace, mode \\ :default)
+
+  defp review_rework_correction_paths(workspace, mode) when is_binary(workspace) do
     workspace
     |> Path.join(".orocsy/delivery/inbox/correction_*.json")
     |> Path.wildcard()
-    |> Enum.flat_map(&review_rework_correction_file_paths(workspace, &1))
+    |> Enum.flat_map(&review_rework_correction_file_paths(workspace, &1, mode))
     |> Enum.uniq()
   end
 
-  defp review_rework_correction_paths(_workspace), do: []
+  defp review_rework_correction_paths(_workspace, _mode), do: []
 
-  defp review_rework_correction_file_paths(workspace, path) do
+  defp review_rework_correction_file_paths(workspace, path, mode) do
     with true <- File.regular?(path),
          {:ok, content} <- File.read(path),
          {:ok, %{} = correction} <- Jason.decode(content),
-         true <- correction_path_reference_allowed?(correction) do
+         true <- correction_path_reference_allowed?(correction, mode) do
       correction
       |> correction_reference_text()
       |> paths_from_review_rework_text()
@@ -832,11 +834,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> []
   end
 
-  defp correction_path_reference_allowed?(%{} = correction) do
+  defp correction_path_reference_allowed?(%{} = correction, :open_only) do
+    open_correction?(correction)
+  end
+
+  defp correction_path_reference_allowed?(%{} = correction, _mode) do
     open_correction?(correction) or runtime_validation_reference_correction?(correction)
   end
 
-  defp correction_path_reference_allowed?(_correction), do: false
+  defp correction_path_reference_allowed?(_correction, _mode), do: false
 
   defp runtime_validation_reference_correction?(%{} = correction) do
     source = correction["source"] |> to_string() |> String.downcase()
