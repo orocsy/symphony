@@ -373,10 +373,12 @@ defmodule SymphonyElixir.IssueRequirements do
   defp section_text(description, heading) do
     pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
 
-    case Regex.run(pattern, description || "", capture: :all_but_first) do
-      [body] -> String.trim(body)
-      _ -> ""
-    end
+    pattern
+    |> Regex.scan(description || "", capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
   end
 
   defp issue_brief_reference(identifier, workspace) when is_binary(identifier) and is_binary(workspace) do

@@ -1173,6 +1173,62 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "issue requirements merge repeated list sections from appended issue brief" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-merge-brief-sections-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".codex/agentic/issue-briefs"))
+
+      File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-904.md"), """
+      ## Shared Files
+
+      - Read-only context: `src/app/api/cards/route.ts` only to confirm the existing `/api/cards` request contract.
+
+      ## Validation
+      ```bash
+      pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+      ```
+      """)
+
+      issue = %Issue{
+        id: "issue-merge-brief-sections",
+        identifier: "COD-904",
+        title: "Merge issue brief sections",
+        state: "Rework",
+        description: """
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+
+        ## Shared Files
+        - src/app/api/cards/handler.ts is owned by another ticket. Do not edit it here.
+
+        ### MIU 1 - Initial load carries guest safety draft
+        Send local setup state on the first cards request.
+
+        ## Validation
+        ```bash
+        pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["shared_files"] == [
+               "src/app/api/cards/handler.ts is owned by another ticket. Do not edit it here.",
+               "Read-only context: src/app/api/cards/route.ts only to confirm the existing /api/cards request contract."
+             ]
+
+      assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-904.md"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "issue requirements fall back for MIU-only descriptions" do
     issue = %Issue{
       id: "issue-miu-only",
