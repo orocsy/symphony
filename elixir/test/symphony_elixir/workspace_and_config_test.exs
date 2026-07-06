@@ -1089,7 +1089,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-902.md"), """
       ## Write Scope
+
+      In:
+
       - src/features/fallback.ts
+
+      Out:
+
+      - src/app/api/cards/handler.ts
 
       ### MIU 1 - Fallback Brief Hydration
       Hydrate requirements from the copied issue brief.
@@ -1111,6 +1118,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
       assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-902.md"
       assert requirements["write_scope"] == ["src/features/fallback.ts"]
+      assert requirements["out_of_scope"] == ["src/app/api/cards/handler.ts"]
       assert requirements["mius"] == ["MIU 1 - Fallback Brief Hydration"]
       assert requirements["validation"]["commands"] == ["pnpm test -- fallback"]
     after
