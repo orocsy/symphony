@@ -1589,7 +1589,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         `#{shared_branch}` on PR #103.
 
         ## Integration Branch
-        Same shared branch: `#{shared_branch}`.
+        Same shared branch: #{shared_branch}.
 
         ## Branch / PR Contract
         Use the existing branch/PR only. Do not open a new PR. Do not merge.

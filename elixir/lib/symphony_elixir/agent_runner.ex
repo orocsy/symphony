@@ -183,7 +183,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),
-         true <- get_in(preflight, ["requirements", "ticket_type"]) == "implementation" do
+         ticket_type when is_binary(ticket_type) <- get_in(preflight, ["requirements", "ticket_type"]),
+         true <- String.downcase(String.trim(ticket_type)) == "implementation" do
       true
     else
       _ -> false

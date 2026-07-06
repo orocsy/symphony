@@ -721,6 +721,41 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server review command policy handles chains, focused diffs, and root docs" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-command-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["README.md", "src/main/Button.tsx"]
+          }
+        })
+      )
+
+      assert {:error, _command, "command_chain_operator_outside_quotes"} =
+               AppServer.command_policy_violation_for_test(workspace, "printf hi|cat")
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, "git diff main")
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git diff -- src/main/Button.tsx")
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "foo|bar" README.md))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "app server allows local directory listing in fresh implementation mode" do
     test_root =
       Path.join(
@@ -5482,7 +5517,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command == "ls src/lib/db && sed -n 1,340p src/lib/db/guest-session-store.ts"
-      assert pattern == "(\\s(?:&&|\\|\\||\\|)\\s|;)"
+      assert pattern == "command_chain_operator_outside_quotes"
     after
       File.rm_rf(test_root)
     end
@@ -5565,7 +5600,7 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command =~ "SwipeExperience.tsx | cat"
-      assert pattern == "(\\s(?:&&|\\|\\||\\|)\\s|;)"
+      assert pattern == "command_chain_operator_outside_quotes"
     after
       File.rm_rf(test_root)
     end

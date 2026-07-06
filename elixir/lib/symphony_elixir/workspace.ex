@@ -687,7 +687,7 @@ defmodule SymphonyElixir.Workspace do
     value =
       case Regex.run(~r/`([^`]+)`/, value, capture: :all_but_first) do
         [code] -> code
-        _ -> value
+        _ -> strip_branch_contract_label(value)
       end
 
     branch =
@@ -704,6 +704,20 @@ defmodule SymphonyElixir.Workspace do
     case branch do
       "" -> nil
       branch -> branch
+    end
+  end
+
+  defp strip_branch_contract_label(value) when is_binary(value) do
+    case String.split(value, ":", parts: 2) do
+      [label, branch] ->
+        if String.contains?(String.downcase(label), ["branch", "integration"]) do
+          String.trim(branch)
+        else
+          value
+        end
+
+      _ ->
+        value
     end
   end
 

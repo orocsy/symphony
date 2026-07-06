@@ -6125,6 +6125,9 @@ defmodule SymphonyElixir.CoreTest do
         ## Shared Files
         - src/app/api/cards/handler.ts is owned by COD-246C. Do not edit it here.
 
+        ## Out Of Scope
+        - src/app/api/cards/handler.ts
+
         ### MIU 1 - Initial load carries guest safety draft
         Send the bounded guest preference draft on first cards load and retry.
         """
@@ -6170,6 +6173,13 @@ defmodule SymphonyElixir.CoreTest do
                  "path" => "src/lib/server/recipe-chats.ts",
                  "line" => 359,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-3"
+               },
+               %{
+                 "body" => "**Move the safety header helper** This should be handled in `src/app/api/cards/handler.ts`.",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/features/swipe/SwipeExperience.tsx",
+                 "line" => 121,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-4"
                }
              ]}
 
@@ -6197,6 +6207,7 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Apply guest safety preferences before loading cards"
       refute prompt =~ "Cap guest preference arrays"
       refute prompt =~ "Validate recipes before trusting provider safety"
+      refute prompt =~ "Move the safety header helper"
       refute prompt =~ "src/app/api/swipes/handler.ts"
       refute prompt =~ "src/lib/server/recipe-chats.ts"
     after
@@ -13498,9 +13509,8 @@ defmodule SymphonyElixir.CoreTest do
 
       assert rendered =~ "git\\s+log"
       assert rendered =~ "git\\s+diff\\s+--stat"
-      assert rendered =~ "origin/"
-      assert rendered =~ "&&"
-      assert rendered =~ "\\|"
+      assert rendered =~ "git_diff_base_branch_without_path_scope"
+      assert rendered =~ "command_chain_operator_outside_quotes"
       assert rendered =~ "DESIGN\\.md"
       assert rendered =~ "design/Mobile\\ Top\\ Area\\.html"
       assert rendered =~ "design/state\\.svg"
@@ -13559,7 +13569,7 @@ defmodule SymphonyElixir.CoreTest do
         Jason.encode!(%{
           "mode" => "review_rework",
           "requirements" => %{
-            "ticket_type" => "implementation",
+            "ticket_type" => "Implementation",
             "write_scope" => ["src/features/swipe/SwipeExperience.tsx"]
           }
         })

@@ -49,15 +49,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     "vercel@openai-curated"
   ]
   @worker_disabled_mcp_servers []
+  @review_rework_command_chain_pattern "command_chain_operator_outside_quotes"
+  @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
   @review_rework_forbidden_command_patterns [
-    "(\\s(?:&&|\\|\\||\\|)\\s|;)",
+    @review_rework_command_chain_pattern,
     "(^|\\s|[\"'])rg(\\s|$)",
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
     "(^|\\s|[\"'])find(\\s|$)",
     "(^|\\s|[\"'])git\\s+log(\\s|$)",
     "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
-    "(^|\\s|[\"'])git\\s+diff(\\s|$)(?=[^\"'\\n]*(?:origin/|main|develop|release/|@\\{upstream\\}))",
+    @review_rework_git_diff_base_pattern,
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
     "(^|\\s|[\"'])ls(\\s|$)"
   ]
@@ -645,6 +647,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   def effective_forbidden_command_patterns_for(_workspace), do: []
+
+  if Mix.env() == :test do
+    def command_policy_violation_for_test(workspace, command) do
+      payload = %{"params" => %{"msg" => %{"command" => command}}}
+      patterns = effective_forbidden_command_patterns_for(workspace)
+      forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
+    end
+  end
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case dispatch_preflight_mode(workspace) do
@@ -2407,7 +2417,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       not Regex.match?(~r/(^|\s)-[^-\s]*[Rr][^-\s]*(\s|$)/, command) and
       not Regex.match?(~r/(^|\s)--recursive(\s|=|$)/, command) and
       not broad_search_path_token?(command) and
-      not Regex.match?(~r/\s(?:&&|\|\||\|)\s|;\s|\$\(|`/, command)
+      not command_chain_operator_outside_quotes?(command) and
+      not Regex.match?(~r/\$\(|`/, command)
   end
 
   defp file_scoped_grep_command?(_command), do: false
@@ -2417,7 +2428,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       (String.contains?(command, "-n") or String.contains?(command, "--line-number")) and
       not Regex.match?(~r/(^|\s)(--files|--glob|-g|--type|-t|--replace|-r)(\s|=|$)/, command) and
       not broad_search_path_token?(command) and
-      not Regex.match?(~r/\s(?:&&|\|\||\|)\s|;\s|\$\(|`/, command)
+      not command_chain_operator_outside_quotes?(command) and
+      not Regex.match?(~r/\$\(|`/, command)
   end
 
   defp file_scoped_rg_command?(_command), do: false
@@ -2437,7 +2449,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp broad_search_path_token?(_command), do: false
 
   defp search_path_tokens(command) when is_binary(command) do
-    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)(?=$|[\s"'])/
+    ~r/(?:^|[\s"'])(\.?\/?(?:(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*|(?:opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|package\.json|tsconfig\.json|DESIGN\.md|README\.md|AGENTS\.md|vitest\.config\.[A-Za-z0-9]+)))(?=$|[\s"'])/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_requirement_path(path)]
@@ -2764,12 +2776,91 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->
-      case Regex.compile(pattern) do
-        {:ok, regex} -> Regex.match?(regex, command)
-        {:error, _reason} -> false
+      cond do
+        pattern == @review_rework_command_chain_pattern ->
+          command_chain_operator_outside_quotes?(command)
+
+        pattern == @review_rework_git_diff_base_pattern ->
+          git_diff_base_branch_without_path_scope?(command)
+
+        true ->
+          case Regex.compile(pattern) do
+            {:ok, regex} -> Regex.match?(regex, command)
+            {:error, _reason} -> false
+          end
       end
     end)
   end
+
+  defp command_chain_operator_outside_quotes?(command) when is_binary(command) do
+    command
+    |> String.graphemes()
+    |> chain_operator_scan(nil, nil)
+  end
+
+  defp command_chain_operator_outside_quotes?(_command), do: false
+
+  defp chain_operator_scan([], _quote, _previous), do: false
+
+  defp chain_operator_scan(["\\" | [_escaped | rest]], quote, _previous) do
+    chain_operator_scan(rest, quote, "\\")
+  end
+
+  defp chain_operator_scan([char | rest], nil, previous) when char in ["'", "\""] do
+    chain_operator_scan(rest, char, previous)
+  end
+
+  defp chain_operator_scan([char | rest], quote, previous) when char == quote do
+    chain_operator_scan(rest, nil, previous)
+  end
+
+  defp chain_operator_scan([char | rest], nil, previous) do
+    next = List.first(rest)
+
+    cond do
+      char == ";" ->
+        true
+
+      char == "|" and previous not in ["|", "\\"] and next != "|" ->
+        true
+
+      char == "|" and next == "|" ->
+        true
+
+      char == "&" and next == "&" ->
+        true
+
+      true ->
+        chain_operator_scan(rest, nil, char)
+    end
+  end
+
+  defp chain_operator_scan([char | rest], quote, _previous), do: chain_operator_scan(rest, quote, char)
+
+  defp git_diff_base_branch_without_path_scope?(command) when is_binary(command) do
+    normalized = String.replace(command, ~r/\s+/, " ")
+
+    with true <- Regex.match?(~r/(^|[\s"'])git\s+diff\s+/, normalized),
+         false <- Regex.match?(~r/(^|[\s"'])git\s+diff\s+--stat(\s|$)/, normalized) do
+      diff_args =
+        normalized
+        |> String.split(~r/(^|[\s"'])git\s+diff\s+/, parts: 2, include_captures: false)
+        |> List.last()
+        |> Kernel.||("")
+
+      before_path_scope =
+        diff_args
+        |> String.split(" -- ", parts: 2)
+        |> List.first()
+
+      String.contains?(before_path_scope, ["origin/", "release/", "@{upstream}"]) or
+        Regex.match?(~r/(^|\s)(main|develop)(\s|$|\.{2})/, before_path_scope)
+    else
+      _ -> false
+    end
+  end
+
+  defp git_diff_base_branch_without_path_scope?(_command), do: false
 
   defp command_text(%{} = payload) do
     payload

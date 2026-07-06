@@ -361,9 +361,10 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       true ->
         target_paths = feedback_target_paths(summary)
+        write_scope_paths = feedback_write_scope_paths(summary)
 
-        target_paths != [] and
-          Enum.any?(target_paths, fn path -> path_in_write_scope?(path, requirements["write_scope"] || []) end) and
+        write_scope_paths != [] and
+          Enum.any?(write_scope_paths, fn path -> path_in_write_scope?(path, requirements["write_scope"] || []) end) and
           not Enum.any?(target_paths, fn path -> path_in_scope_list?(path, requirements["out_of_scope"] || []) end)
     end
   end
@@ -421,9 +422,17 @@ defmodule SymphonyElixir.DispatchPreflight do
     _error -> false
   end
 
-  defp feedback_target_paths(%{"path" => path}) when is_binary(path) and path != "", do: [path]
+  defp feedback_target_paths(%{"path" => path} = summary) when is_binary(path) and path != "" do
+    ([path] ++ feedback_paths([Map.delete(summary, "path")]))
+    |> Enum.uniq()
+  end
+
   defp feedback_target_paths(summary) when is_map(summary), do: feedback_paths([summary])
   defp feedback_target_paths(_summary), do: []
+
+  defp feedback_write_scope_paths(%{"path" => path}) when is_binary(path) and path != "", do: [path]
+  defp feedback_write_scope_paths(summary) when is_map(summary), do: feedback_paths([summary])
+  defp feedback_write_scope_paths(_summary), do: []
 
   defp scope_path_candidates(scope) when is_binary(scope) do
     ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]*]+(?:/\*\*|/\*|\.[A-Za-z0-9]+)(?:[A-Za-z0-9_\-./\[\]*]*)?)}
