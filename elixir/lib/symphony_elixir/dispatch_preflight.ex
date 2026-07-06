@@ -319,7 +319,16 @@ defmodule SymphonyElixir.DispatchPreflight do
       |> String.trim()
       |> String.downcase()
 
-    ticket_type in ["test-spec", "test spec", "test"]
+    title =
+      requirements
+      |> Map.get("title", "")
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    ticket_type in ["test-spec", "test spec", "test"] or
+      String.contains?(title, "test-spec") or
+      String.contains?(title, "test spec")
   end
 
   defp test_spec_issue?(_requirements), do: false
@@ -522,6 +531,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
     open_corrections = open_correction_summaries(workspace)
     correction_active? = open_corrections != []
+    feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
       "schema_version" => 1,
@@ -531,7 +541,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "state" => issue_value(issue, :state),
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu"),
-      "first_task" => handoff_recovery_first_task(open_corrections),
+      "first_task" => handoff_recovery_first_task(open_corrections, requirements),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
@@ -543,19 +553,27 @@ defmodule SymphonyElixir.DispatchPreflight do
         "mergeable" => Map.get(inspection, :mergeable),
         "mergeable_state" => Map.get(inspection, :mergeable_state),
         "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
-        "feedback_count" => length(Map.get(inspection, :feedback, [])),
-        "feedback" => Enum.map(Map.get(inspection, :feedback, []), &feedback_summary/1)
+        "feedback_count" => length(feedback),
+        "feedback" => Enum.map(feedback, &feedback_summary/1)
       }
     }
   end
 
-  defp handoff_recovery_first_task([correction | _]) do
+  defp handoff_recovery_first_task([correction | _], _requirements) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
     "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
   end
 
-  defp handoff_recovery_first_task(_open_corrections) do
+  defp handoff_recovery_first_task(_open_corrections, requirements) when is_map(requirements) do
+    if test_spec_issue?(requirements) do
+      "Recover the existing dirty test-spec checkpoint: inspect git status and focused dirty diffs only. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
+    else
+      handoff_recovery_first_task([], nil)
+    end
+  end
+
+  defp handoff_recovery_first_task(_open_corrections, _requirements) do
     "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
   end
 

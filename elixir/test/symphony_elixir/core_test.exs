@@ -6639,6 +6639,81 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight gives dirty test-spec handoff expected-failure guidance" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-test-spec-handoff-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265-dirty-preflight",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Rework",
+        branch_name: "orocsy/cod-246-preference-miu-guest-setup-controls",
+        description: """
+        ## Ticket Type
+        test-spec
+
+        ## Write Scope
+        - tests/unit/swipe-experience-request.test.ts
+
+        ## Validation
+        ```bash
+        pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.mkdir_p!(Path.join(workspace, "tests/unit"))
+      File.write!(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"), "test('base', () => {})\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"), "test('expected failure', () => {})\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["first_task"] =~ "dirty test-spec checkpoint"
+      assert preflight["first_task"] =~ "implementation is intentionally not present yet"
+      assert preflight["first_task"] =~ "do not edit production source"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps clean in-progress implementation branches in fresh implementation mode" do
     test_root =
       Path.join(
