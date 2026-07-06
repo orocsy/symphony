@@ -770,10 +770,22 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_implementation_shared_file_paths(%{"requirements" => %{"shared_files" => shared_files}}) do
     shared_files
     |> string_values()
+    |> Enum.filter(&review_rework_read_only_shared_file?/1)
     |> Enum.flat_map(&paths_from_requirement_text/1)
   end
 
   defp review_rework_implementation_shared_file_paths(_preflight), do: []
+
+  defp review_rework_read_only_shared_file?(value) when is_binary(value) do
+    text = String.downcase(value)
+
+    String.contains?(text, "read-only") or
+      String.contains?(text, "readonly") or
+      String.contains?(text, "context") or
+      String.contains?(text, "support path")
+  end
+
+  defp review_rework_read_only_shared_file?(_value), do: false
 
   defp review_rework_implementation_validation_paths(%{"requirements" => %{"validation" => validation}})
        when is_map(validation) do
