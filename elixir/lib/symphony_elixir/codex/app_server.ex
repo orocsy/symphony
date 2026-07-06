@@ -752,6 +752,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_strict_implementation_read_paths(%{} = preflight, workspace) do
     (review_rework_feedback_paths(preflight) ++
        review_rework_implementation_write_scope_paths(preflight) ++
+       review_rework_implementation_shared_file_paths(preflight) ++
        review_rework_implementation_validation_paths(preflight) ++
        review_rework_correction_paths(workspace, :open_only) ++
        review_rework_validation_metadata_paths(workspace))
@@ -765,6 +766,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_implementation_write_scope_paths(_preflight), do: []
+
+  defp review_rework_implementation_shared_file_paths(%{"requirements" => %{"shared_files" => shared_files}}) do
+    shared_files
+    |> string_values()
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_implementation_shared_file_paths(_preflight), do: []
 
   defp review_rework_implementation_validation_paths(%{"requirements" => %{"validation" => validation}})
        when is_map(validation) do

@@ -4963,6 +4963,7 @@ defmodule SymphonyElixir.AppServerTest do
             ]
           },
           "requirements" => %{
+            "ticket_type" => "implementation",
             "write_scope" => [
               "`src/app/api/swipes/handler.ts`"
             ],
