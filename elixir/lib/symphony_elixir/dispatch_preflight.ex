@@ -342,7 +342,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     cond do
       test_spec_issue?(requirements) ->
-        []
+        Enum.filter(feedback, &feedback_in_write_scope?(&1, requirements))
 
       implementation_issue?(requirements) ->
         Enum.filter(feedback, &feedback_in_write_scope?(&1, requirements))
@@ -353,39 +353,98 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp feedback_in_write_scope?(feedback, requirements) when is_map(requirements) do
-    feedback
-    |> feedback_summary()
-    |> then(&feedback_paths([&1]))
-    |> Enum.any?(fn path -> path_in_write_scope?(path, requirements["write_scope"] || []) end)
+    summary = feedback_summary(feedback)
+
+    cond do
+      summary["type"] == "check" ->
+        true
+
+      true ->
+        target_paths = feedback_target_paths(summary)
+
+        target_paths != [] and
+          Enum.any?(target_paths, fn path -> path_in_write_scope?(path, requirements["write_scope"] || []) end) and
+          not Enum.any?(target_paths, fn path -> path_in_scope_list?(path, requirements["out_of_scope"] || []) end)
+    end
   end
 
   defp feedback_in_write_scope?(_feedback, _requirements), do: false
 
   defp path_in_write_scope?(path, write_scope) when is_binary(path) and is_list(write_scope) do
-    normalized_path = normalize_scope_path(path)
-
-    Enum.any?(write_scope, fn scope ->
-      normalized_scope = normalize_scope_path(scope)
-
-      cond do
-        normalized_scope == "" ->
-          false
-
-        String.ends_with?(normalized_scope, "/**") ->
-          prefix = String.trim_trailing(normalized_scope, "/**")
-          normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
-
-        String.ends_with?(normalized_scope, "/*") ->
-          prefix = String.trim_trailing(normalized_scope, "/*")
-          normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
-
-        true ->
-          normalized_path == normalized_scope or String.starts_with?(normalized_path, normalized_scope <> "/")
-      end
-    end)
+    path_in_scope_list?(path, write_scope)
   end
 
   defp path_in_write_scope?(_path, _write_scope), do: false
+
+  defp path_in_scope_list?(path, scope_items) when is_binary(path) and is_list(scope_items) do
+    normalized_path = normalize_scope_path(path)
+
+    Enum.any?(scope_items, fn scope ->
+      scope
+      |> scope_path_candidates()
+      |> Enum.any?(fn normalized_scope ->
+        path_matches_scope?(normalized_path, normalized_scope)
+      end)
+    end)
+  end
+
+  defp path_in_scope_list?(_path, _scope_items), do: false
+
+  defp path_matches_scope?(normalized_path, normalized_scope) do
+    cond do
+      normalized_scope == "" ->
+        false
+
+      String.ends_with?(normalized_scope, "/**") ->
+        prefix = String.trim_trailing(normalized_scope, "/**")
+        normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
+
+      String.ends_with?(normalized_scope, "/*") ->
+        prefix = String.trim_trailing(normalized_scope, "/*")
+        normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
+
+      String.contains?(normalized_scope, "*") ->
+        glob_scope_matches?(normalized_path, normalized_scope)
+
+      true ->
+        normalized_path == normalized_scope or String.starts_with?(normalized_path, normalized_scope <> "/")
+    end
+  end
+
+  defp glob_scope_matches?(normalized_path, normalized_scope) do
+    normalized_scope
+    |> Regex.escape()
+    |> String.replace("\\*", ".*")
+    |> then(&Regex.compile!("^#{&1}$"))
+    |> Regex.match?(normalized_path)
+  rescue
+    _error -> false
+  end
+
+  defp feedback_target_paths(%{"path" => path}) when is_binary(path) and path != "", do: [path]
+  defp feedback_target_paths(summary) when is_map(summary), do: feedback_paths([summary])
+  defp feedback_target_paths(_summary), do: []
+
+  defp scope_path_candidates(scope) when is_binary(scope) do
+    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]*]+(?:/\*\*|/\*|\.[A-Za-z0-9]+)(?:[A-Za-z0-9_\-./\[\]*]*)?)}
+    |> Regex.scan(scope)
+    |> Enum.flat_map(fn captures ->
+      captures
+      |> tl()
+      |> Enum.find(&(&1 != ""))
+      |> case do
+        value when is_binary(value) -> [normalize_scope_path(value)]
+        _ -> []
+      end
+    end)
+    |> Enum.reject(&(&1 == "" or String.starts_with?(&1, ["http://", "https://"])))
+    |> case do
+      [] -> [normalize_scope_path(scope)]
+      candidates -> candidates
+    end
+  end
+
+  defp scope_path_candidates(_scope), do: []
 
   defp normalize_scope_path(value) do
     value
@@ -1298,10 +1357,6 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp feedback_paths(_items), do: []
-
-  defp feedback_item_paths(%{"path" => path, "body" => body}) when is_binary(path) and path != "" do
-    [path | feedback_body_paths(body)]
-  end
 
   defp feedback_item_paths(%{"path" => path}) when is_binary(path) and path != "" do
     [path]

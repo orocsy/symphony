@@ -2075,7 +2075,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-gh-read"}}}'
-            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"gh api repos/orocsy/nutribuddy/pulls/27/reviews && printf '\\''\\\\n--- review comments ---\\\\n'\\'' && gh api repos/orocsy/nutribuddy/pulls/27/comments && printf '\\''\\\\n--- issue comments ---\\\\n'\\'' && gh api repos/orocsy/nutribuddy/issues/27/comments"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"gh api repos/orocsy/nutribuddy/pulls/27/reviews"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -5482,7 +5482,90 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command == "ls src/lib/db && sed -n 1,340p src/lib/db/guest-session-store.ts"
-      assert pattern == "(^|\\s|[\"'])ls(\\s|$)"
+      assert pattern == "(\\s(?:&&|\\|\\||\\|)\\s|;)"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks chained commands even when first review rework search path is scoped" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-piped-search-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PIPED-SEARCH")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PIPED-SEARCH",
+          "branch" => "orocsy/mt-review-piped-search",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/swipe/SwipeExperience.tsx", "line" => 105}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-piped-search"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-piped-search"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"GuestPreferenceDraft\\" src/features/swipe/SwipeExperience.tsx | cat src/app/api/cards/handler.ts"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-piped-search",
+        identifier: "MT-REVIEW-PIPED-SEARCH",
+        title: "Review rework piped search",
+        description: "Piped commands should be blocked before scoped search exceptions",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PIPED-SEARCH",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Fix review feedback", issue)
+
+      assert command =~ "SwipeExperience.tsx | cat"
+      assert pattern == "(\\s(?:&&|\\|\\||\\|)\\s|;)"
     after
       File.rm_rf(test_root)
     end

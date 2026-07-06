@@ -1243,6 +1243,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              ]
 
       assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
+
       assert requirements["out_of_scope"] == [
                "src/app/api/cards/handler.ts",
                "src/lib/server/recipe-chats.ts"
@@ -1603,6 +1604,67 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert String.trim(current_branch) == shared_branch
       refute String.trim(current_branch) == generated_child_branch
       assert File.regular?(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace does not treat base branch as shared PR head" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-shared-pr-base-is-not-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      shared_branch = "orocsy/cod-246-preference-miu-guest-setup-controls"
+      generated_child_branch = "orocsy/cod-266-generated-child-branch"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "base\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", shared_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "shared-pr\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Shared PR head"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266",
+        identifier: "COD-266",
+        title: "COD-246B implementation child",
+        state: "Ready for Symphony",
+        branch_name: generated_child_branch,
+        description: """
+        ## Base Branch
+        `main`
+
+        ## Branch / PR Contract
+        - Branch: `#{shared_branch}`
+        - Base: `main`
+        - Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - `src/features/swipe/SwipeExperience.tsx`
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == shared_branch
+      refute String.trim(current_branch) == "main"
+      refute String.trim(current_branch) == generated_child_branch
+      assert File.read!(Path.join(workspace, "README.md")) == "shared-pr\n"
     after
       File.rm_rf(test_root)
     end

@@ -45,11 +45,11 @@ defmodule SymphonyElixir.RescueSupervisor do
         runtime_dispatch_config_correction?(corrections) ->
           handle_worker_prompt_defect_corrections(issue, workspace, corrections)
 
-        corrections != [] and pending_codex_review_correction?(corrections) ->
-          handle_pending_codex_review_corrections(issue, workspace, corrections)
-
         corrections != [] and provider_usage_limit_correction?(corrections) ->
           keep_provider_usage_limit_corrections_parked(issue)
+
+        corrections != [] and pending_codex_review_correction?(corrections) ->
+          handle_pending_codex_review_corrections(issue, workspace, corrections)
 
         corrections != [] and validation_blocker_correction?(corrections) ->
           classify_validation_blocker(issue, workspace, corrections)

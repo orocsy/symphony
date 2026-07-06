@@ -103,6 +103,7 @@ defmodule SymphonyElixir.PromptBuilder do
   defp maybe_clear_clean_rework_checkpoint(checkpoint, issue, workspace)
        when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
     if issue_rework?(issue) and clean_worktree?(workspace) and
+         not local_commit_handoff_risk?(workspace) and
          local_handoff_checkpoint?(checkpoint) do
       ""
     else

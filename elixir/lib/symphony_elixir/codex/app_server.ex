@@ -50,16 +50,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   ]
   @worker_disabled_mcp_servers []
   @review_rework_forbidden_command_patterns [
+    "(\\s(?:&&|\\|\\||\\|)\\s|;)",
     "(^|\\s|[\"'])rg(\\s|$)",
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
     "(^|\\s|[\"'])find(\\s|$)",
     "(^|\\s|[\"'])git\\s+log(\\s|$)",
     "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
-    "(^|\\s|[\"'])git\\s+diff(\\s|$)(?![^\"'\\n]*\\s--\\s)(?=[^\"'\\n]*(?:origin/|main|develop|release/|@\\{upstream\\}))",
+    "(^|\\s|[\"'])git\\s+diff(\\s|$)(?=[^\"'\\n]*(?:origin/|main|develop|release/|@\\{upstream\\}))",
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
-    "(^|\\s|[\"'])ls(\\s|$)",
-    "(;|&&|\\|\\||\\|)"
+    "(^|\\s|[\"'])ls(\\s|$)"
   ]
   @fresh_implementation_forbidden_command_patterns [
     "(^|\\s|[\"'])rg(\\s|$)",
@@ -752,7 +752,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_implementation_child?(_preflight), do: false
 
   defp review_rework_strict_implementation_read_paths(%{} = preflight, workspace) do
-    (review_rework_feedback_paths(preflight) ++
+    (review_rework_feedback_target_paths(preflight) ++
        review_rework_implementation_write_scope_paths(preflight) ++
        review_rework_implementation_shared_file_paths(preflight) ++
        review_rework_implementation_validation_paths(preflight) ++
@@ -781,10 +781,19 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_read_only_shared_file?(value) when is_binary(value) do
     text = String.downcase(value)
 
-    String.contains?(text, "read-only") or
-      String.contains?(text, "readonly") or
-      String.contains?(text, "context") or
-      String.contains?(text, "support path")
+    read_only_context? =
+      String.contains?(text, "read-only") or
+        String.contains?(text, "readonly") or
+        String.contains?(text, "context") or
+        String.contains?(text, "support path")
+
+    excluded? =
+      String.contains?(text, "owned by") or
+        String.contains?(text, "owned-by") or
+        String.contains?(text, "out of scope") or
+        String.contains?(text, "out-of-scope")
+
+    read_only_context? and not excluded?
   end
 
   defp review_rework_read_only_shared_file?(_value), do: false
@@ -817,6 +826,18 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_feedback_paths(_preflight), do: []
+
+  defp review_rework_feedback_target_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
+    feedback
+    |> Enum.flat_map(fn
+      %{"path" => path} when is_binary(path) and path != "" -> [path]
+      %{"body" => body} -> paths_from_review_rework_text(body)
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp review_rework_feedback_target_paths(_preflight), do: []
 
   defp review_rework_requirement_paths(%{"requirements" => requirements}) when is_map(requirements) do
     requirements
@@ -2386,7 +2407,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       not Regex.match?(~r/(^|\s)-[^-\s]*[Rr][^-\s]*(\s|$)/, command) and
       not Regex.match?(~r/(^|\s)--recursive(\s|=|$)/, command) and
       not broad_search_path_token?(command) and
-      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+      not Regex.match?(~r/\s(?:&&|\|\||\|)\s|;\s|\$\(|`/, command)
   end
 
   defp file_scoped_grep_command?(_command), do: false
@@ -2396,7 +2417,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       (String.contains?(command, "-n") or String.contains?(command, "--line-number")) and
       not Regex.match?(~r/(^|\s)(--files|--glob|-g|--type|-t|--replace|-r)(\s|=|$)/, command) and
       not broad_search_path_token?(command) and
-      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+      not Regex.match?(~r/\s(?:&&|\|\||\|)\s|;\s|\$\(|`/, command)
   end
 
   defp file_scoped_rg_command?(_command), do: false

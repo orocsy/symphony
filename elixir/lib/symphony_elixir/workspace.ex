@@ -93,6 +93,7 @@ defmodule SymphonyElixir.Workspace do
       artifacts = write_local_correction_files(workspace, correction)
       correction = Map.put(correction, "artifacts", artifacts)
       write_local_correction_json(workspace, artifacts["json"], correction)
+      record_local_correction_event(workspace, issue_context, correction)
 
       {:ok, correction}
     else
@@ -138,6 +139,8 @@ defmodule SymphonyElixir.Workspace do
               |> Map.put("resolution_summary", resolution_summary)
 
             File.write!(path, Jason.encode!(resolved, pretty: true) <> "\n")
+            write_local_correction_markdown(workspace, resolved)
+            record_local_correction_resolved_event(workspace, resolved, resolution_summary)
 
           _ ->
             :ok
@@ -170,6 +173,8 @@ defmodule SymphonyElixir.Workspace do
               |> Map.put("classified_at", now)
 
             File.write!(path, Jason.encode!(classified, pretty: true) <> "\n")
+            write_local_correction_markdown(workspace, classified)
+            record_local_correction_classified_event(workspace, classified, classification, summary)
 
           _ ->
             :ok
@@ -205,6 +210,8 @@ defmodule SymphonyElixir.Workspace do
                 |> Map.put("resolution_summary", resolution_summary)
 
               File.write!(path, Jason.encode!(resolved, pretty: true) <> "\n")
+              write_local_correction_markdown(workspace, resolved)
+              record_local_correction_resolved_event(workspace, resolved, resolution_summary)
             end
 
           _ ->
@@ -241,6 +248,8 @@ defmodule SymphonyElixir.Workspace do
                 |> Map.put("classified_at", now)
 
               File.write!(path, Jason.encode!(classified, pretty: true) <> "\n")
+              write_local_correction_markdown(workspace, classified)
+              record_local_correction_classified_event(workspace, classified, classification, summary)
             end
 
           _ ->
@@ -760,8 +769,8 @@ defmodule SymphonyElixir.Workspace do
     if shared_existing_branch_contract?(description) do
       [
         description_scalar_section(description, "Integration Branch"),
-        description_scalar_section(description, "Base Branch"),
-        description_contract_field(description, ["Integration Branch", "Branch", "Base"])
+        description_contract_field(description, ["Branch", "Integration Branch", "Integration"]),
+        description_existing_shared_branch_field(description)
       ]
       |> Enum.find_value(fn
         value when is_binary(value) ->
@@ -772,6 +781,25 @@ defmodule SymphonyElixir.Workspace do
           nil
       end)
     end
+  end
+
+  defp description_existing_shared_branch_field(description) do
+    description
+    |> description_section_body("Branch / PR Contract")
+    |> String.split("\n")
+    |> Enum.find_value(fn line ->
+      line = clean_contract_line(line)
+      downcased = String.downcase(line)
+
+      if String.contains?(downcased, "shared branch") or String.contains?(downcased, "existing branch") do
+        line
+        |> String.split(":", parts: 2)
+        |> case do
+          [_label, value] -> clean_contract_value(value)
+          _ -> clean_contract_value(line)
+        end
+      end
+    end)
   end
 
   defp shared_existing_branch_contract?(description) do
@@ -1166,9 +1194,192 @@ defmodule SymphonyElixir.Workspace do
     |> File.write!(Jason.encode!(correction, pretty: true) <> "\n")
   end
 
+  defp write_local_correction_markdown(workspace, %{"artifacts" => %{"markdown" => relative_path}} = correction)
+       when is_binary(relative_path) do
+    workspace
+    |> Path.join(relative_path)
+    |> File.write!(render_correction_markdown(correction))
+  rescue
+    error ->
+      Logger.debug("Unable to update correction markdown path=#{relative_path} error=#{Exception.message(error)}")
+  end
+
+  defp write_local_correction_markdown(_workspace, _correction), do: :ok
+
+  defp record_local_correction_event(workspace, issue_context, correction) do
+    now =
+      case correction["created_at"] do
+        value when is_binary(value) and value != "" -> value
+        _ -> DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      end
+
+    write_local_delivery_event!(workspace, issue_context, now, %{
+      "event" => "correction.created",
+      "phase" => "correction",
+      "status" => "open",
+      "run_status" => correction_run_status(correction),
+      "issue" => correction["issue"] || issue_context.issue_identifier,
+      "issue_id" => correction["issue_id"] || issue_context.issue_id,
+      "correction_id" => correction["correction_id"],
+      "source" => correction["source"],
+      "source_status" => correction["source_status"],
+      "summary" => correction["summary"],
+      "next_action" => correction["next_action"],
+      "artifacts" => correction_artifact_paths(correction)
+    })
+  rescue
+    error ->
+      Logger.debug("Unable to record local correction event #{issue_log_context(issue_context)} error=#{Exception.message(error)}")
+  end
+
+  defp record_local_correction_resolved_event(workspace, correction, summary) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    issue_context = correction_issue_context(correction)
+
+    write_local_delivery_event!(workspace, issue_context, now, %{
+      "event" => "correction.resolved",
+      "phase" => "correction",
+      "status" => "resolved",
+      "run_status" => correction_resolution_run_status(workspace),
+      "issue" => correction["issue"] || issue_context.issue_identifier,
+      "issue_id" => correction["issue_id"] || issue_context.issue_id,
+      "correction_id" => correction["correction_id"],
+      "source" => correction["source"],
+      "summary" => summary,
+      "artifacts" => correction_artifact_paths(correction)
+    })
+  rescue
+    error ->
+      Logger.debug("Unable to record local correction resolved event correction=#{correction["correction_id"]} error=#{Exception.message(error)}")
+  end
+
+  defp record_local_correction_classified_event(workspace, correction, classification, summary) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    issue_context = correction_issue_context(correction)
+
+    write_local_delivery_event!(workspace, issue_context, now, %{
+      "event" => "correction.classified",
+      "phase" => "correction",
+      "status" => "open",
+      "run_status" => "blocked",
+      "issue" => correction["issue"] || issue_context.issue_identifier,
+      "issue_id" => correction["issue_id"] || issue_context.issue_id,
+      "correction_id" => correction["correction_id"],
+      "source" => correction["source"],
+      "classification" => classification,
+      "summary" => summary,
+      "artifacts" => correction_artifact_paths(correction)
+    })
+  rescue
+    error ->
+      Logger.debug("Unable to record local correction classified event correction=#{correction["correction_id"]} error=#{Exception.message(error)}")
+  end
+
+  defp write_local_delivery_event!(workspace, issue_context, now, attrs) do
+    event_dir = Path.join(workspace, ".orocsy/delivery/events")
+    state_dir = Path.join(workspace, ".orocsy/delivery/state")
+    File.mkdir_p!(event_dir)
+    File.mkdir_p!(state_dir)
+
+    state = delivery_state_for_correction(workspace, issue_context, now)
+    event_id = delivery_id("evt", now)
+
+    event =
+      attrs
+      |> Map.put("schema_version", 1)
+      |> Map.put("event_id", event_id)
+      |> Map.put("ts", now)
+      |> Map.put("run_id", state["run_id"])
+      |> Map.put("goal_id", state["goal_id"])
+
+    File.write!(Path.join(event_dir, "events.jsonl"), Jason.encode!(event) <> "\n", [:append])
+
+    state =
+      state
+      |> Map.put("updated_at", now)
+      |> Map.put("last_event_id", event_id)
+      |> maybe_put_event_phase(event)
+      |> maybe_put_event_run_status(event)
+
+    File.write!(Path.join(state_dir, "current.json"), Jason.encode!(state, pretty: true) <> "\n")
+  end
+
+  defp maybe_put_event_phase(state, %{"phase" => phase}) when is_binary(phase) and phase != "",
+    do: Map.put(state, "phase", phase)
+
+  defp maybe_put_event_phase(state, _event), do: state
+
+  defp maybe_put_event_run_status(state, %{"run_status" => status}) when is_binary(status) and status != "",
+    do: Map.put(state, "status", status)
+
+  defp maybe_put_event_run_status(state, _event), do: state
+
+  defp correction_resolution_run_status(workspace) do
+    if blocking_correction_in_workspace?(workspace), do: "blocked", else: "retry-ready"
+  end
+
+  defp delivery_state_for_correction(workspace, issue_context, now) do
+    state_path = Path.join(workspace, ".orocsy/delivery/state/current.json")
+
+    state =
+      case File.read(state_path) do
+        {:ok, body} ->
+          case Jason.decode(body) do
+            {:ok, %{} = decoded} -> decoded
+            _ -> %{}
+          end
+
+        {:error, _reason} ->
+          %{}
+      end
+
+    state
+    |> put_default("schema_version", 1)
+    |> put_default("run_id", delivery_id("run", now))
+    |> put_default("goal_id", delivery_id("goal", now))
+    |> put_default("status", "scoped")
+    |> put_default("phase", "init")
+    |> put_default("intent", "")
+    |> put_default("issue", issue_context.issue_identifier)
+    |> put_default("created_at", now)
+    |> put_default("updated_at", now)
+    |> put_default("last_event_id", nil)
+    |> put_default("gates", %{})
+  end
+
+  defp put_default(map, key, value) when is_map(map) do
+    case Map.get(map, key) do
+      nil -> Map.put(map, key, value)
+      "" -> Map.put(map, key, value)
+      _ -> map
+    end
+  end
+
+  defp correction_run_status(%{"next_action" => action}) when action in ["block", "escalate"], do: "blocked"
+  defp correction_run_status(%{"next_action" => "retry"}), do: "retry-ready"
+  defp correction_run_status(_correction), do: "blocked"
+
+  defp correction_artifact_paths(%{"artifacts" => artifacts}) when is_map(artifacts) do
+    artifacts
+    |> Map.values()
+    |> Enum.filter(&is_binary/1)
+  end
+
+  defp correction_artifact_paths(_correction), do: []
+
+  defp correction_issue_context(correction) do
+    %{
+      issue_identifier: correction["issue"] || "issue",
+      issue_id: correction["issue_id"]
+    }
+  end
+
   defp render_correction_markdown(correction) do
     findings = correction["findings"] || []
     required_corrections = correction["required_corrections"] || []
+    resolution_summary = correction["resolution_summary"] || ""
+    classification = correction["classification"] || ""
+    classification_summary = correction["classification_summary"] || ""
 
     [
       "# Correction #{correction["correction_id"]}",
@@ -1187,7 +1398,9 @@ defmodule SymphonyElixir.Workspace do
       "",
       "## Required Corrections",
       "",
-      render_markdown_list(required_corrections, "Determine the smallest safe recovery step before continuing.")
+      render_markdown_list(required_corrections, "Determine the smallest safe recovery step before continuing."),
+      render_optional_markdown_section("## Classification", classification, classification_summary),
+      render_optional_markdown_section("## Resolution", resolution_summary)
     ]
     |> List.flatten()
     |> Enum.join("\n")
@@ -1196,6 +1409,20 @@ defmodule SymphonyElixir.Workspace do
 
   defp render_markdown_list([], fallback), do: ["- #{fallback}"]
   defp render_markdown_list(items, _fallback), do: Enum.map(items, &"- #{&1}")
+
+  defp render_optional_markdown_section(_heading, ""), do: []
+  defp render_optional_markdown_section(_heading, nil), do: []
+
+  defp render_optional_markdown_section(heading, value) when is_binary(value) do
+    ["", heading, "", value]
+  end
+
+  defp render_optional_markdown_section(heading, value, summary)
+       when is_binary(value) and value != "" and is_binary(summary) and summary != "" do
+    ["", heading, "", "- Classification: #{value}", "- Summary: #{summary}"]
+  end
+
+  defp render_optional_markdown_section(heading, value, _summary), do: render_optional_markdown_section(heading, value)
 
   defp string_list(values) when is_list(values) do
     values
@@ -1217,12 +1444,16 @@ defmodule SymphonyElixir.Workspace do
   defp normalize_next_action(_next_action), do: "block"
 
   defp correction_id(iso8601) do
+    delivery_id("correction", iso8601)
+  end
+
+  defp delivery_id(prefix, iso8601) do
     timestamp =
       iso8601
       |> String.replace(~r/[^0-9]/, "")
       |> String.slice(0, 14)
 
-    "correction_#{timestamp}_#{System.unique_integer([:positive])}"
+    "#{prefix}_#{timestamp}_#{System.unique_integer([:positive])}"
   end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do
