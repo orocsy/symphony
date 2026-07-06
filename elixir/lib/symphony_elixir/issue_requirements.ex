@@ -296,7 +296,7 @@ defmodule SymphonyElixir.IssueRequirements do
 
   defp out_of_scope(description) do
     (section_list_all(description, "Out Of Scope") ++
-       scoped_section_list(description, "Write Scope", "Out") ++ scope_subsection_list(description, "Out"))
+       section_subsection_list_all(description, "Write Scope", "Out") ++ scope_subsection_list(description, "Out"))
     |> Enum.uniq()
   end
 
@@ -349,6 +349,13 @@ defmodule SymphonyElixir.IssueRequirements do
       [] -> bullet_lines(section)
       scoped -> scoped
     end
+  end
+
+  defp section_subsection_list_all(description, section_heading, subsection_heading) do
+    description
+    |> section_text_all(section_heading)
+    |> subsection_text(subsection_heading)
+    |> bullet_lines()
   end
 
   defp subsection_text(text, heading) do

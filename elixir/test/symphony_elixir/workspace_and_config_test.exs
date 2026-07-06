@@ -1243,6 +1243,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              ]
 
       assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
+      assert requirements["out_of_scope"] == [
+               "src/app/api/cards/handler.ts",
+               "src/lib/server/recipe-chats.ts"
+             ]
+
       assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-904.md"
     after
       File.rm_rf(workspace)
