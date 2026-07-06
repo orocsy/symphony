@@ -686,6 +686,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_allowed_read_paths(%{} = preflight, workspace) do
+    if review_rework_implementation_child?(preflight) do
+      review_rework_strict_implementation_read_paths(preflight, workspace)
+    else
+      review_rework_broad_read_paths(preflight, workspace)
+    end
+  end
+
+  defp review_rework_broad_read_paths(%{} = preflight, workspace) do
     base_paths =
       (review_rework_feedback_paths(preflight) ++
          review_rework_requirement_paths(preflight) ++
@@ -704,6 +712,42 @@ defmodule SymphonyElixir.Codex.AppServer do
        review_rework_local_import_paths(workspace, base_paths ++ counterpart_paths ++ route_helper_paths))
     |> Enum.uniq()
   end
+
+  defp review_rework_implementation_child?(%{"requirements" => %{"ticket_type" => ticket_type}})
+       when is_binary(ticket_type) do
+    ticket_type
+    |> String.trim()
+    |> String.downcase()
+    |> Kernel.==("implementation")
+  end
+
+  defp review_rework_implementation_child?(_preflight), do: false
+
+  defp review_rework_strict_implementation_read_paths(%{} = preflight, workspace) do
+    (review_rework_feedback_paths(preflight) ++
+       review_rework_implementation_write_scope_paths(preflight) ++
+       review_rework_implementation_validation_paths(preflight) ++
+       review_rework_correction_paths(workspace) ++
+       review_rework_validation_metadata_paths(workspace))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_implementation_write_scope_paths(%{"requirements" => %{"write_scope" => write_scope}}) do
+    write_scope
+    |> string_values()
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_implementation_write_scope_paths(_preflight), do: []
+
+  defp review_rework_implementation_validation_paths(%{"requirements" => %{"validation" => validation}})
+       when is_map(validation) do
+    [Map.get(validation, "commands"), Map.get(validation, "files")]
+    |> Enum.flat_map(&string_values/1)
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_implementation_validation_paths(_preflight), do: []
 
   defp review_rework_feedback_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
     feedback

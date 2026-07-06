@@ -2633,6 +2633,74 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server blocks implementation child imported-file reads in review rework mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-implementation-import-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+
+      File.write!(
+        Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"),
+        "import { SwipeDeck } from './SwipeDeck';\nexport function SwipeExperience() { return SwipeDeck; }\n"
+      )
+
+      File.write!(
+        Path.join(workspace, "src/features/swipe/SwipeDeck.tsx"),
+        "export function SwipeDeck() { return null; }\n"
+      )
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-IMPLEMENTATION-IMPORT-READ",
+          "branch" => "orocsy/mt-review-implementation-import-read",
+          "requirements" => %{
+            "ticket_type" => "implementation",
+            "write_scope" => [
+              "src/features/swipe/SwipeExperience.tsx",
+              "tests/unit/swipe-experience-request.test.ts"
+            ],
+            "validation" => %{
+              "commands" => [
+                "pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"
+              ],
+              "files" => []
+            }
+          },
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/swipe/SwipeExperience.tsx", "line" => 105}
+            ]
+          }
+        })
+      )
+
+      patterns = AppServer.effective_forbidden_command_patterns_for(workspace)
+      joined = Enum.join(patterns, "\n")
+
+      assert joined =~ "SwipeExperience"
+      refute joined =~ "SwipeDeck"
+
+      sideways_command = "sed -n 260,560p src/features/swipe/SwipeDeck.tsx"
+      allowed_command = "sed -n 1,220p src/features/swipe/SwipeExperience.tsx"
+
+      assert Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), sideways_command))
+      refute Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), allowed_command))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows quoted current feedback path reads in review rework mode" do
     test_root =
       Path.join(
