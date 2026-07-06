@@ -13305,6 +13305,44 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-206"
   end
 
+  test "agent runner disables denied command recovery for strict implementation review rework" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-strict-review-rework-recovery-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"]
+          }
+        })
+      )
+
+      assert AgentRunner.policy_violation_recovery_budget_for_test(workspace) == 0
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{"ticket_type" => "test_spec"}
+        })
+      )
+
+      assert AgentRunner.policy_violation_recovery_budget_for_test(workspace) == 2
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder suppresses pushed handoff checkpoint in review rework preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)

@@ -82,6 +82,7 @@ defmodule SymphonyElixir.AgentRunner do
     def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
     def pushed_handoff_stop_for_test(workspace), do: pushed_handoff_stop?(workspace)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
+    def policy_violation_recovery_budget_for_test(workspace), do: policy_violation_recovery_budget(workspace)
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -129,6 +130,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, recovery_count) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    max_policy_recoveries = policy_violation_recovery_budget(workspace)
 
     result =
       with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
@@ -140,12 +142,10 @@ defmodule SymphonyElixir.AgentRunner do
       end
 
     case result do
-      {:error, {:forbidden_command, command, pattern}} when recovery_count < @max_policy_violation_recoveries ->
+      {:error, {:forbidden_command, command, pattern}} when recovery_count < max_policy_recoveries ->
         attempt = recovery_count + 1
 
-        Logger.warning(
-          "Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{@max_policy_violation_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}"
-        )
+        Logger.warning("Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{max_policy_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}")
 
         record_policy_violation_event(workspace, issue, command, pattern, attempt, worker_host)
 
@@ -154,7 +154,7 @@ defmodule SymphonyElixir.AgentRunner do
           command: command,
           pattern: pattern,
           attempt: attempt,
-          max_attempts: @max_policy_violation_recoveries,
+          max_attempts: max_policy_recoveries,
           timestamp: DateTime.utc_now()
         })
 
@@ -163,7 +163,7 @@ defmodule SymphonyElixir.AgentRunner do
             command: command,
             pattern: pattern,
             attempt: attempt,
-            max_attempts: @max_policy_violation_recoveries
+            max_attempts: max_policy_recoveries
           })
 
         run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, attempt)
@@ -172,6 +172,27 @@ defmodule SymphonyElixir.AgentRunner do
         other
     end
   end
+
+  defp policy_violation_recovery_budget(workspace) do
+    if strict_review_rework_implementation_child?(workspace) do
+      0
+    else
+      @max_policy_violation_recoveries
+    end
+  end
+
+  defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
+    with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),
+         true <- get_in(preflight, ["requirements", "ticket_type"]) == "implementation" do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp strict_review_rework_implementation_child?(_workspace), do: false
 
   defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, nil)
        when is_binary(workspace) do
