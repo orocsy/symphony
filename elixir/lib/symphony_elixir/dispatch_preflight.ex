@@ -244,12 +244,16 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp review_feedback?(%{feedback: feedback}) when is_list(feedback), do: feedback != []
   defp review_feedback?(_inspection), do: false
 
+  defp scoped_review_feedback?(inspection, requirements) do
+    review_feedback?(inspection) and review_feedback_for_requirements(inspection, requirements) != []
+  end
+
   defp preflight_mode(workspace, requirements, inspection) do
     cond do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
-      review_feedback?(inspection) and not test_spec_issue?(requirements) ->
+      scoped_review_feedback?(inspection, requirements) ->
         "review_rework"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
@@ -332,6 +336,70 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp test_spec_issue?(_requirements), do: false
+
+  defp review_feedback_for_requirements(inspection, requirements) do
+    feedback = Map.get(inspection, :feedback, [])
+
+    cond do
+      test_spec_issue?(requirements) ->
+        []
+
+      implementation_issue?(requirements) ->
+        Enum.filter(feedback, &feedback_in_write_scope?(&1, requirements))
+
+      true ->
+        feedback
+    end
+  end
+
+  defp feedback_in_write_scope?(feedback, requirements) when is_map(requirements) do
+    feedback
+    |> feedback_summary()
+    |> then(&feedback_paths([&1]))
+    |> Enum.any?(fn path -> path_in_write_scope?(path, requirements["write_scope"] || []) end)
+  end
+
+  defp feedback_in_write_scope?(_feedback, _requirements), do: false
+
+  defp path_in_write_scope?(path, write_scope) when is_binary(path) and is_list(write_scope) do
+    normalized_path = normalize_scope_path(path)
+
+    Enum.any?(write_scope, fn scope ->
+      normalized_scope = normalize_scope_path(scope)
+
+      cond do
+        normalized_scope == "" ->
+          false
+
+        String.ends_with?(normalized_scope, "/**") ->
+          prefix = String.trim_trailing(normalized_scope, "/**")
+          normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
+
+        String.ends_with?(normalized_scope, "/*") ->
+          prefix = String.trim_trailing(normalized_scope, "/*")
+          normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
+
+        true ->
+          normalized_path == normalized_scope or String.starts_with?(normalized_path, normalized_scope <> "/")
+      end
+    end)
+  end
+
+  defp path_in_write_scope?(_path, _write_scope), do: false
+
+  defp normalize_scope_path(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> String.trim("-")
+    |> String.trim()
+    |> String.trim("`")
+    |> String.trim_leading("./")
+    |> String.trim_trailing(".")
+    |> String.trim_trailing(",")
+    |> String.trim_trailing(";")
+    |> String.trim()
+  end
 
   defp requirement_state(requirements) when is_map(requirements) do
     requirements
@@ -490,7 +558,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp present_review_value?(value), do: value not in [false, [], %{}]
 
   defp review_rework_preflight(workspace, issue, requirements, inspection) do
-    feedback = Map.get(inspection, :feedback, [])
+    feedback = review_feedback_for_requirements(inspection, requirements)
     open_corrections = open_correction_summaries(workspace)
     correction_active? = open_corrections != []
 

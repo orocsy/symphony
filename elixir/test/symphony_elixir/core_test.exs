@@ -5932,6 +5932,127 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight filters shared PR review feedback to implementation child write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-impl-shared-pr-scoped-feedback-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266-preflight",
+        identifier: "COD-266",
+        title: "COD-246B impl",
+        state: "Rework",
+        branch_name: "orocsy/cod-266-generated-child-branch",
+        description: """
+        ## Ticket Type
+        implementation
+
+        ## Base Branch
+        `orocsy/cod-246-preference-miu-guest-setup-controls` on PR #103.
+
+        ## Integration Branch
+        Same shared branch: `orocsy/cod-246-preference-miu-guest-setup-controls`.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+        - tests/unit/swipe-experience-request.test.ts
+
+        ## Shared Files
+        - src/app/api/cards/handler.ts is owned by COD-246C. Do not edit it here.
+
+        ### MIU 1 - Initial load carries guest safety draft
+        Send the bounded guest preference draft on first cards load and retry.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "**Apply guest safety preferences before loading cards**",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/features/swipe/SwipeExperience.tsx",
+                 "line" => 105,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-1"
+               },
+               %{
+                 "body" => "**Cap guest preference arrays before storing/prompting**",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/app/api/swipes/handler.ts",
+                 "line" => 53,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-2"
+               },
+               %{
+                 "body" => "**Validate recipes before trusting provider safety**",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/lib/server/recipe-chats.ts",
+                 "line" => 359,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-3"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert preflight["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert get_in(preflight, ["review", "feedback_count"]) == 1
+
+      assert [%{"path" => "src/features/swipe/SwipeExperience.tsx"}] =
+               get_in(preflight, ["review", "feedback"])
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Apply guest safety preferences before loading cards"
+      refute prompt =~ "Cap guest preference arrays"
+      refute prompt =~ "Validate recipes before trusting provider safety"
+      refute prompt =~ "src/app/api/swipes/handler.ts"
+      refute prompt =~ "src/lib/server/recipe-chats.ts"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight adds chromium guidance for playwright chrome sandbox corrections" do
     workspace =
       Path.join(
