@@ -1184,6 +1184,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.mkdir_p!(Path.join(workspace, ".codex/agentic/issue-briefs"))
 
       File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-904.md"), """
+      ## Write Scope
+
+      In:
+
+      - `src/features/swipe/SwipeExperience.tsx`
+
+      Out:
+
+      - `src/app/api/cards/handler.ts`
+      - `src/lib/server/recipe-chats.ts`
+
       ## Shared Files
 
       - Read-only context: `src/app/api/cards/route.ts` only to confirm the existing `/api/cards` request contract.
@@ -1223,6 +1234,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "Read-only context: src/app/api/cards/route.ts only to confirm the existing /api/cards request contract."
              ]
 
+      assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
       assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-904.md"
     after
       File.rm_rf(workspace)

@@ -32,7 +32,7 @@ defmodule SymphonyElixir.IssueRequirements do
         "test_activation" => scalar_section(description, "Test Activation"),
         "project" => "",
         "write_scope" => write_scope(description),
-        "shared_files" => section_list(description, "Shared Files"),
+        "shared_files" => section_list_all(description, "Shared Files"),
         "dependencies" => dependencies(description),
         "mius" => miu_list(description),
         "validation" => validation(description, workspace),
@@ -220,8 +220,8 @@ defmodule SymphonyElixir.IssueRequirements do
 
   defp validation_text(description) do
     [
-      section_text(description, "Validation"),
-      section_text(description, "Validation Commands")
+      section_text_all(description, "Validation"),
+      section_text_all(description, "Validation Commands")
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
@@ -281,6 +281,12 @@ defmodule SymphonyElixir.IssueRequirements do
     |> bullet_lines()
   end
 
+  defp section_list_all(description, heading) do
+    description
+    |> section_text_all(heading)
+    |> bullet_lines()
+  end
+
   defp write_scope(description) do
     case section_list(description, "Write Scope") do
       [] -> scope_subsection_list(description, "In")
@@ -289,7 +295,7 @@ defmodule SymphonyElixir.IssueRequirements do
   end
 
   defp out_of_scope(description) do
-    (section_list(description, "Out Of Scope") ++ scope_subsection_list(description, "Out"))
+    (section_list_all(description, "Out Of Scope") ++ scope_subsection_list(description, "Out"))
     |> Enum.uniq()
   end
 
@@ -371,6 +377,15 @@ defmodule SymphonyElixir.IssueRequirements do
   end
 
   defp section_text(description, heading) do
+    pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
+
+    case Regex.run(pattern, description || "", capture: :all_but_first) do
+      [body] -> String.trim(body)
+      _ -> ""
+    end
+  end
+
+  defp section_text_all(description, heading) do
     pattern = ~r/^##\s+#{Regex.escape(heading)}\s*\n(.*?)(?=^(?:##|###)\s+|\z)/ms
 
     pattern
