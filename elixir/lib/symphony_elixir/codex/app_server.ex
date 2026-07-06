@@ -647,7 +647,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case dispatch_preflight_mode(workspace) do
       "review_rework" ->
-        Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
+        configured_patterns = review_rework_configured_forbidden_patterns(workspace, patterns)
+        Enum.uniq(configured_patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
 
       "fresh_implementation" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
@@ -661,6 +662,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
+
+  defp review_rework_configured_forbidden_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"} = preflight} ->
+        if review_rework_implementation_child?(preflight) do
+          Enum.reject(patterns, &broad_sed_range_forbidden_pattern?/1)
+        else
+          patterns
+        end
+
+      _ ->
+        patterns
+    end
+  rescue
+    _error -> patterns
+  end
+
+  defp review_rework_configured_forbidden_patterns(_workspace, patterns), do: patterns
+
+  defp broad_sed_range_forbidden_pattern?(pattern) when is_binary(pattern) do
+    String.contains?(pattern, "sed -n") and
+      String.contains?(pattern, ["1,(1[6-9]", "260,560p"])
+  end
+
+  defp broad_sed_range_forbidden_pattern?(_pattern), do: false
 
   defp dispatch_preflight_mode(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do

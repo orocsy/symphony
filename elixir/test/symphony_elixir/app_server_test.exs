@@ -2646,6 +2646,13 @@ defmodule SymphonyElixir.AppServerTest do
       inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
 
+      write_workflow_file!(Workflow.workflow_file_path(),
+        codex_forbidden_command_patterns: [
+          "sed -n ['\"]1,(1[6-9][0-9]|[2-9][0-9][0-9]|[1-9][0-9]{3,})p['\"] src/",
+          "sed -n ['\"]260,560p['\"] src/"
+        ]
+      )
+
       File.mkdir_p!(preflight_dir)
       File.mkdir_p!(inbox_dir)
       File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
