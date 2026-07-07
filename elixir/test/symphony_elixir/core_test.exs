@@ -13980,6 +13980,21 @@ defmodule SymphonyElixir.CoreTest do
       test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
       File.mkdir_p!(Path.dirname(source_path))
       File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = false;\n")
+      File.write!(test_path, "test('request cards', () => false);\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add swipe request files"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(source_path, "export const requestCards = true;\n")
       File.write!(test_path, "test('request cards', () => true);\n")
 
@@ -14037,6 +14052,135 @@ defmodule SymphonyElixir.CoreTest do
       refute prompt =~ "Review rework execution contract:"
       refute prompt =~ "You must read AGENTS.md"
       refute prompt =~ "Ticket COD-266"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "review rework command policy blocks dirty validated handoff rechecks before commit" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-dirty-validated-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      source_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
+      File.mkdir_p!(Path.dirname(source_path))
+      File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = false;\n")
+      File.write!(test_path, "test('request cards', () => false);\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add swipe request files"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(source_path, "export const requestCards = true;\n")
+      File.write!(test_path, "test('request cards', () => true);\n")
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event":"gate.post-miu","status":"passed","step":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","ts":"2026-07-07T02:24:03Z"}\n)
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-266-review-rework",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Finish dirty validated handoff.",
+          "issue" => "COD-266",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "validation" => %{
+              "commands" => ["pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"],
+              "files" => ["tests/unit/swipe-experience-request.test.ts"]
+            }
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 105,
+                "body" => "Apply guest safety preferences before loading cards."
+              }
+            ]
+          }
+        })
+      )
+
+      assert {:error, _command, "dirty_validated_handoff_recheck_before_commit"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff -- src/features/swipe/SwipeExperience.tsx"
+               )
+
+      assert {:error, _command, "dirty_validated_handoff_recheck_before_commit"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "sed -n '1,220p' tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert {:error, _command, "dirty_validated_handoff_recheck_before_commit"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git add src/features/swipe/SwipeExperience.tsx tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git commit -m 'COD-266: send guest safety draft to cards request'"
+               )
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git push")
     after
       File.rm_rf(workspace)
     end

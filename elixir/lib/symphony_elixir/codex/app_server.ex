@@ -51,8 +51,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   @worker_disabled_mcp_servers []
   @review_rework_command_chain_pattern "command_chain_operator_outside_quotes"
   @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
+  @review_rework_dirty_validated_handoff_recheck_pattern "dirty_validated_handoff_recheck_before_commit"
   @review_rework_forbidden_command_patterns [
     @review_rework_command_chain_pattern,
+    @review_rework_dirty_validated_handoff_recheck_pattern,
     "(^|\\s|[\"'])rg(\\s|$)",
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
@@ -1981,6 +1983,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       symlinked_vitest_full_test_command?(command_for_patterns, workspace) ->
         {:error, command, "symlinked_vitest_full_test_requires_configLoader_runner"}
 
+      dirty_validated_handoff_recheck_before_commit?(command_for_patterns, workspace) ->
+        {:error, command, @review_rework_dirty_validated_handoff_recheck_pattern}
+
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
@@ -2109,6 +2114,53 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp symlinked_vitest_full_test_command?(_command, _workspace), do: false
+
+  defp dirty_validated_handoff_recheck_before_commit?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    dispatch_preflight_mode(workspace) == "review_rework" and
+      dirty_validated_handoff_pending?(workspace) and
+      dirty_validated_handoff_recheck_command?(command, workspace)
+  rescue
+    _error -> false
+  end
+
+  defp dirty_validated_handoff_recheck_before_commit?(_command, _workspace), do: false
+
+  defp dirty_validated_handoff_pending?(workspace) when is_binary(workspace) do
+    meaningful_git_dirty_paths(workspace) != [] and recent_passed_validation_or_gate_event?(workspace)
+  end
+
+  defp dirty_validated_handoff_pending?(_workspace), do: false
+
+  defp dirty_validated_handoff_recheck_command?(command, workspace) do
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    git_diff_command?(normalized) or
+      file_read_of_dirty_path?(normalized, workspace) or
+      validation_command?(normalized)
+  end
+
+  defp git_diff_command?(command) when is_binary(command) do
+    Regex.match?(~r/(^|[\s"'])git\s+diff(\s|["']|$)/, command)
+  end
+
+  defp file_read_of_dirty_path?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    simple_file_read_command?(command) and
+      command
+      |> paths_from_review_rework_text()
+      |> Enum.any?(&(&1 in meaningful_git_dirty_paths(workspace)))
+  end
+
+  defp validation_command?(command) when is_binary(command) do
+    Regex.match?(~r/(^|[\s"'])(?:corepack\s+)?(?:pnpm|npm|yarn|npx)\s+/, command) and
+      String.contains?(command, ["test", "vitest", "lint", "type-check", "typecheck", "build"])
+  end
+
+  defp validation_command?(_command), do: false
 
   defp plain_pnpm_test_command?(command) when is_binary(command) do
     normalized =
@@ -2633,6 +2685,72 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> false
   end
 
+  defp recent_passed_validation_or_gate_event?(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(@delivery_event_path)
+    |> cached_recent_passed_validation_or_gate_event?()
+  end
+
+  defp recent_passed_validation_or_gate_event?(_workspace), do: false
+
+  defp cached_recent_passed_validation_or_gate_event?(events_path) when is_binary(events_path) do
+    cache_key = {__MODULE__, :recent_passed_validation_or_gate_event, events_path}
+
+    case Process.get(cache_key) do
+      {signature, result} ->
+        current_signature = delivery_event_file_signature(events_path)
+
+        if current_signature == signature do
+          result
+        else
+          scan_cached_recent_passed_validation_or_gate_event(events_path, cache_key, current_signature)
+        end
+
+      _ ->
+        scan_cached_recent_passed_validation_or_gate_event(
+          events_path,
+          cache_key,
+          delivery_event_file_signature(events_path)
+        )
+    end
+  end
+
+  defp scan_cached_recent_passed_validation_or_gate_event(events_path, cache_key, signature) do
+    result =
+      signature != :missing and
+        events_path
+        |> File.stream!()
+        |> Enum.reduce([], fn line, acc -> [String.trim(line) | acc] |> Enum.take(40) end)
+        |> Enum.reverse()
+        |> Enum.any?(&passed_validation_or_gate_event_line?/1)
+
+    Process.put(cache_key, {signature, result})
+    result
+  rescue
+    _error ->
+      Process.put(cache_key, {signature, false})
+      false
+  end
+
+  defp passed_validation_or_gate_event_line?(line) when is_binary(line) do
+    case Jason.decode(line) do
+      {:ok, %{"status" => "passed"} = event} ->
+        event_name = Map.get(event, "event", "") |> to_string()
+        tool = Map.get(event, "tool", "") |> to_string() |> String.downcase()
+        text = inspect(event, limit: :infinity, printable_limit: :infinity) |> String.downcase()
+
+        event_name in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+          (event_name == "tool.finished" and
+             (String.contains?(tool, ["validation", "test", "vitest", "typecheck", "lint", "build"]) or
+                String.contains?(text, ["validation", "test", "vitest", "typecheck", "lint", "build"])))
+
+      _ ->
+        false
+    end
+  end
+
+  defp passed_validation_or_gate_event_line?(_line), do: false
+
   defp fresh_implementation_checkpoint_ready?(workspace) when is_binary(workspace) do
     technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
   rescue
@@ -2782,6 +2900,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         pattern == @review_rework_git_diff_base_pattern ->
           git_diff_base_branch_without_path_scope?(command)
+
+        pattern == @review_rework_dirty_validated_handoff_recheck_pattern ->
+          false
 
         true ->
           case Regex.compile(pattern) do
