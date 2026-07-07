@@ -13598,7 +13598,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-206"
   end
 
-  test "agent runner disables denied command recovery for strict implementation review rework" do
+  test "agent runner allows one denied command recovery for strict implementation review rework" do
     workspace =
       Path.join(
         System.tmp_dir!(),
@@ -13620,7 +13620,7 @@ defmodule SymphonyElixir.CoreTest do
         })
       )
 
-      assert AgentRunner.policy_violation_recovery_budget_for_test(workspace) == 0
+      assert AgentRunner.policy_violation_recovery_budget_for_test(workspace) == 1
 
       File.write!(
         Path.join(state_dir, "dispatch-preflight.json"),

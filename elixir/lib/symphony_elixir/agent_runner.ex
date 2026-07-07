@@ -9,6 +9,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
+  @strict_review_rework_policy_violation_recoveries 1
 
   @type worker_host :: String.t() | nil
 
@@ -175,7 +176,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp policy_violation_recovery_budget(workspace) do
     if strict_review_rework_implementation_child?(workspace) do
-      0
+      @strict_review_rework_policy_violation_recoveries
     else
       @max_policy_violation_recoveries
     end
