@@ -42,6 +42,9 @@ defmodule SymphonyElixir.PromptBuilder do
 
     prompt =
       cond do
+        dirty_validated_handoff_checkpoint?(checkpoint) ->
+          dirty_validated_handoff_prompt(issue, checkpoint, attempt)
+
         pushed_validated_handoff_checkpoint?(checkpoint) ->
           pushed_validated_handoff_prompt(issue, checkpoint, attempt)
 
@@ -315,10 +318,13 @@ defmodule SymphonyElixir.PromptBuilder do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => "review_rework"} = preflight} ->
         if open_blocking_corrections(workspace) == [] do
+          checkpoint = review_rework_handoff_checkpoint(workspace)
+          preflight_context = DispatchPreflight.prompt_context(workspace)
+
           [
-            review_rework_handoff_checkpoint(workspace),
-            DispatchPreflight.prompt_context(workspace),
-            review_rework_micro_prompt()
+            checkpoint,
+            preflight_context,
+            review_rework_micro_prompt(checkpoint)
           ]
           |> Enum.reject(&(&1 == ""))
           |> Enum.join("\n\n")
@@ -352,7 +358,15 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
-  defp review_rework_micro_prompt do
+  defp review_rework_micro_prompt(checkpoint) do
+    if dirty_validated_handoff_checkpoint?(checkpoint) do
+      dirty_validated_review_rework_micro_prompt()
+    else
+      standard_review_rework_micro_prompt()
+    end
+  end
+
+  defp standard_review_rework_micro_prompt do
     """
     Review rework execution contract:
 
@@ -374,6 +388,21 @@ defmodule SymphonyElixir.PromptBuilder do
     - After a code/test edit, run focused validation, then commit, push the same branch, and request fresh Codex review; the runtime captures validation output, so do not edit `.orocsy/delivery/state/dispatch-preflight.json`.
     - Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review; Symphony's review monitor owns review/rework transitions after the new review result exists.
     - If the listed feedback is already resolved or outdated at the current head, record that classification, update the handoff state, and stop without editing.
+    """
+    |> String.trim()
+  end
+
+  defp dirty_validated_review_rework_micro_prompt do
+    """
+    Dirty validated review-rework handoff contract:
+
+    - Treat this as a handoff-finalization turn for an already-edited, already-validated local diff. Do not redo implementation, source reads, broad review scans, issue-brief reads, or broad validation before the handoff.
+    - First action: run `git status --short --branch` only to confirm the dirty files still match the runtime-provided checkpoint above.
+    - If the dirty file list still matches and the checkpoint lists current passed validation/gate evidence, do not rerun the same validation command and do not read `sed`, `cat`, `nl`, or full file contents again. Use the recorded evidence.
+    - Stage only the intended dirty product/test files, commit with a concise issue-prefixed message, push the existing branch to its configured upstream, then request/update Codex review for the existing PR.
+    - After push/review request, update the Linear/Orocsy handoff with branch, PR, commit SHA, validation evidence from the checkpoint, and any blocker. Leave the issue non-terminal; a fresh review request is not proof of clean review.
+    - Only fall back to a focused `git diff -- <dirty-file>` read or focused validation when `git status` shows different dirty files, staged/unmerged conflict markers, missing validation evidence, or a failed git/push/review command requires a precise blocker.
+    - If git push, GitHub, Linear, network/provider access, or approval blocks the handoff, record the exact command/failure and next action in an Orocsy blocker/correction and stop. Do not start another implementation pass.
     """
     |> String.trim()
   end
@@ -1013,6 +1042,38 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp pushed_validated_handoff_checkpoint?(_checkpoint), do: false
+
+  defp dirty_validated_handoff_checkpoint?(checkpoint) when is_binary(checkpoint) do
+    String.starts_with?(checkpoint, "Dirty validated handoff checkpoint:")
+  end
+
+  defp dirty_validated_handoff_checkpoint?(_checkpoint), do: false
+
+  defp dirty_validated_handoff_prompt(issue, checkpoint, attempt) do
+    """
+    #{checkpoint}
+
+    Minimal dirty handoff-finalization mode:
+
+    - This is #{attempt_label(attempt)} for an already-edited local diff with recent passed validation/gate evidence. Keep scope to the current ticket, current workspace branch, existing dirty files, and existing PR handoff only.
+    - Active issue: `#{issue_value(issue, :identifier)}` — #{issue_value(issue, :title)}
+    - Issue URL: #{issue_value(issue, :url)}
+    - Current state: #{issue_value(issue, :state)}
+
+    Required sequence:
+
+    - Run `git status --short --branch`.
+    - If the dirty file list still matches the checkpoint and validation evidence is present, do not read source/test files and do not rerun the same validation. Stage the intended dirty files, commit, push the current upstream branch, request/update Codex review, then update Linear/Orocsy handoff with branch, PR, commit SHA, and recorded validation evidence.
+    - If status differs, validation evidence is missing, or git/GitHub/Linear fails, record a precise blocker/correction and stop.
+
+    Stop rules:
+
+    - Do not read AGENTS.md, skills, workflow docs, issue briefs, broad project docs, historical delivery logs, unrelated tickets, or broad GitHub/Linear context.
+    - Do not redo implementation or open a new PR/branch.
+    - Never move a review-rework issue to a terminal state; a fresh review request is not proof of a clean review.
+    """
+    |> String.trim()
+  end
 
   defp pushed_validated_handoff_prompt(issue, checkpoint, attempt) do
     """

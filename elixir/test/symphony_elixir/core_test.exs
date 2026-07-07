@@ -13902,6 +13902,146 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder uses minimal handoff prompt for dirty validated review rework" do
+    workflow_prompt = """
+    You must read AGENTS.md, load every project doc, and inspect historical delivery logs.
+    Ticket {{ issue.identifier }}
+    """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-dirty-validated-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-266-review-rework"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["update-ref", "refs/remotes/origin/orocsy/cod-266-review-rework", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/cod-266-review-rework"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      source_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
+      File.mkdir_p!(Path.dirname(source_path))
+      File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = true;\n")
+      File.write!(test_path, "test('request cards', () => true);\n")
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event":"gate.post-miu","status":"passed","step":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","ts":"2026-07-07T02:24:03Z"}\n)
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-266-review-rework",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Finish dirty validated handoff.",
+          "issue" => "COD-266",
+          "review" => %{
+            "pr_number" => 103,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/103",
+            "head_sha" => "d47b2d36d6",
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 105,
+                "body" => "Apply guest safety preferences before loading cards.",
+                "url" => "https://github.com/acme/nutribuddy/pull/103#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "COD-266",
+        title: "Send bounded guest safety draft",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/COD-266",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Dirty validated handoff checkpoint:")
+      assert prompt =~ "Dirty validated review-rework handoff contract:"
+      assert prompt =~ "do not rerun the same validation command"
+      assert prompt =~ "Stage only the intended dirty product/test files"
+      assert prompt =~ "Runtime dispatch preflight:"
+      assert prompt =~ "Apply guest safety preferences before loading cards."
+      refute prompt =~ "Review rework execution contract:"
+      refute prompt =~ "You must read AGENTS.md"
+      refute prompt =~ "Ticket COD-266"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder preserves local handoff checkpoint in integration check preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
