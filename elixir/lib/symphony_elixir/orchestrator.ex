@@ -1146,6 +1146,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp durable_progress_event?(%{"event" => "tool.finished", "tool" => "technical-miu-trace"}, _count_dispatch_preflight?),
     do: false
 
+  defp durable_progress_event?(%{"event" => "tool.finished", "tool" => "review-feedback-classified"}, _count_dispatch_preflight?),
+    do: false
+
   defp durable_progress_event?(%{"event" => event} = decoded, _count_dispatch_preflight?) when is_binary(event) do
     event in @durable_progress_event_names or
       String.starts_with?(event, "eval.") or
@@ -3774,7 +3777,7 @@ defmodule SymphonyElixir.Orchestrator do
       source_status: "blocked",
       next_action: "block",
       summary:
-        "Symphony stopped a Codex worker because it used #{first_event_progress_tokens} counted tokens before recording the first durable Orocsy progress event. Total reported tokens were #{total_tokens}, including #{cached_input_tokens} cached input tokens. Creating an issue branch or recording first-turn-miu-handoff/technical-miu-trace only proves the worker is alive; workers must produce scoped file progress, a commit, a focused test/gate/eval result, review classification, or a blocker classification before the first-event token budget is exhausted.",
+        "Symphony stopped a Codex worker because it used #{first_event_progress_tokens} counted tokens before recording the first durable Orocsy progress event. Total reported tokens were #{total_tokens}, including #{cached_input_tokens} cached input tokens. Creating an issue branch or recording first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive; workers must produce scoped file progress, a commit, a focused test/gate/eval result after a product change, handoff proof, or a blocker classification before the first-event token budget is exhausted.",
       required_corrections: [
         "Inspect the worker log to confirm why it did not record real durable progress before broad context reads or implementation work.",
         "Shrink the first-turn prompt or workflow instructions, or make the worker record a blocker event when the issue shape is unclear.",

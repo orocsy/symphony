@@ -922,7 +922,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp review_rework_checkpoint_guidance(checkpoint_event, _correction_active?) do
-    "`#{checkpoint_event}` after classifying current-head feedback."
+    "`#{checkpoint_event}` after making the scoped review fix or recording an explicit blocker; classification alone is lifecycle context."
   end
 
   defp fresh_prompt_context(preflight) do

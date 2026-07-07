@@ -2003,7 +2003,7 @@ def symphony_prelude(issue: str) -> list[str]:
         "Do not load global/plugin skill bodies during the first worker turn; this workflow and the workspace-local Orocsy CLI are the runtime instructions.",
         "Use the workspace-local .codex/delivery/bin/orocsy.py CLI for runtime gates and event evidence.",
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
-        "Before optional skills, broad docs, or more than eight implementation files, record substantive progress: review-feedback-classified for review work, technical-miu-trace after the first scoped plan/edit for fresh work, or an inbox correction for a blocker. first-turn-miu-handoff alone is not substantive progress.",
+        "Before optional skills, broad docs, or more than eight implementation files, record substantive progress: a scoped edit, focused validation after a change, handoff proof, or an inbox correction for a blocker. review-feedback-classified, technical-miu-trace, and first-turn-miu-handoff are lifecycle context only.",
         "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; the ledger is .orocsy/delivery/events/events.jsonl.",
         "Use `python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record` for bounded ignored generated-artifact cleanup; do not run raw cleanup shell commands.",
         "Implement one MIU at a time and append tool/test/build/browser events.",

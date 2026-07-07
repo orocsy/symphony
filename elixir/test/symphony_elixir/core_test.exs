@@ -5928,8 +5928,8 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Toolchain preflight:"
       assert prompt =~ "Validation command guidance:"
       assert prompt =~ "Review rework execution contract"
-      assert prompt =~ "your first terminal action must be exactly"
-      assert prompt =~ ~s(--tool "review-feedback-classified")
+      assert prompt =~ "do not append `review-feedback-classified` as a first action"
+      assert prompt =~ "classification alone is lifecycle context"
       refute prompt =~ "You are an agent for this repository."
     after
       File.rm_rf(test_root)

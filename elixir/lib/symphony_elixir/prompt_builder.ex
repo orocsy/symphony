@@ -280,7 +280,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - Start from `git status --short --branch`, the issue branch, the runtime dispatch preflight Base/PR target branch when listed (otherwise latest `origin/main`), and the focused files named by the issue/brief. Avoid broad logs, historical tickets, unrelated docs, and unrelated GitHub/Linear data.
     - If `.codex/agentic/issue-briefs/#{safe_issue_identifier(issue_value(issue, :identifier))}.md` exists, read that focused brief before broad rediscovery.
     - First substantive progress guard: before optional skills, broad docs, recursive listings, or scanning more than eight implementation files, produce one real checkpoint:
-      - Rework/existing PR: inspect only the current PR review threads for this branch, classify current-head feedback, then append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. After that, edit only the referenced in-scope files or record a blocker; do not rediscover the whole project.
+      - Rework/existing PR: use the current-head feedback supplied by the runtime, inspect only the referenced in-scope file ranges, then make the scoped edit or record an explicit blocker. Append `review-feedback-classified` only after a scoped edit/blocker decision exists; classification alone is lifecycle context, not durable product progress.
       - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the issue brief plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
       - Blocked issue: create an Orocsy inbox correction with the exact blocker and stop.
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
@@ -357,8 +357,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Review rework execution contract:
 
     - Treat this as a bounded PR review fix, not a fresh implementation turn.
-    - Before using a dirty/local handoff checkpoint or the `review-feedback-classified`
-      first-action shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`.
+    - Before using a dirty/local handoff checkpoint, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`.
       If guidance or dispatch preflight reports any open Orocsy correction, that
       correction overrides review-rework shortcuts: read only the exact named
       code/test file, make the smallest in-scope fix or record a scoped blocker,
@@ -366,11 +365,10 @@ defmodule SymphonyElixir.PromptBuilder do
       recorded. Do not append `review-feedback-classified`, retry browser
       validation-only, commit, push, or request review while any correction is open.
     - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff and run the smallest validation needed for that diff. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit, push, and request fresh review after validation passes.
-    - If no open correction and no dirty/local handoff checkpoint appears above, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. The current-head review feedback is already in this prompt, so classify it from the prompt before reading code.
+    - If no open correction and no dirty/local handoff checkpoint appears above, do not append `review-feedback-classified` as a first action. The current-head review feedback is already in this prompt; start from the listed review feedback path, read one short `sed -n` range around that path only, then make the smallest in-scope edit or record a scoped blocker.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first code/test edit unless the listed feedback path is one of those files.
     - Do not run `rg`, `grep`, `find`, `ls`, `git ls-files`, `gh api`, shell pipelines, or chained shell commands in review-rework mode; the current-head feedback body and target file path are already in this prompt.
-    - After the `review-feedback-classified` checkpoint, start from the listed review feedback path. Read one short `sed -n` range around that path only, then edit only directly related code/tests or record a blocker.
-    - Before the `review-feedback-classified` checkpoint and first code/test edit, do not run `sed`, `cat`, `head`, `tail`, or `nl` on any file. After the checkpoint, do not run those commands on files outside the listed feedback path.
+    - Do not run `sed`, `cat`, `head`, `tail`, or `nl` on files outside the listed feedback path before the first code/test edit.
     - In this turn, either make the scoped edit and focused test update, or write an explicit Orocsy blocker/correction. Do not stop after analysis.
     - If validation, git push, GitHub, Linear, PATH, auth, or approval fails, record the exact command/failure and next action in an Orocsy blocker/correction before stopping.
     - After a code/test edit, run focused validation, then commit, push the same branch, and request fresh Codex review; the runtime captures validation output, so do not edit `.orocsy/delivery/state/dispatch-preflight.json`.
@@ -1038,7 +1036,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Stop rules:
 
     - Do not read AGENTS.md, skills, broad project docs, historical delivery logs, unrelated tickets, COD-149/COD-150 history, or broad GitHub/Linear context.
-    - First action for active review feedback: classify the current PR review threads, then append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"` before editing or scanning beyond the referenced files.
+    - First action for active review feedback: use the runtime-supplied current PR review threads, read only the referenced in-scope file range, then make the scoped fix or record an explicit blocker. Do not append `review-feedback-classified` as a standalone first action.
     - If the PR exists, the pushed head matches this workspace, and all current review feedback is resolved/outdated/clean, update Linear to the configured review state with branch, PR, commit, validation evidence, and stop.
     - If current review feedback remains, classify only that feedback, edit only the referenced code paths, run focused validation, commit, push, request/update Codex review, leave the issue non-terminal, and stop.
     - If GitHub, Linear, git push, or approval blocks the handoff, record a retry/blocker correction and stop instead of rediscovering the project.

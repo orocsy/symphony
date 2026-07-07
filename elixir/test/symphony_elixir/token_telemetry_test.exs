@@ -327,7 +327,7 @@ defmodule SymphonyElixir.TokenTelemetryTest do
   end
 
   test "ignores lifecycle-only Orocsy checkpoints as durable progress" do
-    for tool <- ["first-turn-miu-handoff", "technical-miu-trace"] do
+    for tool <- ["first-turn-miu-handoff", "technical-miu-trace", "review-feedback-classified"] do
       workspace = temp_workspace("lifecycle-event-summary")
 
       try do
@@ -355,38 +355,6 @@ defmodule SymphonyElixir.TokenTelemetryTest do
       after
         File.rm_rf(workspace)
       end
-    end
-  end
-
-  test "counts review feedback classification as a review-work progress checkpoint" do
-    workspace = temp_workspace("review-classification-summary")
-
-    try do
-      telemetry = start_test_turn(workspace)
-      events_dir = Path.join(workspace, ".orocsy/delivery/events")
-      File.mkdir_p!(events_dir)
-
-      File.write!(
-        Path.join(events_dir, "events.jsonl"),
-        Jason.encode!(%{
-          "event" => "tool.finished",
-          "status" => "passed",
-          "tool" => "review-feedback-classified",
-          "ts" => DateTime.utc_now() |> DateTime.add(1, :second) |> DateTime.to_iso8601()
-        }) <> "\n"
-      )
-
-      observe_token_total(telemetry, 1_500)
-      TokenTelemetry.stop(telemetry)
-
-      summary = read_worker_summary!(workspace)
-      [event] = summary["durable_progress_events"]
-
-      assert summary["status"] == "productive"
-      assert event["event"] == "tool.finished"
-      assert event["tool_fingerprint"] == "review-feedback-classified"
-    after
-      File.rm_rf(workspace)
     end
   end
 
