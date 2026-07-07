@@ -3570,6 +3570,90 @@ defmodule SymphonyElixir.CoreTest do
                    50
   end
 
+  test "review monitor moves Human Review PR with dirty mergeability to rework" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework",
+      review_monitor_request_stale_after_ms: 600_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    head_sha = "1aebf87ed6ffedf7134581baa6d79c287712fcea"
+
+    issue = %Issue{
+      id: "issue-cod-266-dirty-mergeability",
+      identifier: "COD-266",
+      title: "Send guest safety draft on first cards load and retry",
+      state: "Human Review",
+      branch_name: "orocsy/cod-246-preference-miu-guest-setup-controls"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 103,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/103" ->
+          {:ok,
+           %{
+             "number" => 103,
+             "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+             "mergeable" => false,
+             "mergeable_state" => "dirty",
+             "head" => %{
+               "sha" => head_sha,
+               "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+             }
+           }}
+
+        endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/commits/#{head_sha}" ->
+          {:ok, %{"commit" => %{"committer" => %{"date" => "2026-07-07T02:41:00Z"}}}}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/commits/#{head_sha}/check-runs?") ->
+          {:ok, %{"check_runs" => []}}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+    end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:memory_tracker_state_update, "issue-cod-266-dirty-mergeability", "Rework"}
+    assert_receive {:memory_tracker_comment, "issue-cod-266-dirty-mergeability", comment}
+    assert comment =~ "review_rework_needed"
+    assert comment =~ "PR mergeability"
+    assert comment =~ "mergeable_state=dirty"
+    assert comment =~ "pull/103"
+  end
+
   test "review monitor moves Human Review PR with failed current-head check to rework" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
