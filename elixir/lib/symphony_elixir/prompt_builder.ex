@@ -1452,12 +1452,22 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp passed_validation_event_decoded?(%{"event" => event} = decoded) when is_binary(event) do
     event in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+      explicit_validation_event?(event, decoded) or
       tool_finished_validation_event?(decoded) or
       String.starts_with?(event, "eval.") or
       Map.get(decoded, "phase") == "eval"
   end
 
   defp passed_validation_event_decoded?(_decoded), do: false
+
+  defp explicit_validation_event?("validation", decoded) when is_map(decoded) do
+    decoded
+    |> validation_signal_text()
+    |> String.downcase()
+    |> String.contains?(["test", "vitest", "typecheck", "lint", "build"])
+  end
+
+  defp explicit_validation_event?(_event, _decoded), do: false
 
   defp tool_finished_validation_event?(%{"event" => "tool.finished"} = decoded) do
     tool = decoded |> Map.get("tool", "") |> to_string()

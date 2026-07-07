@@ -14005,7 +14005,7 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(event_dir, "events.jsonl"),
-        ~s({"event":"gate.post-miu","status":"passed","step":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","ts":"2026-07-07T02:24:03Z"}\n)
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"2026-07-07T02:41:59Z"}\n)
       )
 
       File.write!(
@@ -14117,7 +14117,7 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(event_dir, "events.jsonl"),
-        ~s({"event":"gate.post-miu","status":"passed","step":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","ts":"2026-07-07T02:24:03Z"}\n)
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"2026-07-07T02:41:59Z"}\n)
       )
 
       File.write!(

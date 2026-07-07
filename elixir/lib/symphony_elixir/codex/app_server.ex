@@ -2740,6 +2740,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         text = inspect(event, limit: :infinity, printable_limit: :infinity) |> String.downcase()
 
         event_name in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+          (event_name == "validation" and String.contains?(text, ["test", "vitest", "typecheck", "lint", "build"])) or
           (event_name == "tool.finished" and
              (String.contains?(tool, ["validation", "test", "vitest", "typecheck", "lint", "build"]) or
                 String.contains?(text, ["validation", "test", "vitest", "typecheck", "lint", "build"])))
