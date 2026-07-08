@@ -926,6 +926,94 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "issue requirements build scope bundle with provenance and legacy compatibility" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-bundle-requirements-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+        """
+        ## Read Context
+        - src/features/landing/GuestStartScreen.tsx
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-scope-bundle",
+        identifier: "COD-266",
+        title: "Scope bundle provenance",
+        state: "In Progress",
+        branch_name: "orocsy/cod-266-scope-bundle",
+        description: """
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+
+        ## Shared Files
+        - package.json read-only context
+
+        ## Out Of Scope
+        - src/lib/**
+
+        ### MIU 1 - Scope bundle
+        Preserve write scope compatibility while adding provenance.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
+      assert requirements["shared_files"] == ["package.json read-only context"]
+      assert requirements["read_context"] == ["src/features/landing/GuestStartScreen.tsx"]
+      assert requirements["out_of_scope"] == ["src/lib/**"]
+
+      bundle = requirements["scope_bundle"]
+      assert bundle["schema_version"] == 2
+      assert bundle["issue"] == "COD-266"
+      assert String.starts_with?(bundle["policy_hash"], "sha256:")
+
+      assert %{
+               "path" => "src/features/swipe/SwipeExperience.tsx",
+               "source" => "linear.write_scope",
+               "operation" => "write",
+               "expires" => "branch"
+             } in bundle["write_scope"]
+
+      assert %{
+               "path" => "src/features/landing/GuestStartScreen.tsx",
+               "source" => "local_issue_brief.read_context",
+               "operation" => "read",
+               "expires" => "turn"
+             } in bundle["read_context"]
+
+      assert %{
+               "path" => "package.json",
+               "source" => "linear.shared_files",
+               "operation" => "read",
+               "expires" => "branch"
+             } in bundle["read_context"]
+
+      assert %{
+               "path" => "src/lib/**",
+               "source" => "linear.out_of_scope",
+               "operation" => "read",
+               "expires" => "branch"
+             } in bundle["denied_scope"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "workspace hydration parses scope and validation commands template headings" do
     workspace_root =
       Path.join(

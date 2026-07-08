@@ -4,7 +4,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, DispatchPreflight, PathSafety, SSH, TokenTelemetry, Workspace}
+
+  alias SymphonyElixir.{
+    Codex.DynamicTool,
+    Config,
+    DispatchPreflight,
+    PathSafety,
+    ScopeAccess,
+    SSH,
+    TokenTelemetry,
+    Workspace
+  }
 
   @initialize_id 1
   @thread_start_id 2
@@ -766,6 +776,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_strict_implementation_read_paths(%{} = preflight, workspace) do
     (review_rework_feedback_target_paths(preflight) ++
        review_rework_implementation_write_scope_paths(preflight) ++
+       review_rework_scope_bundle_read_paths(preflight) ++
        review_rework_implementation_shared_file_paths(preflight) ++
        review_rework_implementation_validation_paths(preflight) ++
        review_rework_correction_paths(workspace, :open_only) ++
@@ -780,6 +791,38 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_implementation_write_scope_paths(_preflight), do: []
+
+  defp review_rework_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+       when is_map(bundle) do
+    (scope_bundle_entry_paths(Map.get(bundle, "write_scope"), ["write", "write-if-conflicted"]) ++
+       scope_bundle_entry_paths(Map.get(bundle, "read_context"), ["read", "search"]))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_scope_bundle_read_paths(_preflight), do: []
+
+  defp scope_bundle_entry_paths(entries, allowed_operations) when is_list(entries) do
+    entries
+    |> Enum.flat_map(fn
+      %{"path" => path, "operation" => operation}
+      when is_binary(path) and (is_binary(operation) or is_nil(operation)) ->
+        if operation in allowed_operations or is_nil(operation) do
+          [normalize_requirement_path(path)]
+        else
+          []
+        end
+
+      %{"path" => path} when is_binary(path) ->
+        [normalize_requirement_path(path)]
+
+      _ ->
+        []
+    end)
+    |> Enum.filter(&review_rework_path_like?/1)
+    |> Enum.uniq()
+  end
+
+  defp scope_bundle_entry_paths(_entries, _allowed_operations), do: []
 
   defp review_rework_implementation_shared_file_paths(%{"requirements" => %{"shared_files" => shared_files}}) do
     shared_files
@@ -1485,8 +1528,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_path_guard_patterns_for_paths(paths) do
     allowed_paths =
       paths
-      |> Enum.map(&review_rework_allowed_path_pattern/1)
-      |> Enum.join("|")
+      |> Enum.map_join("|", &review_rework_allowed_path_pattern/1)
 
     [
       "(^|\\s|[\"'])sed\\s+-n\\s+\\S+\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|[\"']|$))",
@@ -1498,11 +1540,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     variants =
       path
       |> review_rework_allowed_path_variants()
-      |> Enum.map(fn variant ->
+      |> Enum.map_join("|", fn variant ->
         escaped = Regex.escape(variant)
         "(?:#{escaped}|'#{escaped}'|\"#{escaped}\")"
       end)
-      |> Enum.join("|")
 
     "(?:#{variants})"
   end
@@ -1840,6 +1881,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       true ->
         case forbidden_command_violation(payload, command_guard) do
           {:error, command, pattern} ->
+            record_scope_access_events(command_guard, command, pattern)
+
             emit_message(
               on_message,
               :forbidden_command,
@@ -2035,6 +2078,63 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp record_scope_access_events(%{workspace: workspace}, command, pattern)
+       when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
+    workspace
+    |> scope_access_events(command, pattern)
+    |> Enum.each(&append_scope_access_event(workspace, &1))
+  rescue
+    error ->
+      Logger.warning("Failed to record scope access events: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_scope_access_events(_command_guard, _command, _pattern), do: :ok
+
+  defp scope_access_events(workspace, command, pattern) do
+    ScopeAccess.events(command, pattern, scope_access_policy_bundle(workspace), scope_access_attrs(workspace))
+  end
+
+  defp scope_access_policy_bundle(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"requirements" => %{"scope_bundle" => bundle}}} when is_map(bundle) -> bundle
+      {:ok, %{"requirements" => requirements}} when is_map(requirements) -> requirements
+      {:ok, preflight} when is_map(preflight) -> preflight
+      _ -> %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp scope_access_policy_bundle(_workspace), do: %{}
+
+  defp scope_access_attrs(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, preflight} when is_map(preflight) ->
+        %{
+          "issue" => Map.get(preflight, "issue"),
+          "branch" => Map.get(preflight, "branch"),
+          "dispatch_mode" => Map.get(preflight, "mode")
+        }
+        |> Map.reject(fn {_key, value} -> is_nil(value) end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp scope_access_attrs(_workspace), do: %{}
+
+  defp append_scope_access_event(workspace, event) when is_binary(workspace) and is_map(event) do
+    path = Path.join(workspace, @delivery_event_path)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, Jason.encode!(event) <> "\n", [:append])
+  end
+
+  defp append_scope_access_event(_workspace, _event), do: :ok
 
   defp open_correction_blocks_review_classification?(command, workspace)
        when is_binary(command) and is_binary(workspace) do

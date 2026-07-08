@@ -8054,6 +8054,128 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "review rework preflight adds current-head review paths as temporary scope bundle write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-scope-bundle-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266-preflight",
+        identifier: "COD-266",
+        title: "Send guest safety draft",
+        state: "Rework",
+        branch_name: "orocsy/cod-246-preference-miu-guest-setup-controls",
+        description: """
+        ## Ticket Type
+        Implementation
+
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+
+        ## Out Of Scope
+        - src/app/api/cards/handler.ts
+
+        ### MIU 1 - Guest safety draft
+        Send guest preferences to the first cards request.
+
+        ## Validation
+        ```bash
+        pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      head_sha = "1aebf87ed6ffedf7134581baa6d79c287712fcea"
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => """
+                 **P1** The `/api/cards` handler still ignores guest safety preferences.
+
+                 Update `src/app/api/cards/handler.ts` so the current PR review path is covered.
+                 """,
+                 "commit_id" => head_sha,
+                 "path" => "src/app/api/cards/handler.ts",
+                 "line" => 42,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion_r3533275206"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["requirements", "write_scope"]) == [
+               "src/features/swipe/SwipeExperience.tsx"
+             ]
+
+      assert preflight["policy_hash"] == get_in(preflight, ["requirements", "scope_bundle", "policy_hash"])
+
+      bundle = get_in(preflight, ["requirements", "scope_bundle"])
+
+      assert Enum.any?(bundle["write_scope"], fn entry ->
+               match?(
+                 %{
+                   "path" => "src/app/api/cards/handler.ts",
+                   "source" => "github.current_head_review",
+                   "operation" => "write",
+                   "expires" => "review_thread_resolved_or_outdated",
+                   "review_url" => "https://github.com/acme/nutribuddy/pull/103#discussion_r3533275206"
+                 },
+                 entry
+               ) and entry["reason"] =~ "/api/cards"
+             end)
+
+      assert %{
+               "path" => "src/app/api/cards/handler.ts",
+               "source" => "linear.out_of_scope",
+               "operation" => "read",
+               "expires" => "branch"
+             } in bundle["denied_scope"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps fresh implementation checkpoint as worker-required progress" do
     test_root =
       Path.join(
@@ -12109,7 +12231,7 @@ defmodule SymphonyElixir.CoreTest do
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
 
       assert correction["summary"] =~
-               "first-turn-miu-handoff/technical-miu-trace only proves the worker is alive"
+               "first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive"
     after
       File.rm_rf(test_root)
     end
@@ -12203,13 +12325,15 @@ defmodule SymphonyElixir.CoreTest do
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
-      assert correction["summary"] =~ "technical-miu-trace only proves the worker is alive"
+
+      assert correction["summary"] =~
+               "first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive"
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "review feedback classification event satisfies first durable event budget" do
+  test "review feedback classification event alone does not bypass first durable event token budget" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -12288,9 +12412,18 @@ defmodule SymphonyElixir.CoreTest do
 
       state = Orchestrator.reconcile_no_durable_progress_for_test(state)
 
-      assert Map.has_key?(state.running, issue_id)
-      assert MapSet.member?(state.claimed, issue_id)
-      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.missing-first-durable-event"
+
+      assert correction["summary"] =~
+               "first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive"
     after
       File.rm_rf(test_root)
     end
@@ -13052,7 +13185,7 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Commit and push only after focused validation passes"
       assert prompt =~ "Do not run file-discovery commands such as `git ls-files`"
       assert prompt =~ "Do not query broad Linear/GitHub context"
-      assert prompt =~ "Ticket MT-203"
+      assert prompt =~ "Active issue: `MT-203`"
     after
       File.rm_rf(workspace)
     end
@@ -13668,7 +13801,13 @@ defmodule SymphonyElixir.CoreTest do
           command: "/bin/zsh -lc 'git log --oneline origin/main..HEAD'",
           pattern: "(^|\\s|[\"'])git\\s+log(\\s|$)",
           attempt: 1,
-          max_attempts: 2
+          max_attempts: 2,
+          scope_access: %{
+            "operation" => "read",
+            "paths" => ["src/features/landing/GuestStartScreen.tsx"],
+            "decision" => "block",
+            "reason_class" => "read_context_controller_not_enabled"
+          }
         }
       )
 
@@ -13678,6 +13817,10 @@ defmodule SymphonyElixir.CoreTest do
            )
 
     assert prompt =~ "Denied command: `/bin/zsh -lc 'git log --oneline origin/main..HEAD'`"
+
+    assert prompt =~
+             "Requested scope access: read src/features/landing/GuestStartScreen.tsx; decision block (read_context_controller_not_enabled)"
+
     assert prompt =~ "Do not run that command again"
     assert prompt =~ "Ticket MT-206"
   end

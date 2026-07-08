@@ -639,6 +639,305 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "command guard emits scope access request events for exact denied reads" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-exact-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-READ",
+          "branch" => "orocsy/mt-scope-read",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "scope_bundle" => %{
+              "policy_hash" => "sha256:test-policy",
+              "write_scope" => [],
+              "read_context" => [],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git diff --stat -- src/features/landing/GuestStartScreen.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-read",
+        identifier: "MT-SCOPE-READ",
+        title: "Scope access read",
+        description: "Denied exact reads should leave scope access events",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-READ",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Fix review feedback", issue)
+
+      assert command == "git diff --stat -- src/features/landing/GuestStartScreen.tsx"
+      assert pattern =~ "git\\s+diff\\s+--stat"
+
+      events = delivery_events!(workspace)
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
+      decided = Enum.find(events, &(&1["event"] == "scope.access.decided"))
+
+      assert requested["operation"] == "read"
+      assert requested["paths"] == ["src/features/landing/GuestStartScreen.tsx"]
+      assert requested["command_class"] == "git_diff"
+      assert requested["broad"] == false
+      assert requested["policy_hash"] == "sha256:test-policy"
+      assert requested["dispatch_mode"] == "review_rework"
+
+      assert decided["decision"] == "block"
+      assert decided["reason_class"] == "read_context_controller_not_enabled"
+      assert get_in(decided, ["policy_patch", "target"]) == "read_context"
+      assert get_in(decided, ["policy_patch", "paths"]) == ["src/features/landing/GuestStartScreen.tsx"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows scope bundle read context paths in review rework implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-bundle-read-context-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-BUNDLE-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      context_path = "src/features/landing/GuestStartScreen.tsx"
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(workspace, Path.dirname(context_path)))
+      File.write!(Path.join(workspace, context_path), "export type GuestPreferenceDraft = {};\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-BUNDLE-READ",
+          "branch" => "orocsy/mt-scope-bundle-read",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "scope_bundle" => %{
+              "policy_hash" => "sha256:test-policy",
+              "write_scope" => [],
+              "read_context" => [
+                %{
+                  "path" => context_path,
+                  "source" => "local_issue_brief.read_context",
+                  "operation" => "read",
+                  "expires" => "turn"
+                }
+              ],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-bundle-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-bundle-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,160p src/features/landing/GuestStartScreen.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-bundle-read",
+        identifier: "MT-SCOPE-BUNDLE-READ",
+        title: "Scope bundle read context",
+        description: "Declared read context should not be blocked by review rework path guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-BUNDLE-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Inspect setup handoff", issue)
+      refute File.exists?(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "command guard classifies broad denied search as blocked scope drift" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-broad-search-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-BROAD")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-SCOPE-BROAD",
+          "branch" => "orocsy/mt-scope-broad",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-broad"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-broad"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"GuestPreferenceDraft\\" src"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-broad",
+        identifier: "MT-SCOPE-BROAD",
+        title: "Scope access broad search",
+        description: "Broad denied searches should stay blocked",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SCOPE-BROAD",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Implement MIU", issue)
+
+      assert command == ~s(rg -n "GuestPreferenceDraft" src)
+      assert pattern == "(^|\\s|[\"'])rg(\\s|$)"
+
+      events = delivery_events!(workspace)
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
+      decided = Enum.find(events, &(&1["event"] == "scope.access.decided"))
+
+      assert requested["operation"] == "search"
+      assert requested["paths"] == ["src"]
+      assert requested["broad"] == true
+
+      assert decided["decision"] == "block"
+      assert decided["reason_class"] == "broad_scope_drift"
+      refute Map.has_key?(decided, "policy_patch")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks exec_command function calls in fresh implementation mode" do
     test_root =
       Path.join(
@@ -7323,5 +7622,13 @@ defmodule SymphonyElixir.AppServerTest do
     assert {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
 
     File.write!(full_path, "checkpoint\n")
+  end
+
+  defp delivery_events!(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/events/events.jsonl")
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
   end
 end

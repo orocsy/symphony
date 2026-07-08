@@ -11,14 +11,16 @@ defmodule SymphonyElixir.IssueRequirements do
 
   @spec from_issue(Issue.t() | map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def from_issue(%Issue{} = issue, workspace) do
-    description =
-      issue
-      |> issue_description()
-      |> maybe_append_issue_brief(issue.identifier, workspace)
+    base_description = issue_description(issue)
+    issue_brief = issue_brief_body(issue.identifier, workspace)
 
-    if not requirements_description?(description) do
-      {:error, :no_issue_requirements}
-    else
+    description =
+      base_description
+      |> maybe_append_issue_brief(issue_brief)
+
+    if requirements_description?(description) do
+      read_context = section_list_all(description, "Read Context")
+
       requirements = %{
         "identifier" => string(issue.identifier),
         "title" => string(issue.title),
@@ -32,18 +34,22 @@ defmodule SymphonyElixir.IssueRequirements do
         "test_activation" => scalar_section(description, "Test Activation"),
         "project" => "",
         "write_scope" => write_scope(description),
+        "read_context" => read_context,
         "shared_files" => section_list_all(description, "Shared Files"),
         "dependencies" => dependencies(description),
         "mius" => miu_list(description),
         "validation" => validation(description, workspace),
         "out_of_scope" => out_of_scope(description),
-        "issue_brief" => issue_brief_reference(issue.identifier, workspace)
+        "issue_brief" => issue_brief_reference(issue.identifier, workspace),
+        "scope_bundle" => scope_bundle(issue.identifier, base_description, issue_brief)
       }
 
       case validate(requirements) do
         :ok -> {:ok, requirements}
         {:error, reason} -> {:error, reason}
       end
+    else
+      {:error, :no_issue_requirements}
     end
   end
 
@@ -77,15 +83,39 @@ defmodule SymphonyElixir.IssueRequirements do
   defp issue_description(%Issue{description: description}) when is_binary(description), do: description
   defp issue_description(_issue), do: ""
 
-  defp maybe_append_issue_brief(description, identifier, workspace)
-       when is_binary(description) and is_binary(identifier) and is_binary(workspace) do
-    case issue_brief_body(identifier, workspace) do
-      "" -> description
-      brief -> [description, brief] |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.join("\n\n")
-    end
+  defp maybe_append_issue_brief(description, brief) when is_binary(description) and is_binary(brief) do
+    [description, brief]
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
   end
 
-  defp maybe_append_issue_brief(description, _identifier, _workspace), do: description
+  defp maybe_append_issue_brief(description, _brief), do: description
+
+  @spec scope_bundle(String.t() | nil, String.t() | nil, String.t() | nil) :: map()
+  def scope_bundle(identifier, description, issue_brief \\ nil) do
+    [
+      scope_entries(description, "linear"),
+      scope_entries(issue_brief, "local_issue_brief")
+    ]
+    |> Enum.reduce(empty_scope_bundle(identifier), fn entries, bundle ->
+      bundle
+      |> Map.update!("write_scope", &(&1 ++ entries.write_scope))
+      |> Map.update!("read_context", &(&1 ++ entries.read_context))
+      |> Map.update!("denied_scope", &(&1 ++ entries.denied_scope))
+    end)
+    |> normalize_scope_bundle_entries()
+    |> refresh_scope_bundle_hash()
+  end
+
+  @spec refresh_scope_bundle_hash(map()) :: map()
+  def refresh_scope_bundle_hash(bundle) when is_map(bundle) do
+    bundle = normalize_scope_bundle_entries(bundle)
+    hash_payload = Map.delete(bundle, "policy_hash")
+    Map.put(bundle, "policy_hash", "sha256:" <> sha256(hash_payload))
+  end
+
+  def refresh_scope_bundle_hash(_bundle), do: refresh_scope_bundle_hash(empty_scope_bundle(nil))
 
   defp issue_brief_body(identifier, workspace) do
     workspace
@@ -112,6 +142,83 @@ defmodule SymphonyElixir.IssueRequirements do
       Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
       Path.join(workspace, ".codex/agentic/issue-briefs/#{safe}.md")
     ]
+  end
+
+  defp empty_scope_bundle(identifier) do
+    %{
+      "schema_version" => 2,
+      "issue" => string(identifier),
+      "write_scope" => [],
+      "read_context" => [],
+      "conflict_scope" => [],
+      "denied_scope" => []
+    }
+  end
+
+  defp scope_entries(description, source_prefix) when is_binary(description) and is_binary(source_prefix) do
+    %{
+      write_scope:
+        description
+        |> write_scope()
+        |> scope_entry_list("#{source_prefix}.write_scope", "write", "branch"),
+      read_context:
+        (section_list_all(description, "Read Context")
+         |> scope_entry_list("#{source_prefix}.read_context", "read", "turn")) ++
+          (section_list_all(description, "Shared Files")
+           |> scope_entry_list("#{source_prefix}.shared_files", "read", "branch")),
+      denied_scope:
+        description
+        |> out_of_scope()
+        |> scope_entry_list("#{source_prefix}.out_of_scope", "read", "branch")
+    }
+  end
+
+  defp scope_entries(_description, _source_prefix), do: %{write_scope: [], read_context: [], denied_scope: []}
+
+  defp scope_entry_list(items, source, operation, expires) when is_list(items) do
+    items
+    |> Enum.flat_map(&scope_entries_from_item(&1, source, operation, expires))
+    |> uniq_scope_entries()
+  end
+
+  defp scope_entries_from_item(item, source, operation, expires) do
+    paths =
+      item
+      |> path_like_patterns()
+      |> Enum.reject(&(&1 == ""))
+
+    Enum.map(paths, fn path ->
+      %{
+        "path" => path,
+        "source" => source,
+        "operation" => operation,
+        "expires" => expires
+      }
+    end)
+  end
+
+  defp normalize_scope_bundle_entries(bundle) when is_map(bundle) do
+    bundle
+    |> Map.put("write_scope", bundle |> Map.get("write_scope", []) |> uniq_scope_entries())
+    |> Map.put("read_context", bundle |> Map.get("read_context", []) |> uniq_scope_entries())
+    |> Map.put("conflict_scope", bundle |> Map.get("conflict_scope", []) |> uniq_scope_entries())
+    |> Map.put("denied_scope", bundle |> Map.get("denied_scope", []) |> uniq_scope_entries())
+  end
+
+  defp uniq_scope_entries(entries) when is_list(entries) do
+    entries
+    |> Enum.filter(&is_map/1)
+    |> Enum.uniq_by(fn entry ->
+      {entry["path"], entry["source"], entry["operation"], entry["expires"], entry["review_url"]}
+    end)
+    |> Enum.sort_by(fn entry ->
+      {entry["source"] || "", entry["path"] || "", entry["operation"] || "", entry["expires"] || ""}
+    end)
+  end
+
+  defp sha256(value) do
+    :crypto.hash(:sha256, :erlang.term_to_binary(value))
+    |> Base.encode16(case: :lower)
   end
 
   defp struct_from_map(issue) do
@@ -532,7 +639,7 @@ defmodule SymphonyElixir.IssueRequirements do
     text = value |> string() |> strip_markdown_code()
 
     matches =
-      ~r/(?:^|[\s,;:])([A-Za-z0-9._*?{}\[\]-]+(?:\/[A-Za-z0-9._*?{}\[\]-]+)+)/
+      ~r/(?:^|[\s,;:])([A-Za-z0-9._*?{}\[\]-]+(?:\/[A-Za-z0-9._*?{}\[\]-]+)+|[A-Za-z0-9._*?{}\[\]-]+\.(?:tsx|jsx|json|yaml|scss|html|exs|mjs|cjs|yml|css|ts|js|md|ex))/
       |> Regex.scan(text, capture: :all_but_first)
       |> List.flatten()
       |> Enum.map(&String.trim_trailing(&1, ".,;:"))

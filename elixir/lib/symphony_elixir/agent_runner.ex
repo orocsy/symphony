@@ -5,7 +5,17 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
+
+  alias SymphonyElixir.{
+    Config,
+    DispatchPreflight,
+    Linear.Issue,
+    PromptBuilder,
+    ReviewMonitor,
+    ScopeAccess,
+    Tracker,
+    Workspace
+  }
 
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
@@ -136,7 +146,17 @@ defmodule SymphonyElixir.AgentRunner do
     result =
       with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
         try do
-          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, worker_host)
+          do_run_codex_turns(
+            session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            opts,
+            issue_state_fetcher,
+            1,
+            max_turns,
+            worker_host
+          )
         after
           AppServer.stop_session(session)
         end
@@ -145,10 +165,11 @@ defmodule SymphonyElixir.AgentRunner do
     case result do
       {:error, {:forbidden_command, command, pattern}} when recovery_count < max_policy_recoveries ->
         attempt = recovery_count + 1
+        scope_access = policy_violation_scope_access(workspace, command)
 
         Logger.warning("Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{max_policy_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}")
 
-        record_policy_violation_event(workspace, issue, command, pattern, attempt, worker_host)
+        record_policy_violation_event(workspace, issue, command, pattern, attempt, scope_access, worker_host)
 
         send_codex_update(codex_update_recipient, issue, %{
           event: :policy_violation_recovery,
@@ -156,6 +177,7 @@ defmodule SymphonyElixir.AgentRunner do
           pattern: pattern,
           attempt: attempt,
           max_attempts: max_policy_recoveries,
+          scope_access: scope_access,
           timestamp: DateTime.utc_now()
         })
 
@@ -164,7 +186,8 @@ defmodule SymphonyElixir.AgentRunner do
             command: command,
             pattern: pattern,
             attempt: attempt,
-            max_attempts: max_policy_recoveries
+            max_attempts: max_policy_recoveries,
+            scope_access: scope_access
           })
 
         run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, attempt)
@@ -196,20 +219,49 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp strict_review_rework_implementation_child?(_workspace), do: false
 
-  defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, nil)
+  defp policy_violation_scope_access(workspace, command) when is_binary(workspace) and is_binary(command) do
+    case ScopeAccess.classify_command(command, policy_violation_scope_bundle(workspace)) do
+      %{} = request ->
+        Map.merge(request, ScopeAccess.decision_for(request) || %{})
+
+      _ ->
+        nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp policy_violation_scope_access(_workspace, _command), do: nil
+
+  defp policy_violation_scope_bundle(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"requirements" => %{"scope_bundle" => bundle}}} when is_map(bundle) -> bundle
+      {:ok, %{"requirements" => requirements}} when is_map(requirements) -> requirements
+      {:ok, preflight} when is_map(preflight) -> preflight
+      _ -> %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp policy_violation_scope_bundle(_workspace), do: %{}
+
+  defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, scope_access, nil)
        when is_binary(workspace) do
-    event = %{
-      "event" => "runtime.command-policy-violation",
-      "status" => "warn",
-      "tool" => "command-guard",
-      "ts" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
-      "issue" => identifier,
-      "command" => command,
-      "pattern" => pattern,
-      "recovery_attempt" => attempt,
-      "source" => "symphony.runtime.command-guard",
-      "schema_version" => 1
-    }
+    event =
+      %{
+        "event" => "runtime.command-policy-violation",
+        "status" => "warn",
+        "tool" => "command-guard",
+        "ts" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+        "issue" => identifier,
+        "command" => command,
+        "pattern" => pattern,
+        "recovery_attempt" => attempt,
+        "source" => "symphony.runtime.command-guard",
+        "schema_version" => 1
+      }
+      |> put_if_present("scope_access", scope_access)
 
     path = Path.join(workspace, @delivery_event_path)
     File.write!(path, Jason.encode!(event) <> "\n", [:append])
@@ -220,7 +272,10 @@ defmodule SymphonyElixir.AgentRunner do
       :ok
   end
 
-  defp record_policy_violation_event(_workspace, _issue, _command, _pattern, _attempt, _worker_host), do: :ok
+  defp record_policy_violation_event(_workspace, _issue, _command, _pattern, _attempt, _scope_access, _worker_host), do: :ok
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, worker_host) do
     prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)

@@ -661,7 +661,10 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_prepend_policy_violation(prompt, opts) when is_binary(prompt) do
     case Keyword.get(opts, :policy_violation) do
-      %{command: command, pattern: pattern, attempt: attempt, max_attempts: max_attempts} ->
+      %{command: command, pattern: pattern, attempt: attempt, max_attempts: max_attempts} = policy_violation ->
+        scope_access = Map.get(policy_violation, :scope_access) || Map.get(policy_violation, "scope_access")
+        scope_access_lines = policy_violation_scope_access_lines(scope_access)
+
         final_warning =
           if attempt >= max_attempts do
             "- This is the final in-run recovery attempt. Another denied command parks the issue for human review."
@@ -675,6 +678,7 @@ defmodule SymphonyElixir.PromptBuilder do
         - The previous worker turn was interrupted because it ran a command denied by the runtime command guard.
         - Denied command: `#{command}`
         - Matched policy: `#{pattern}`
+        #{scope_access_lines}
         - Do not run that command again, and do not run other git history/diff/discovery commands. The runtime-provided context in this prompt already contains the repository state.
         - Continue directly with the smallest in-scope fix for the open correction or current task, then its focused validation.
         #{final_warning}
@@ -688,6 +692,44 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_prepend_policy_violation(prompt, _opts), do: prompt
+
+  defp policy_violation_scope_access_lines(%{} = scope_access) do
+    operation = Map.get(scope_access, "operation") || Map.get(scope_access, :operation)
+
+    if is_binary(operation) do
+      "- Requested scope access: #{operation}#{scope_access_paths(scope_access)}; decision #{scope_access_decision(scope_access)}#{scope_access_reason(scope_access)}"
+    else
+      ""
+    end
+  end
+
+  defp policy_violation_scope_access_lines(_scope_access), do: ""
+
+  defp scope_access_paths(scope_access) do
+    case Map.get(scope_access, "paths") || Map.get(scope_access, :paths) do
+      paths when is_list(paths) and paths != [] -> " #{Enum.join(paths, ", ")}"
+      _ -> ""
+    end
+  end
+
+  defp scope_access_decision(scope_access) do
+    Map.get(scope_access, "decision") || Map.get(scope_access, :decision) || "block"
+  end
+
+  defp scope_access_reason(scope_access) do
+    scope_access
+    |> scope_access_reason_class()
+    |> reason_suffix()
+  end
+
+  defp scope_access_reason_class(scope_access) do
+    Map.get(scope_access, "reason_class") || Map.get(scope_access, :reason_class)
+  end
+
+  defp reason_suffix(reason_class) when is_binary(reason_class) and reason_class != "",
+    do: " (#{reason_class})"
+
+  defp reason_suffix(_reason_class), do: ""
 
   @git_context_commit_limit 10
   @git_context_diffstat_limit 20
