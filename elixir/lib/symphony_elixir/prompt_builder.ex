@@ -679,7 +679,7 @@ defmodule SymphonyElixir.PromptBuilder do
         - Denied command: `#{command}`
         - Matched policy: `#{pattern}`
         #{scope_access_lines}
-        - Do not run that command again, and do not run other git history/diff/discovery commands. The runtime-provided context in this prompt already contains the repository state.
+        #{policy_violation_command_guidance(scope_access)}
         - Continue directly with the smallest in-scope fix for the open correction or current task, then its focused validation.
         #{final_warning}
         """
@@ -704,6 +704,20 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp policy_violation_scope_access_lines(_scope_access), do: ""
+
+  defp policy_violation_command_guidance(%{} = scope_access) do
+    if scope_access_decision(scope_access) == "allow_once" do
+      "- The runtime added this as read-only context for this retry. You may rerun that exact bounded read/search once if still needed; do not broaden it or edit that path."
+    else
+      default_policy_violation_command_guidance()
+    end
+  end
+
+  defp policy_violation_command_guidance(_scope_access), do: default_policy_violation_command_guidance()
+
+  defp default_policy_violation_command_guidance do
+    "- Do not run that command again, and do not run other git history/diff/discovery commands. The runtime-provided context in this prompt already contains the repository state."
+  end
 
   defp scope_access_paths(scope_access) do
     case Map.get(scope_access, "paths") || Map.get(scope_access, :paths) do

@@ -4911,35 +4911,123 @@ defmodule SymphonyElixir.Orchestrator do
   defp correction_block_check_target_dispatchable_retry?({:workspace, workspace_path, nil}) do
     workspace_path
     |> Workspace.open_blocking_corrections_in_workspace()
-    |> dispatchable_retry_corrections?()
+    |> dispatchable_retry_corrections?(workspace_path)
   rescue
     _error -> false
   end
 
   defp correction_block_check_target_dispatchable_retry?({:issue, issue_or_identifier, nil}) do
-    with {:ok, workspace_path} <- Workspace.path_for_issue(issue_or_identifier, nil) do
-      correction_block_check_target_dispatchable_retry?({:workspace, workspace_path, nil})
-    else
-      _ -> false
+    case Workspace.path_for_issue(issue_or_identifier, nil) do
+      {:ok, workspace_path} ->
+        correction_block_check_target_dispatchable_retry?({:workspace, workspace_path, nil})
+
+      _ ->
+        false
     end
   end
 
   defp correction_block_check_target_dispatchable_retry?(_target), do: false
 
-  defp dispatchable_retry_corrections?(corrections) when is_list(corrections) do
-    corrections != [] and Enum.all?(corrections, &dispatchable_retry_correction?/1)
+  defp dispatchable_retry_corrections?(corrections, workspace_path) when is_list(corrections) do
+    corrections != [] and Enum.all?(corrections, &dispatchable_retry_correction?(&1, workspace_path))
   end
 
-  defp dispatchable_retry_corrections?(_corrections), do: false
+  defp dispatchable_retry_corrections?(_corrections, _workspace_path), do: false
 
-  defp dispatchable_retry_correction?(%{} = correction) do
+  defp dispatchable_retry_correction?(%{} = correction, workspace_path) do
     normalize_correction_value(correction["status"]) == "open" and
       normalize_correction_value(correction["next_action"]) == "retry" and
       is_nil(correction["resolved_at"]) and
+      retry_fingerprint_changed?(correction, workspace_path) and
       actionable_code_or_test_correction?(correction)
   end
 
-  defp dispatchable_retry_correction?(_correction), do: false
+  defp dispatchable_retry_correction?(_correction, _workspace_path), do: false
+
+  defp retry_fingerprint_changed?(%{"guard" => %{"retry_fingerprint" => %{} = stored}} = correction, workspace_path)
+       when is_binary(workspace_path) do
+    stored = reject_blank_fingerprint_values(stored)
+
+    if stored == %{} do
+      true
+    else
+      case current_retry_fingerprint(correction, workspace_path, Map.keys(stored)) do
+        %{} = current ->
+          not fingerprint_values_match?(stored, current)
+
+        _ ->
+          false
+      end
+    end
+  end
+
+  defp retry_fingerprint_changed?(_correction, _workspace_path), do: true
+
+  defp current_retry_fingerprint(correction, workspace_path, required_keys) when is_map(correction) and is_binary(workspace_path) do
+    preflight =
+      case DispatchPreflight.read(workspace_path) do
+        {:ok, %{} = preflight} -> preflight
+        _ -> nil
+      end
+
+    guard = if is_map(correction["guard"]), do: correction["guard"], else: %{}
+    scope_access = if is_map(guard["scope_access"]), do: guard["scope_access"], else: %{}
+    stored = if is_map(guard["retry_fingerprint"]), do: guard["retry_fingerprint"], else: %{}
+
+    current =
+      %{
+        "issue" => correction["issue"],
+        "issue_id" => correction["issue_id"],
+        "correction_id" => correction["correction_id"],
+        "source" => correction["source"],
+        "head_sha" => retry_fingerprint_head_sha(preflight),
+        "policy_hash" => retry_fingerprint_policy_hash(preflight),
+        "operation" => scope_access["operation"] || stored["operation"],
+        "paths" => scope_access["paths"] || stored["paths"],
+        "command_fingerprint" => scope_access["command_fingerprint"] || stored["command_fingerprint"]
+      }
+      |> reject_blank_fingerprint_values()
+
+    if Enum.all?(required_keys, &Map.has_key?(current, &1)), do: current
+  rescue
+    _error -> nil
+  end
+
+  defp current_retry_fingerprint(_correction, _workspace_path, _required_keys), do: nil
+
+  defp retry_fingerprint_head_sha(preflight) when is_map(preflight) do
+    Map.get(preflight, "head_sha") ||
+      get_in(preflight, ["review", "head_sha"]) ||
+      get_in(preflight, ["review", "head"])
+  end
+
+  defp retry_fingerprint_head_sha(_preflight), do: nil
+
+  defp retry_fingerprint_policy_hash(preflight) when is_map(preflight) do
+    Map.get(preflight, "policy_hash") ||
+      get_in(preflight, ["requirements", "scope_bundle", "policy_hash"]) ||
+      get_in(preflight, ["scope_bundle", "policy_hash"])
+  end
+
+  defp retry_fingerprint_policy_hash(_preflight), do: nil
+
+  defp fingerprint_values_match?(stored, current) when is_map(stored) and is_map(current) do
+    stored
+    |> reject_blank_fingerprint_values()
+    |> Enum.all?(fn {key, value} -> Map.get(current, key) == value end)
+  end
+
+  defp fingerprint_values_match?(_stored, _current), do: false
+
+  defp reject_blank_fingerprint_values(fingerprint) when is_map(fingerprint) do
+    fingerprint
+    |> Enum.reject(fn {_key, value} -> retry_fingerprint_blank?(value) end)
+    |> Map.new()
+  end
+
+  defp reject_blank_fingerprint_values(_fingerprint), do: %{}
+
+  defp retry_fingerprint_blank?(value), do: value in [nil, "", []]
 
   defp actionable_code_or_test_correction?(%{} = correction) do
     text =

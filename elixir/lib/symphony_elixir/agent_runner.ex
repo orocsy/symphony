@@ -94,6 +94,26 @@ defmodule SymphonyElixir.AgentRunner do
     def pushed_handoff_stop_for_test(workspace), do: pushed_handoff_stop?(workspace)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
     def policy_violation_recovery_budget_for_test(workspace), do: policy_violation_recovery_budget(workspace)
+
+    def policy_violation_recovery_action_for_test(
+          workspace,
+          issue,
+          command,
+          pattern,
+          recovery_count,
+          max_policy_recoveries,
+          worker_host \\ nil
+        ),
+        do:
+          policy_violation_recovery_action(
+            workspace,
+            issue,
+            command,
+            pattern,
+            recovery_count,
+            max_policy_recoveries,
+            worker_host
+          )
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -163,34 +183,65 @@ defmodule SymphonyElixir.AgentRunner do
       end
 
     case result do
-      {:error, {:forbidden_command, command, pattern}} when recovery_count < max_policy_recoveries ->
-        attempt = recovery_count + 1
-        scope_access = policy_violation_scope_access(workspace, command)
+      {:error, {:forbidden_command, command, pattern}} ->
+        case policy_violation_recovery_action(
+               workspace,
+               issue,
+               command,
+               pattern,
+               recovery_count,
+               max_policy_recoveries,
+               worker_host
+             ) do
+          {:retry, attempt, scope_access} ->
+            Logger.warning("Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{max_policy_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}")
 
-        Logger.warning("Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{max_policy_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}")
+            record_policy_violation_event(workspace, issue, command, pattern, attempt, scope_access, worker_host)
 
-        record_policy_violation_event(workspace, issue, command, pattern, attempt, scope_access, worker_host)
+            send_codex_update(codex_update_recipient, issue, %{
+              event: :policy_violation_recovery,
+              command: command,
+              pattern: pattern,
+              attempt: attempt,
+              max_attempts: max_policy_recoveries,
+              scope_access: scope_access,
+              timestamp: DateTime.utc_now()
+            })
 
-        send_codex_update(codex_update_recipient, issue, %{
-          event: :policy_violation_recovery,
-          command: command,
-          pattern: pattern,
-          attempt: attempt,
-          max_attempts: max_policy_recoveries,
-          scope_access: scope_access,
-          timestamp: DateTime.utc_now()
-        })
+            opts =
+              Keyword.put(opts, :policy_violation, %{
+                command: command,
+                pattern: pattern,
+                attempt: attempt,
+                max_attempts: max_policy_recoveries,
+                scope_access: scope_access
+              })
 
-        opts =
-          Keyword.put(opts, :policy_violation, %{
-            command: command,
-            pattern: pattern,
-            attempt: attempt,
-            max_attempts: max_policy_recoveries,
-            scope_access: scope_access
-          })
+            run_codex_turns_with_policy_recovery(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host,
+              attempt
+            )
 
-        run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, attempt)
+          {:parked, scope_access} ->
+            record_policy_violation_event(
+              workspace,
+              issue,
+              command,
+              pattern,
+              recovery_count + 1,
+              scope_access,
+              worker_host
+            )
+
+            :ok
+
+          :stop ->
+            result
+        end
 
       other ->
         other
@@ -219,24 +270,62 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp strict_review_rework_implementation_child?(_workspace), do: false
 
-  defp policy_violation_scope_access(workspace, command) when is_binary(workspace) and is_binary(command) do
-    case ScopeAccess.classify_command(command, policy_violation_scope_bundle(workspace)) do
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
+       when recovery_count >= max_policy_recoveries,
+       do: :stop
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, worker_host)
+       when is_binary(worker_host),
+       do: {:retry, recovery_count + 1, nil}
+
+  defp policy_violation_recovery_action(workspace, issue, command, pattern, recovery_count, _max_policy_recoveries, nil)
+       when is_binary(workspace) and is_binary(command) do
+    attempt = recovery_count + 1
+    policy = policy_violation_policy(workspace)
+
+    case ScopeAccess.classify_command(command, policy) do
       %{} = request ->
-        Map.merge(request, ScopeAccess.decision_for(request) || %{})
+        case ScopeAccess.Controller.decide(request, policy, workspace) do
+          {:allow_once, patch} ->
+            case ScopeAccess.Controller.write_policy_patch(workspace, patch) do
+              {:ok, written_patch} ->
+                {:retry, attempt, scope_access_with_decision(request, written_patch)}
+
+              {:error, reason} ->
+                Logger.warning("Failed to write scope access policy patch for #{issue_context(issue)} reason=#{inspect(reason)}")
+                {:retry, attempt, scope_access_with_decision(request, ScopeAccess.decision_for(request) || %{})}
+            end
+
+          {decision, correction_attrs} when decision in [:block, :escalate] ->
+            correction_attrs = put_scope_access_retry_fingerprint(correction_attrs, issue, request, policy)
+            scope_access = scope_access_with_decision(request, correction_attrs)
+
+            case Workspace.create_correction_in_workspace(workspace, issue, correction_attrs) do
+              {:ok, _correction} ->
+                Logger.warning("Parking #{issue_context(issue)} after denied #{request["operation"] || "unknown"} scope access command=#{inspect(command)} pattern=#{inspect(pattern)}")
+                {:parked, scope_access}
+
+              {:error, reason} ->
+                Logger.warning("Failed to create scope access correction for #{issue_context(issue)} reason=#{inspect(reason)}")
+                {:retry, attempt, scope_access}
+            end
+        end
 
       _ ->
-        nil
+        {:retry, attempt, nil}
     end
   rescue
-    _error -> nil
+    error ->
+      Logger.warning("Failed to decide scope access recovery for #{issue_context(issue)} error=#{Exception.message(error)}")
+      {:retry, recovery_count + 1, nil}
   end
 
-  defp policy_violation_scope_access(_workspace, _command), do: nil
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, _worker_host) do
+    {:retry, recovery_count + 1, nil}
+  end
 
-  defp policy_violation_scope_bundle(workspace) when is_binary(workspace) do
+  defp policy_violation_policy(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"requirements" => %{"scope_bundle" => bundle}}} when is_map(bundle) -> bundle
-      {:ok, %{"requirements" => requirements}} when is_map(requirements) -> requirements
       {:ok, preflight} when is_map(preflight) -> preflight
       _ -> %{}
     end
@@ -244,7 +333,83 @@ defmodule SymphonyElixir.AgentRunner do
     _error -> %{}
   end
 
-  defp policy_violation_scope_bundle(_workspace), do: %{}
+  defp policy_violation_policy(_workspace), do: %{}
+
+  defp put_scope_access_retry_fingerprint(correction_attrs, %Issue{} = issue, %{} = request, %{} = policy)
+       when is_map(correction_attrs) do
+    fingerprint =
+      %{
+        "issue" => issue.identifier,
+        "issue_id" => issue.id,
+        "source" => correction_source(correction_attrs),
+        "head_sha" => policy_head_sha(policy),
+        "policy_hash" => policy_hash(policy),
+        "operation" => request["operation"],
+        "paths" => request["paths"],
+        "command_fingerprint" => request["command_fingerprint"]
+      }
+      |> Enum.reject(fn {_key, value} -> value in [nil, "", []] end)
+      |> Map.new()
+
+    if fingerprint == %{} do
+      correction_attrs
+    else
+      guard =
+        correction_attrs
+        |> Map.get(:guard, %{})
+        |> stringify_scope_access_decision()
+        |> Map.put("retry_fingerprint", fingerprint)
+
+      Map.put(correction_attrs, :guard, guard)
+    end
+  end
+
+  defp put_scope_access_retry_fingerprint(correction_attrs, _issue, _request, _policy), do: correction_attrs
+
+  defp correction_source(%{source: source}) when is_binary(source), do: source
+  defp correction_source(%{"source" => source}) when is_binary(source), do: source
+  defp correction_source(_correction_attrs), do: "symphony.runtime.scope-access"
+
+  defp policy_head_sha(policy) when is_map(policy) do
+    Map.get(policy, "head_sha") ||
+      get_in(policy, ["review", "head_sha"]) ||
+      get_in(policy, ["review", "head"])
+  end
+
+  defp policy_head_sha(_policy), do: nil
+
+  defp policy_hash(policy) when is_map(policy) do
+    Map.get(policy, "policy_hash") ||
+      get_in(policy, ["requirements", "scope_bundle", "policy_hash"]) ||
+      get_in(policy, ["scope_bundle", "policy_hash"])
+  end
+
+  defp policy_hash(_policy), do: nil
+
+  defp scope_access_with_decision(%{} = request, %{} = decision) do
+    decision_payload =
+      decision
+      |> stringify_scope_access_decision()
+      |> Map.take([
+        "decision",
+        "decision_class",
+        "reason_class",
+        "status",
+        "requires_policy_patch",
+        "patch_id",
+        "path",
+        "target"
+      ])
+
+    Map.merge(request, decision_payload)
+  end
+
+  defp stringify_scope_access_decision(decision) when is_map(decision) do
+    Map.new(decision, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {key, value}
+    end)
+  end
 
   defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, scope_access, nil)
        when is_binary(workspace) do

@@ -3,7 +3,16 @@ defmodule SymphonyElixir.DispatchPreflight do
   Writes a small machine-owned dispatch checkpoint before Codex starts.
   """
 
-  alias SymphonyElixir.{Config, IssueRequirements, PromptBuilder, ReviewMonitor, Workspace}
+  alias SymphonyElixir.{
+    Config,
+    IssueRequirements,
+    KnowledgeLedger,
+    PromptBuilder,
+    ReviewMonitor,
+    ScopeAccess,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @preflight_path ".orocsy/delivery/state/dispatch-preflight.json"
@@ -24,6 +33,8 @@ defmodule SymphonyElixir.DispatchPreflight do
           "integration_check" -> integration_check_preflight(workspace, issue, requirements, inspection)
           _ -> fresh_implementation_preflight(workspace, issue, requirements, inspection)
         end
+        |> merge_policy_patches(workspace)
+        |> merge_knowledge_ledger(workspace)
 
       :ok = write_preflight(workspace, preflight)
       :ok = append_preflight_event(workspace, preflight)
@@ -45,8 +56,13 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       true ->
         case File.read(path) do
-          {:ok, body} -> Jason.decode(body)
-          {:error, reason} -> {:error, reason}
+          {:ok, body} ->
+            with {:ok, preflight} <- Jason.decode(body) do
+              {:ok, preflight |> merge_policy_patches(workspace) |> merge_knowledge_ledger(workspace)}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   rescue
@@ -1320,6 +1336,158 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp maybe_put(map, _key, value) when value in [nil, ""], do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp merge_policy_patches(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
+    patches = policy_patches(workspace)
+
+    case patches do
+      [] ->
+        preflight
+
+      patches ->
+        requirements =
+          preflight
+          |> Map.get("requirements", %{})
+          |> apply_policy_patches_to_requirements(patches)
+
+        policy_hash = policy_hash(requirements)
+
+        preflight
+        |> Map.put("requirements", requirements)
+        |> Map.put("policy_hash", policy_hash)
+        |> Map.put("policy_patches", Enum.map(patches, &policy_patch_summary/1))
+    end
+  end
+
+  defp merge_policy_patches(preflight, _workspace), do: preflight
+
+  defp merge_knowledge_ledger(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
+    knowledge = KnowledgeLedger.load(workspace, preflight)
+
+    if empty_knowledge_ledger?(knowledge) do
+      preflight
+    else
+      read_context = Map.get(knowledge, "read_context", [])
+
+      preflight =
+        case read_context do
+          [] ->
+            preflight
+
+          entries ->
+            requirements =
+              preflight
+              |> requirements_map()
+              |> put_scope_bundle_entries("read_context", entries)
+
+            preflight
+            |> Map.put("requirements", requirements)
+            |> Map.put("policy_hash", policy_hash(requirements))
+        end
+
+      Map.put(preflight, "knowledge_ledger", Map.delete(knowledge, "read_context"))
+    end
+  end
+
+  defp merge_knowledge_ledger(preflight, _workspace), do: preflight
+
+  defp empty_knowledge_ledger?(%{} = knowledge) do
+    Enum.all?(["fresh", "stale", "read_context"], fn key ->
+      case Map.get(knowledge, key) do
+        values when is_list(values) -> values == []
+        _ -> true
+      end
+    end)
+  end
+
+  defp empty_knowledge_ledger?(_knowledge), do: true
+
+  defp requirements_map(%{"requirements" => requirements}) when is_map(requirements), do: requirements
+  defp requirements_map(_preflight), do: %{}
+
+  defp policy_patches(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(Path.join(ScopeAccess.Controller.policy_patch_dir(), "*.json"))
+    |> Path.wildcard()
+    |> Enum.sort()
+    |> Enum.flat_map(&read_policy_patch/1)
+    |> Enum.filter(&active_policy_patch?/1)
+  end
+
+  defp read_policy_patch(path) do
+    case File.read(path) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, %{} = patch} ->
+            workspace = path |> Path.dirname() |> Path.dirname() |> Path.dirname() |> Path.dirname()
+            [Map.put_new(patch, "path", Path.relative_to(path, workspace))]
+
+          _ ->
+            []
+        end
+
+      _ ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp active_policy_patch?(%{"status" => status}) when status in ["active", "applied"], do: true
+  defp active_policy_patch?(%{"status" => status}) when is_binary(status), do: false
+  defp active_policy_patch?(_patch), do: true
+
+  defp apply_policy_patches_to_requirements(requirements, patches) when is_map(requirements) do
+    Enum.reduce(patches, ensure_scope_bundle(requirements), fn patch, acc ->
+      patch
+      |> policy_patch_entries()
+      |> Enum.reduce(acc, fn {target, entries}, requirements ->
+        put_scope_bundle_entries(requirements, target, entries)
+      end)
+    end)
+  end
+
+  defp policy_patch_entries(%{"entries" => entries} = patch) when is_list(entries) do
+    target = policy_patch_target(patch)
+
+    entries =
+      entries
+      |> Enum.filter(&is_map/1)
+      |> Enum.map(&normalize_policy_patch_entry(&1, patch))
+
+    [{target, entries}]
+  end
+
+  defp policy_patch_entries(_patch), do: []
+
+  defp normalize_policy_patch_entry(entry, patch) do
+    entry
+    |> Map.put_new("source", patch["source"] || "symphony.runtime.scope-access-controller")
+    |> Map.put_new("operation", policy_patch_entry_operation(patch))
+    |> Map.put_new("expires", "turn")
+    |> maybe_put("policy_patch_id", patch["patch_id"])
+  end
+
+  defp policy_patch_target(%{"target" => target}) when target in ["write_scope", "read_context", "conflict_scope", "denied_scope"], do: target
+  defp policy_patch_target(_patch), do: "read_context"
+
+  defp policy_patch_entry_operation(%{"target" => "write_scope"}), do: "write"
+  defp policy_patch_entry_operation(%{"target" => "conflict_scope"}), do: "write-if-conflicted"
+  defp policy_patch_entry_operation(%{"target" => "denied_scope"}), do: "deny"
+  defp policy_patch_entry_operation(_patch), do: "read"
+
+  defp policy_patch_summary(patch) do
+    %{
+      "patch_id" => patch["patch_id"],
+      "source" => patch["source"],
+      "target" => policy_patch_target(patch),
+      "decision" => patch["decision"],
+      "reason_class" => patch["reason_class"],
+      "path" => patch["path"]
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
 
   defp compact_requirements(requirements) when is_map(requirements) do
     Map.take(requirements, [

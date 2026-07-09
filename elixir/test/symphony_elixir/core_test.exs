@@ -202,6 +202,189 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch gate treats empty retry fingerprint as legacy retry correction" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-empty-fingerprint-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-empty-fingerprint-retry",
+        identifier: "COD-EMPTY-FINGERPRINT",
+        title: "Empty fingerprint retry correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260709000000_empty_fingerprint.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260709000000_empty_fingerprint",
+          "status" => "open",
+          "source" => "symphony.runtime.scope-access",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Fix package.json test script.",
+          "required_corrections" => ["Update package.json and rerun validation."],
+          "guard" => %{"retry_fingerprint" => %{}}
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "open stale scope correction prevents redispatch when head and policy hash are unchanged" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope",
+        identifier: "COD-STALE-SCOPE",
+        title: "Stale scope correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "open retry correction with changed policy hash allows one retry" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-policy-change-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-policy",
+        identifier: "COD-STALE-POLICY",
+        title: "Stale scope correction policy changed",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-b")
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "stored retry fingerprint parks when current preflight cannot be read" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-missing-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-missing-preflight",
+        identifier: "COD-STALE-MISSING-PREFLIGHT",
+        title: "Stale scope missing preflight",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "same blocked access fingerprint is parked without starting a worker" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-worker-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-worker",
+        identifier: "COD-STALE-WORKER",
+        title: "Stale scope worker park",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      assert state.running == %{}
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "dispatch gate parks Rework while a fresh Codex review request is pending" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -13863,6 +14046,505 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "safe direct import read writes read-context policy patch and retries once" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-auto-unblock-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-SCOPE-ACCESS")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        codex_forbidden_command_patterns: ["(^|\\s|[\"'])rg(\\s|$)"],
+        max_turns: 1
+      )
+
+      File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+      File.mkdir_p!(Path.join(workspace, "src/features/landing"))
+      File.mkdir_p!(Path.join(workspace, "tests/unit"))
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(events_dir)
+
+      File.write!(Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"), """
+      import { GuestPreferenceDraft } from "../landing/GuestStartScreen";
+
+      export function useSwipeDraft(draft: GuestPreferenceDraft) {
+        return draft;
+      }
+      """)
+
+      File.write!(
+        Path.join(workspace, "src/features/landing/GuestStartScreen.tsx"),
+        "export type GuestPreferenceDraft = { adults: number };\n"
+      )
+
+      File.write!(Path.join(workspace, "tests/unit/swipe-experience.test.ts"), "test(\"draft\", () => {});\n")
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-ACCESS",
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-ACCESS",
+          "branch" => "orocsy/mt-scope-access",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "validation" => %{
+              "commands" => ["pnpm exec vitest run tests/unit/swipe-experience.test.ts"],
+              "files" => []
+            },
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      issue = %Issue{
+        id: "issue-scope-access",
+        identifier: "MT-SCOPE-ACCESS",
+        title: "Scope access auto unblock",
+        description: """
+        ## Ticket Type
+
+        Implementation
+
+        ## Write Scope
+
+        - `src/features/swipe/SwipeExperience.tsx`
+
+        ## Validation
+
+        ```bash
+        pnpm exec vitest run tests/unit/swipe-experience.test.ts
+        ```
+        """,
+        state: "Rework",
+        branch_name: "orocsy/mt-scope-access",
+        url: "https://example.org/issues/MT-SCOPE-ACCESS",
+        labels: []
+      }
+
+      command = ~s(rg -n "GuestPreferenceDraft" src/features/landing/GuestStartScreen.tsx)
+      pattern = "(^|\\s|[\"'])rg(\\s|$)"
+
+      assert {:error, ^command, ^pattern} =
+               AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:retry, 1, scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 command,
+                 pattern,
+                 0,
+                 1
+               )
+
+      assert scope_access["decision"] == "allow_once"
+      assert scope_access["reason_class"] == "safe_read_context"
+
+      patch_files = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
+      assert length(patch_files) == 1
+
+      patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert patch["decision"] == "allow_once"
+      assert get_in(patch, ["entries", Access.at(0), "path"]) == "src/features/landing/GuestStartScreen.tsx"
+      assert get_in(patch, ["entries", Access.at(0), "source"]) == "scope_access.auto.direct_import"
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      assert Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
+                 entry["source"] == "scope_access.auto.direct_import"
+             end)
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 ~s(rg -n "GuestPreferenceDraft" src/features/landing/GuestStartScreen.tsx)
+               )
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "safe nearest caller read is allowed read-only and never promoted to write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-nearest-caller-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-SCOPE-CALLER")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        codex_forbidden_command_patterns: ["(^|\\s|[\"'])sed\\s+-n(\\s|$)"],
+        max_turns: 1
+      )
+
+      File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+      File.mkdir_p!(Path.join(workspace, "src/features/landing"))
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"),
+        "export function SwipeExperience() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, "src/features/landing/GuestStartScreen.tsx"), """
+      import { SwipeExperience } from "../swipe/SwipeExperience";
+
+      export function GuestStartScreen() {
+        return <SwipeExperience />;
+      }
+      """)
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-CALLER",
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-CALLER",
+          "branch" => "orocsy/mt-scope-caller",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      issue = %Issue{
+        id: "issue-scope-caller",
+        identifier: "MT-SCOPE-CALLER",
+        title: "Scope caller read",
+        description: "Allow the nearest caller as read-only context",
+        state: "Rework",
+        branch_name: "orocsy/mt-scope-caller",
+        labels: []
+      }
+
+      command = "sed -n 1,80p src/features/landing/GuestStartScreen.tsx"
+
+      assert {:error, ^command, pattern} =
+               AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:retry, 1, scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 command,
+                 pattern,
+                 0,
+                 1
+               )
+
+      assert scope_access["decision"] == "allow_once"
+      assert scope_access["reason_class"] == "safe_read_context"
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+      write_scope = get_in(preflight, ["requirements", "scope_bundle", "write_scope"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
+                 entry["source"] == "scope_access.auto.nearest_caller" and
+                 entry["operation"] == "read"
+             end)
+
+      refute Enum.any?(write_scope, fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx"
+             end)
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, command)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "unsafe write expansion creates correction and does not retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-write-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      set -eu
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$line" in
+          *'"method":"initialize"'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"method":"thread/start"'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-write"}}}'
+            ;;
+          *'"method":"turn/start"'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-write"}}}'
+            printf '%s\\n' '{"method":"codex/event/response_item","params":{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"apply_patch *** Update File: src/features/landing/GuestStartScreen.tsx\\"}"}}}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_forbidden_command_patterns: ["apply_patch"],
+        max_turns: 3
+      )
+
+      issue = %Issue{
+        id: "issue-scope-write",
+        identifier: "MT-SCOPE-WRITE",
+        title: "Scope write block",
+        description: """
+        ## Ticket Type
+
+        Implementation
+
+        ## Write Scope
+
+        - `src/features/swipe/SwipeExperience.tsx`
+
+        ## Validation
+
+        ```bash
+        pnpm test
+        ```
+        """,
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SCOPE-WRITE",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil)
+
+      trace = File.read!(trace_file)
+      assert length(Regex.scan(~r/^RUN$/m, trace)) == 1
+
+      workspace = Path.join(workspace_root, "MT-SCOPE-WRITE")
+      corrections = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert [correction] = corrections
+      assert correction["source"] == "symphony.runtime.scope-access"
+      assert correction["guard"]["reason_class"] == "write_scope_expansion_requires_operator"
+      assert correction["guard"]["retry_fingerprint"]["source"] == "symphony.runtime.scope-access"
+      assert correction["guard"]["retry_fingerprint"]["operation"] == "write"
+      assert correction["guard"]["retry_fingerprint"]["paths"] == ["src/features/landing/GuestStartScreen.tsx"]
+      assert correction["guard"]["retry_fingerprint"]["policy_hash"] =~ "sha256:"
+      assert Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json")) == []
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "knowledge ledger loads unchanged read context by git blob" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-knowledge-unchanged-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-KNOWLEDGE")
+      path = "src/features/landing/GuestStartScreen.tsx"
+
+      File.mkdir_p!(Path.dirname(Path.join(workspace, path)))
+      File.write!(Path.join(workspace, path), "export type GuestPreferenceDraft = { adults: number };\n")
+      write_knowledge_preflight!(workspace, "MT-KNOWLEDGE")
+
+      assert {:ok, entry} =
+               SymphonyElixir.KnowledgeLedger.append(workspace, %{
+                 issue: "MT-KNOWLEDGE",
+                 path: path,
+                 summary: "Defines GuestPreferenceDraft for the guest setup handoff.",
+                 relevant_symbols: ["GuestPreferenceDraft"]
+               })
+
+      assert entry["git_blob"] != ""
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == path and
+                 entry["source"] == "knowledge_ledger.issue" and
+                 entry["operation"] == "read" and
+                 entry["expires"] == "file_changes" and
+                 entry["summary"] =~ "GuestPreferenceDraft"
+             end)
+
+      assert [%{"path" => ^path, "status" => "fresh"}] = get_in(preflight, ["knowledge_ledger", "fresh"])
+      assert get_in(preflight, ["knowledge_ledger", "stale"]) == []
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "knowledge ledger marks changed blob stale and permits bounded refresh" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-knowledge-stale-refresh-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-KNOWLEDGE-STALE")
+      path = "src/features/landing/GuestStartScreen.tsx"
+
+      File.mkdir_p!(Path.dirname(Path.join(workspace, path)))
+      File.write!(Path.join(workspace, path), "export const guestDraftVersion = 1;\n")
+      write_knowledge_preflight!(workspace, "MT-KNOWLEDGE-STALE")
+
+      assert {:ok, stored} =
+               SymphonyElixir.KnowledgeLedger.append(workspace, %{
+                 issue: "MT-KNOWLEDGE-STALE",
+                 path: path,
+                 summary: "Defines the first guest draft handoff version.",
+                 relevant_symbols: ["guestDraftVersion"]
+               })
+
+      File.write!(Path.join(workspace, path), "export const guestDraftVersion = 2;\n")
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      assert [
+               %{
+                 "path" => ^path,
+                 "status" => "stale",
+                 "git_blob" => stored_blob,
+                 "current_git_blob" => current_blob,
+                 "refresh_allowed" => true
+               }
+             ] = get_in(preflight, ["knowledge_ledger", "stale"])
+
+      assert stored_blob == stored["git_blob"]
+      refute current_blob == stored["git_blob"]
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == path and
+                 entry["source"] == "knowledge_ledger.stale_refresh" and
+                 entry["operation"] == "read" and
+                 entry["expires"] == "turn" and
+                 entry["stale_git_blob"] == stored["git_blob"]
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "parent workstream knowledge is read context only and cannot broaden write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-knowledge-parent-read-only-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      producer_workspace = Path.join(test_root, "MT-KNOWLEDGE-PRODUCER")
+      workspace = Path.join(test_root, "MT-KNOWLEDGE-CHILD")
+      parent = "MT-KNOWLEDGE-PARENT"
+      path = "src/features/landing/GuestStartScreen.tsx"
+      write_path = "src/features/swipe/SwipeExperience.tsx"
+
+      File.mkdir_p!(Path.dirname(Path.join(producer_workspace, path)))
+      File.mkdir_p!(Path.dirname(Path.join(workspace, path)))
+      File.mkdir_p!(Path.dirname(Path.join(workspace, write_path)))
+      File.write!(Path.join(producer_workspace, path), "export function GuestStartScreen() { return null; }\n")
+      File.write!(Path.join(workspace, path), "export function GuestStartScreen() { return null; }\n")
+      File.write!(Path.join(workspace, write_path), "export function SwipeExperience() { return null; }\n")
+      write_knowledge_preflight!(workspace, "MT-KNOWLEDGE-CHILD", parent, [write_path])
+
+      assert {:ok, _entry} =
+               SymphonyElixir.KnowledgeLedger.append(producer_workspace, %{
+                 scope: "parent",
+                 parent: parent,
+                 path: path,
+                 operation: "write",
+                 summary: "GuestStartScreen owns the parent handoff entry point.",
+                 relevant_symbols: ["GuestStartScreen"]
+               })
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+      write_scope = get_in(preflight, ["requirements", "scope_bundle", "write_scope"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == path and
+                 entry["source"] == "knowledge_ledger.parent" and
+                 entry["operation"] == "read"
+             end)
+
+      refute Enum.any?(write_scope, fn entry -> entry["path"] == path end)
+      assert Enum.any?(write_scope, fn entry -> entry["path"] == write_path and entry["operation"] == "write" end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "prompt builder suppresses pushed handoff checkpoint in review rework preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
@@ -19953,6 +20635,136 @@ defmodule SymphonyElixir.CoreTest do
       "created_at" => created_at,
       "html_url" => "https://github.com/acme/nutribuddy/pull/7#issuecomment-clean"
     }
+  end
+
+  defp write_scope_retry_preflight!(workspace, issue_identifier, head_sha, policy_hash) do
+    state_dir = Path.join(workspace, ".orocsy/delivery/state")
+    File.mkdir_p!(state_dir)
+
+    File.write!(
+      Path.join(state_dir, "dispatch-preflight.json"),
+      Jason.encode!(%{
+        "mode" => "review_rework",
+        "issue" => issue_identifier,
+        "branch" => "orocsy/#{String.downcase(issue_identifier)}",
+        "policy_hash" => policy_hash,
+        "review" => %{
+          "head_sha" => head_sha,
+          "head_ref" => "orocsy/#{String.downcase(issue_identifier)}"
+        },
+        "requirements" => %{
+          "ticket_type" => "Implementation",
+          "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+          "scope_bundle" => %{
+            "policy_hash" => policy_hash,
+            "write_scope" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "source" => "test.write_scope",
+                "operation" => "write",
+                "expires" => "branch"
+              }
+            ],
+            "read_context" => [],
+            "conflict_scope" => [],
+            "denied_scope" => []
+          }
+        }
+      })
+    )
+  end
+
+  defp write_scope_retry_correction!(workspace, issue, head_sha, policy_hash) do
+    inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+    File.mkdir_p!(inbox)
+
+    File.write!(
+      Path.join(inbox, "correction_20260709000000_stale_scope.json"),
+      Jason.encode!(%{
+        "correction_id" => "correction_20260709000000_stale_scope",
+        "status" => "open",
+        "source" => "symphony.runtime.scope-access",
+        "source_status" => "retryable",
+        "summary" => "Scope policy stale for src/features/landing/GuestStartScreen.tsx",
+        "findings" => [
+          "Worker requested read src/features/landing/GuestStartScreen.tsx under unchanged policy #{policy_hash}."
+        ],
+        "required_corrections" => [
+          "Update src/features/swipe/SwipeExperience.tsx or add read context, then rerun focused validation."
+        ],
+        "next_action" => "retry",
+        "guard" => %{
+          "scope_access" => %{
+            "operation" => "read",
+            "paths" => ["src/features/landing/GuestStartScreen.tsx"],
+            "command_fingerprint" => "scope-read-guest-start"
+          },
+          "retry_fingerprint" => %{
+            "issue" => issue.identifier,
+            "issue_id" => issue.id,
+            "source" => "symphony.runtime.scope-access",
+            "head_sha" => head_sha,
+            "policy_hash" => policy_hash,
+            "operation" => "read",
+            "paths" => ["src/features/landing/GuestStartScreen.tsx"],
+            "command_fingerprint" => "scope-read-guest-start"
+          }
+        },
+        "issue" => issue.identifier,
+        "issue_id" => issue.id,
+        "created_at" => "2026-07-09T00:00:00Z",
+        "resolved_at" => nil,
+        "resolution_summary" => ""
+      })
+    )
+  end
+
+  defp write_knowledge_preflight!(workspace, issue_identifier, parent_identifier \\ nil, write_paths \\ []) do
+    state_dir = Path.join(workspace, ".orocsy/delivery/state")
+    File.mkdir_p!(state_dir)
+
+    write_scope =
+      Enum.map(write_paths, fn path ->
+        %{
+          "path" => path,
+          "source" => "test.write_scope",
+          "operation" => "write",
+          "expires" => "branch"
+        }
+      end)
+
+    scope_bundle =
+      SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+        "issue" => issue_identifier,
+        "write_scope" => write_scope,
+        "read_context" => [],
+        "conflict_scope" => [],
+        "denied_scope" => []
+      })
+
+    requirements =
+      %{
+        "identifier" => issue_identifier,
+        "ticket_type" => "Implementation",
+        "write_scope" => write_paths,
+        "scope_bundle" => scope_bundle
+      }
+      |> then(fn requirements ->
+        if is_binary(parent_identifier) and parent_identifier != "" do
+          Map.put(requirements, "feature_group", parent_identifier)
+        else
+          requirements
+        end
+      end)
+
+    File.write!(
+      Path.join(state_dir, "dispatch-preflight.json"),
+      Jason.encode!(%{
+        "mode" => "review_rework",
+        "issue" => issue_identifier,
+        "requirements" => requirements
+      })
+    )
   end
 
   defp empty_orchestrator_state do
