@@ -14,7 +14,15 @@ defmodule SymphonyElixir.CoreTest do
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
     assert config.tracker.active_states == ["Todo", "In Progress"]
-    assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+
+    assert config.tracker.terminal_states == [
+             "Closed",
+             "Cancelled",
+             "Canceled",
+             "Duplicate",
+             "Done"
+           ]
+
     assert config.tracker.assignee == nil
     assert config.tracker.issue_allowlist == []
     assert config.agent.max_turns == 20
@@ -65,7 +73,10 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
     assert :ok = Config.validate!()
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "definitely-not-valid")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_approval_policy: "definitely-not-valid"
+    )
+
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "unsafe-ish")
@@ -144,6 +155,341 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Orchestrator.should_dispatch_issue_for_test(blocked, state)
     assert Orchestrator.should_dispatch_issue_for_test(unblocked, state)
+  end
+
+  test "dispatch gate allows retry corrections that target root config files" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-root-config-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-root-config-retry",
+        identifier: "COD-ROOTCONFIG",
+        title: "Root config retry correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, "COD-ROOTCONFIG")
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260706000000_root_config.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260706000000_root_config",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Fix package.json test script.",
+          "required_corrections" => ["Update package.json and rerun validation."]
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "dispatch gate treats empty retry fingerprint as legacy retry correction" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-empty-fingerprint-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-empty-fingerprint-retry",
+        identifier: "COD-EMPTY-FINGERPRINT",
+        title: "Empty fingerprint retry correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260709000000_empty_fingerprint.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260709000000_empty_fingerprint",
+          "status" => "open",
+          "source" => "symphony.runtime.scope-access",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Fix package.json test script.",
+          "required_corrections" => ["Update package.json and rerun validation."],
+          "guard" => %{"retry_fingerprint" => %{}}
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "open stale scope correction prevents redispatch when head and policy hash are unchanged" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope",
+        identifier: "COD-STALE-SCOPE",
+        title: "Stale scope correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "open retry correction with changed policy hash allows one retry" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-policy-change-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-policy",
+        identifier: "COD-STALE-POLICY",
+        title: "Stale scope correction policy changed",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-b")
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "stored retry fingerprint compares against live git head when preflight is stale" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-live-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-live-head",
+        identifier: "COD-STALE-LIVE-HEAD",
+        title: "Stale scope correction live head changed",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      write_scope_retry_preflight!(workspace, issue.identifier, "stale-preflight-head", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "stale-preflight-head", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "stored retry fingerprint ignores consumed turn policy patches" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-turn-patch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-turn-patch",
+        identifier: "COD-STALE-TURN-PATCH",
+        title: "Stale scope correction with consumed turn patch",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+
+      base_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => issue.identifier,
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      turn_patch_bundle =
+        base_bundle
+        |> Map.update!("read_context", fn entries ->
+          entries ++
+            [
+              %{
+                "path" => "src/features/landing/GuestStartScreen.tsx",
+                "source" => "scope_access.auto.direct_import",
+                "operation" => "read",
+                "expires" => "turn",
+                "policy_patch_id" => "scope_access_read_guest_start"
+              }
+            ]
+        end)
+        |> SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash()
+
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", turn_patch_bundle["policy_hash"], turn_patch_bundle)
+      write_scope_retry_correction!(workspace, issue, "head-1", base_bundle["policy_hash"])
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "stored retry fingerprint parks when current preflight cannot be read" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-missing-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-missing-preflight",
+        identifier: "COD-STALE-MISSING-PREFLIGHT",
+        title: "Stale scope missing preflight",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "same blocked access fingerprint is parked without starting a worker" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-worker-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-worker",
+        identifier: "COD-STALE-WORKER",
+        title: "Stale scope worker park",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "head-1", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      assert state.running == %{}
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "dispatch gate parks Rework while a fresh Codex review request is pending" do
@@ -371,7 +717,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 54,
                "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-auth-migration-integration"}
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/feature-auth-migration-integration"
+               }
              }
            ]}
 
@@ -453,7 +802,10 @@ defmodule SymphonyElixir.CoreTest do
              SymphonyElixir.ReviewMonitor.inspect_issue(issue, %{repo: "acme/nutribuddy"})
 
     assert Enum.any?(feedback, fn
-             %{type: :review, payload: %{"path" => "src/lib/server/recipe-chats.ts", "line" => 524}} ->
+             %{
+               type: :review,
+               payload: %{"path" => "src/lib/server/recipe-chats.ts", "line" => 524}
+             } ->
                true
 
              _ ->
@@ -480,10 +832,15 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
+
+    assert Map.get(hooks, "after_create") =~
+             "git clone --depth 1 https://github.com/openai/symphony ."
+
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+
+    assert Map.get(hooks, "before_remove") =~
+             "cd elixir && mise exec -- mix workspace.before_remove"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -549,7 +906,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load accepts prompt-only files without front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_WORKFLOW.md")
+    workflow_path =
+      Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_WORKFLOW.md")
+
     File.write!(workflow_path, "Prompt only\n")
 
     assert {:ok, %{config: %{}, prompt: "Prompt only", prompt_template: "Prompt only"}} =
@@ -557,7 +916,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load accepts unterminated front matter with an empty prompt" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_WORKFLOW.md")
+    workflow_path =
+      Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_WORKFLOW.md")
+
     File.write!(workflow_path, "---\ntracker:\n  kind: linear\n")
 
     assert {:ok, %{config: %{"tracker" => %{"kind" => "linear"}}, prompt: "", prompt_template: ""}} =
@@ -565,7 +926,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load rejects non-map front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_WORKFLOW.md")
+    workflow_path =
+      Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_WORKFLOW.md")
+
     File.write!(workflow_path, "---\n- not-a-map\n---\nPrompt body\n")
 
     assert {:error, :workflow_front_matter_not_a_map} = Workflow.load(workflow_path)
@@ -586,7 +949,8 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+      assert :ok =
+               Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
     end
 
     assert {:ok, pid} = SymphonyElixir.start_link()
@@ -955,15 +1319,33 @@ defmodule SymphonyElixir.CoreTest do
 
       File.mkdir_p!(workspace)
       assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "README.md"), "ready\n")
       assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Initial"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
       assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", branch],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
@@ -976,7 +1358,11 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
-        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+        Jason.encode!(%{
+          "event" => "gate.post-miu",
+          "status" => "passed",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
       )
 
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
@@ -1038,15 +1424,33 @@ defmodule SymphonyElixir.CoreTest do
 
       File.mkdir_p!(workspace)
       assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "README.md"), "ready\n")
       assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Initial"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
       assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", branch],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
@@ -1059,7 +1463,11 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
-        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+        Jason.encode!(%{
+          "event" => "gate.post-miu",
+          "status" => "passed",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
       )
 
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
@@ -1121,15 +1529,33 @@ defmodule SymphonyElixir.CoreTest do
 
       File.mkdir_p!(workspace)
       assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "README.md"), "ready\n")
       assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Initial"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
       assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", branch],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
@@ -1142,7 +1568,11 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
-        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+        Jason.encode!(%{
+          "event" => "gate.post-miu",
+          "status" => "passed",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
       )
 
       assert AgentRunner.pushed_handoff_stop_for_test(workspace)
@@ -1178,7 +1608,11 @@ defmodule SymphonyElixir.CoreTest do
         |> Map.put(:retry_attempts, %{})
       end)
 
-      send(pid, {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed after handoff"}, []}})
+      send(
+        pid,
+        {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed after handoff"}, []}}
+      )
+
       Process.sleep(50)
       state = :sys.get_state(pid)
 
@@ -1200,7 +1634,12 @@ defmodule SymphonyElixir.CoreTest do
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
-      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root
+      )
+
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-568")
@@ -1348,7 +1787,9 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(state.claimed, issue_id)
       refute Map.has_key?(state.retry_attempts, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.permission"
@@ -1461,10 +1902,120 @@ defmodule SymphonyElixir.CoreTest do
       assert Workspace.blocking_correction_in_workspace?(workspace)
 
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
 
       assert_receive {:memory_tracker_comment, ^issue_id, body}
       assert body =~ "provider-usage-limit"
       assert body =~ "usageLimitExceeded"
+      refute_receive {:memory_tracker_state_update, ^issue_id, _state}, 50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "forbidden command failures park even when a retryable product correction is open" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-forbidden-command-park-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress", "Rework"],
+        workspace_root: workspace_root
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-forbidden-command-park"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-FORBIDDEN-COMMAND",
+        state: "Rework",
+        title: "Forbidden command worker",
+        description: "Worker should park command guard failures before redispatch.",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, product_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "controller-pr103-codex-review",
+                 source_status: "failed",
+                 summary: "Fix src/features/swipe/SwipeExperience.tsx before validation retry.",
+                 findings: [
+                   "src/features/swipe/SwipeExperience.tsx still needs a bounded code/test fix."
+                 ],
+                 required_corrections: [
+                   "Edit src/features/swipe/SwipeExperience.tsx and rerun tests/unit/swipe-experience-request.test.ts."
+                 ],
+                 next_action: "retry"
+               })
+
+      ref = make_ref()
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now(),
+        workspace_path: workspace
+      }
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{issue_id => running_entry},
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      reason =
+        {:forbidden_command, "/bin/zsh -lc 'git diff --stat origin/main -- src/features/swipe/SwipeExperience.tsx src/app/api/cards/handler.ts'",
+         "(^|\\s|[\"'])git\\s+diff(\\s|$)(?![^\"'\\n]*--exit-code origin/main HEAD -- src/app/api/cards/handler\\.ts)"}
+
+      {:noreply, state} =
+        Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      corrections =
+        workspace
+        |> Path.join(".orocsy/delivery/inbox/correction_*.json")
+        |> Path.wildcard()
+        |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+
+      assert Enum.any?(
+               corrections,
+               &(&1["correction_id"] == product_correction["correction_id"] and
+                   &1["next_action"] == "retry")
+             )
+
+      permission_correction =
+        Enum.find(corrections, &(&1["source"] == "symphony.runtime.permission"))
+
+      assert permission_correction
+      assert permission_correction["next_action"] == "block"
+      assert permission_correction["summary"] =~ "command denied"
+      assert Enum.join(permission_correction["findings"], "\n") =~ "forbidden_command"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      assert_receive {:memory_tracker_comment, ^issue_id, body}
+      assert body =~ "permission"
+      assert body =~ "forbidden_command"
     after
       File.rm_rf(test_root)
     end
@@ -1541,7 +2092,9 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(state.claimed, issue_id)
       refute Map.has_key?(state.retry_attempts, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.environment"
@@ -1630,13 +2183,71 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(state.claimed, issue_id)
       refute Map.has_key?(state.retry_attempts, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.token-budget"
       assert correction["source_status"] == "blocked"
       assert correction["next_action"] == "block"
       assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      [correction_event] =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["event"] == "correction.created"))
+
+      assert correction_event["status"] == "open"
+      assert correction_event["run_status"] == "blocked"
+      assert correction_event["phase"] == "correction"
+      assert correction_event["correction_id"] == correction["correction_id"]
+      assert correction_event["source"] == "symphony.runtime.token-budget"
+      assert correction_event["source_status"] == "blocked"
+      assert correction_event["next_action"] == "block"
+      assert correction["artifacts"]["json"] in correction_event["artifacts"]
+
+      current_state =
+        workspace
+        |> Path.join(".orocsy/delivery/state/current.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert current_state["status"] == "blocked"
+      assert current_state["phase"] == "correction"
+      assert current_state["last_event_id"] == correction_event["event_id"]
+
+      assert :ok = Workspace.resolve_blocking_corrections_in_workspace(workspace, "Runtime guard fixed and verified.")
+
+      events =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      [resolved_event] = Enum.filter(events, &(&1["event"] == "correction.resolved"))
+      assert resolved_event["status"] == "resolved"
+      assert resolved_event["run_status"] == "retry-ready"
+      assert resolved_event["correction_id"] == correction["correction_id"]
+      assert resolved_event["source"] == "symphony.runtime.token-budget"
+
+      resolved_state =
+        workspace
+        |> Path.join(".orocsy/delivery/state/current.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert resolved_state["status"] == "retry-ready"
+      assert resolved_state["phase"] == "correction"
+      assert resolved_state["last_event_id"] == resolved_event["event_id"]
+
+      resolved_correction = correction_path |> File.read!() |> Jason.decode!()
+      assert resolved_correction["status"] == "resolved"
+      assert resolved_correction["resolution_summary"] == "Runtime guard fixed and verified."
 
       assert_receive {:memory_tracker_comment, ^issue_id, body}
       assert body =~ "token-budget"
@@ -1680,7 +2291,10 @@ defmodule SymphonyElixir.CoreTest do
       baseline_ts = DateTime.add(started_at, -60, :second) |> DateTime.to_iso8601()
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
@@ -1693,10 +2307,21 @@ defmodule SymphonyElixir.CoreTest do
                )
 
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(Path.join(workspace, "review-fix.txt"), "local handoff work\n")
       assert {_output, 0} = System.cmd("git", ["add", "review-fix.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Fix review feedback"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       ref = make_ref()
       orchestrator_name = Module.concat(__MODULE__, :TokenBudgetHandoffRetryOrchestrator)
@@ -1736,7 +2361,10 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(state.running, issue_id)
       assert MapSet.member?(state.claimed, issue_id)
-      assert %{attempt: 1, workspace_path: ^workspace} = Map.fetch!(state.retry_attempts, issue_id)
+
+      assert %{attempt: 1, workspace_path: ^workspace} =
+               Map.fetch!(state.retry_attempts, issue_id)
+
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
@@ -1777,9 +2405,15 @@ defmodule SymphonyElixir.CoreTest do
       baseline_ts = DateTime.add(started_at, -60, :second) |> DateTime.to_iso8601()
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["config", "core.logAllRefUpdates", "true"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "core.logAllRefUpdates", "true"], cd: workspace)
+
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
 
@@ -1791,18 +2425,49 @@ defmodule SymphonyElixir.CoreTest do
                )
 
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace)
 
       File.write!(Path.join(workspace, "review-fix.txt"), "remote handoff work\n")
       assert {_output, 0} = System.cmd("git", ["add", "review-fix.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
-      {remote_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["reset", "--hard", "HEAD~1"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/worker", String.trim(remote_sha)], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/worker"], cd: workspace, stderr_to_stdout: true)
 
-      assert {counts, 0} = System.cmd("git", ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cd: workspace)
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Fix review feedback"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      {remote_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["reset", "--hard", "HEAD~1"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["update-ref", "refs/remotes/origin/worker", String.trim(remote_sha)],
+                 cd: workspace
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["branch", "--set-upstream-to", "origin/worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {counts, 0} =
+               System.cmd("git", ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cd: workspace)
+
       assert String.trim(counts) == "0\t1"
 
       ref = make_ref()
@@ -1843,7 +2508,10 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(state.running, issue_id)
       assert MapSet.member?(state.claimed, issue_id)
-      assert %{attempt: 1, workspace_path: ^workspace} = Map.fetch!(state.retry_attempts, issue_id)
+
+      assert %{attempt: 1, workspace_path: ^workspace} =
+               Map.fetch!(state.retry_attempts, issue_id)
+
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
@@ -1916,7 +2584,9 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(state.claimed, issue_id)
       refute Map.has_key?(state.retry_attempts, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] in [
@@ -1998,7 +2668,9 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       [evidence | _] = correction["findings"]
@@ -2055,7 +2727,10 @@ defmodule SymphonyElixir.CoreTest do
       baseline_ts = DateTime.utc_now() |> DateTime.add(-7200, :second) |> DateTime.to_iso8601()
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
@@ -2074,10 +2749,12 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(events_dir, "events.jsonl"),
-        Jason.encode!(%{"event" => "gate.declared-scope", "status" => "passed", "ts" => stale_ts}) <> "\n"
+        Jason.encode!(%{"event" => "gate.declared-scope", "status" => "passed", "ts" => stale_ts}) <>
+          "\n"
       )
 
-      assert {_output, 0} = System.cmd("git", ["add", ".orocsy/delivery/events/events.jsonl"], cd: workspace)
+      assert {_output, 0} =
+               System.cmd("git", ["add", ".orocsy/delivery/events/events.jsonl"], cd: workspace)
 
       assert {_output, 0} =
                System.cmd("git", ["commit", "-m", "Record stale durable event"],
@@ -2128,7 +2805,9 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.no-durable-progress"
@@ -2232,7 +2911,7 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_state_update, "issue-cod-152-rescue", "Rework"}
       assert_receive {:memory_tracker_comment, "issue-cod-152-rescue", body}
       assert body =~ "review_rework_needed"
-      assert body =~ "correction"
+      assert body =~ "Rework"
       assert body =~ "pull/4"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
@@ -2448,7 +3127,9 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_state_update, "issue-cod-181-token-budget-handoff", "Rework"}
+
       assert_receive {:memory_tracker_comment, "issue-cod-181-token-budget-handoff", body}
       assert body =~ "review_rework_needed"
       assert body =~ "pull/28"
@@ -2564,6 +3245,7 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_state_update, "issue-cod-152-preserve-unrelated-blocker", "Rework"}
 
       runtime_path = Path.join(workspace, runtime_correction["artifacts"]["json"])
@@ -2686,7 +3368,10 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
-      refute_receive {:memory_tracker_state_update, "issue-cod-152-review-pending-rescue", "Rework"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-cod-152-review-pending-rescue", "Rework"},
+                     50
+
       refute_receive {:memory_tracker_comment, "issue-cod-152-review-pending-rescue", _body}, 50
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
@@ -2775,7 +3460,10 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-cod-168-review-disabled-rescue", body}
       assert body =~ "retry_with_hydrated_requirements"
-      refute_receive {:memory_tracker_state_update, "issue-cod-168-review-disabled-rescue", "Rework"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-cod-168-review-disabled-rescue", "Rework"},
+                     50
+
       refute_receive {:unexpected_review_inspection, _endpoint}, 50
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
@@ -2821,14 +3509,25 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       dirty_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
       File.mkdir_p!(Path.dirname(dirty_path))
       File.write!(dirty_path, "baseline swipe deck\n")
-      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(dirty_path, "dirty review fix from an earlier turn\n")
 
       stale_progress_time =
@@ -3074,7 +3773,10 @@ defmodule SymphonyElixir.CoreTest do
     on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
 
     assert :ok = SymphonyElixir.ReviewMonitor.run_once()
-    refute_receive {:memory_tracker_state_update, "issue-cod-152-review-monitor-dedupe", "Rework"}, 50
+
+    refute_receive {:memory_tracker_state_update, "issue-cod-152-review-monitor-dedupe", "Rework"},
+                   50
+
     refute_receive {:memory_tracker_comment, "issue-cod-152-review-monitor-dedupe", _body}, 50
   end
 
@@ -3112,7 +3814,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 29,
                "html_url" => "https://github.com/acme/nutribuddy/pull/29",
-               "head" => %{"sha" => "clean-review-head", "ref" => "orocsy/cod-187-provider-selection"}
+               "head" => %{
+                 "sha" => "clean-review-head",
+                 "ref" => "orocsy/cod-187-provider-selection"
+               }
              }
            ]}
 
@@ -3150,7 +3855,93 @@ defmodule SymphonyElixir.CoreTest do
     assert_receive {:memory_tracker_comment, "issue-cod-187-missing-review-request", comment}
     assert comment =~ "requested the missing Codex PR review"
     assert comment =~ "pull/29"
-    refute_receive {:memory_tracker_state_update, "issue-cod-187-missing-review-request", "Rework"}, 50
+
+    refute_receive {:memory_tracker_state_update, "issue-cod-187-missing-review-request", "Rework"},
+                   50
+  end
+
+  test "review monitor moves Human Review PR with dirty mergeability to rework" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      review_monitor_enabled: true,
+      review_monitor_repo: "acme/nutribuddy",
+      review_monitor_states: ["Human Review"],
+      review_monitor_rework_state: "Rework",
+      review_monitor_request_stale_after_ms: 600_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    head_sha = "1aebf87ed6ffedf7134581baa6d79c287712fcea"
+
+    issue = %Issue{
+      id: "issue-cod-266-dirty-mergeability",
+      identifier: "COD-266",
+      title: "Send guest safety draft on first cards load and retry",
+      state: "Human Review",
+      branch_name: "orocsy/cod-246-preference-miu-guest-setup-controls"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+          {:ok,
+           [
+             %{
+               "number" => 103,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+               }
+             }
+           ]}
+
+        endpoint == "repos/acme/nutribuddy/pulls/103" ->
+          {:ok,
+           %{
+             "number" => 103,
+             "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+             "mergeable" => false,
+             "mergeable_state" => "dirty",
+             "head" => %{
+               "sha" => head_sha,
+               "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+             }
+           }}
+
+        endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+          {:ok, []}
+
+        endpoint == "repos/acme/nutribuddy/commits/#{head_sha}" ->
+          {:ok, %{"commit" => %{"committer" => %{"date" => "2026-07-07T02:41:00Z"}}}}
+
+        String.starts_with?(endpoint, "repos/acme/nutribuddy/commits/#{head_sha}/check-runs?") ->
+          {:ok, %{"check_runs" => []}}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+    end)
+
+    assert :ok = SymphonyElixir.ReviewMonitor.run_once()
+
+    assert_receive {:memory_tracker_state_update, "issue-cod-266-dirty-mergeability", "Rework"}
+    assert_receive {:memory_tracker_comment, "issue-cod-266-dirty-mergeability", comment}
+    assert comment =~ "review_rework_needed"
+    assert comment =~ "PR mergeability"
+    assert comment =~ "mergeable_state=dirty"
+    assert comment =~ "pull/103"
   end
 
   test "review monitor moves Human Review PR with failed current-head check to rework" do
@@ -3911,23 +4702,57 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
 
       {_output, 0} =
         System.cmd("git", ["commit", "-m", "Initial"],
           cd: workspace,
-          env: [{"GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z"}, {"GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z"}],
+          env: [
+            {"GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z"},
+            {"GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z"}
+          ],
           stderr_to_stdout: true
         )
 
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "integration.txt"), "merged COD-159/COD-160 baseline\n")
-      {_output, 0} = System.cmd("git", ["add", "integration.txt"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Integration baseline"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "integration.txt"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Integration baseline"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", issue.branch_name],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -4047,19 +4872,50 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", issue.branch_name],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       stale_dirty_path = Path.join(workspace, "tests/integration/recipe-chat-routes.test.ts")
       File.mkdir_p!(Path.dirname(stale_dirty_path))
       File.write!(stale_dirty_path, "stale dirty handoff from earlier worker\n")
-      {_output, 0} = System.cmd("touch", ["-t", "202001010000", stale_dirty_path], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("touch", ["-t", "202001010000", stale_dirty_path],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
       File.mkdir_p!(event_dir)
@@ -4095,11 +4951,16 @@ defmodule SymphonyElixir.CoreTest do
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       correction_json = correction_path |> File.read!() |> Jason.decode!()
-      correction_created_at = DateTime.utc_now() |> DateTime.add(300, :second) |> DateTime.truncate(:second)
+
+      correction_created_at =
+        DateTime.utc_now() |> DateTime.add(300, :second) |> DateTime.truncate(:second)
 
       File.write!(
         correction_path,
-        Jason.encode!(Map.put(correction_json, "created_at", DateTime.to_iso8601(correction_created_at)), pretty: true)
+        Jason.encode!(
+          Map.put(correction_json, "created_at", DateTime.to_iso8601(correction_created_at)),
+          pretty: true
+        )
       )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
@@ -4181,13 +5042,39 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", issue.branch_name],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       dirty_path = Path.join(workspace, "tests/unit/recipe-chat-page-view.test.ts")
@@ -4457,7 +5344,10 @@ defmodule SymphonyElixir.CoreTest do
       assert classified["status"] == "open"
       assert classified["classification"] == "worker_prompt_defect"
       assert classified["classification_summary"] =~ "repeated runtime progress retries"
-      assert classified["classification_summary"] =~ "runtime-preflight-worker-progress-contract-v19"
+
+      assert classified["classification_summary"] =~
+               "runtime-preflight-worker-progress-contract-v19"
+
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
@@ -4620,7 +5510,9 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_comment, "issue-cod-152-mixed-stale-worker-prompt-defect", body}
+
       assert body =~ "resolved stale `worker_prompt_defect`"
       assert body =~ "runtime-preflight-worker-progress-contract-v19"
 
@@ -4635,7 +5527,10 @@ defmodule SymphonyElixir.CoreTest do
 
       assert Enum.all?(
                resolved_corrections,
-               &String.contains?(&1["resolution_summary"], "runtime-preflight-worker-progress-contract-v19")
+               &String.contains?(
+                 &1["resolution_summary"],
+                 "runtime-preflight-worker-progress-contract-v19"
+               )
              )
 
       refute Workspace.blocking_correction_in_workspace?(workspace)
@@ -4679,7 +5574,10 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
 
       baseline_ts = DateTime.add(DateTime.utc_now(), -120, :second) |> DateTime.to_iso8601()
@@ -4771,15 +5669,21 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_state_update, "issue-cod-152-later-progress-worker-prompt-defect", "Rework"}
+
       assert_receive {:memory_tracker_comment, "issue-cod-152-later-progress-worker-prompt-defect", body}
+
       assert body =~ "workspace progress appeared after the correction"
       assert body =~ "pull/4"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_later_workspace_progress"
+
+      assert resolved["resolution_summary"] =~
+               "worker_prompt_defect_resolved_by_later_workspace_progress"
+
       refute Workspace.blocking_correction_in_workspace?(workspace)
     after
       File.rm_rf(test_root)
@@ -4841,7 +5745,9 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         correction_path,
-        Jason.encode!(Map.put(correction_json, "created_at", "2026-05-15T09:30:00Z"), pretty: true)
+        Jason.encode!(Map.put(correction_json, "created_at", "2026-05-15T09:30:00Z"),
+          pretty: true
+        )
       )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
@@ -4929,8 +5835,12 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
-      refute_receive {:memory_tracker_state_update, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", _state}, 50
-      refute_receive {:memory_tracker_comment, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", _body}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", _state},
+                     50
+
+      refute_receive {:memory_tracker_comment, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", _body},
+                     50
 
       parked = correction_path |> File.read!() |> Jason.decode!()
       assert parked["status"] == "open"
@@ -4945,14 +5855,20 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_state_update, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", "Rework"}
+
       assert_receive {:memory_tracker_comment, "issue-cod-152-fresh-review-feedback-worker-prompt-defect", body}
+
       assert body =~ "fresh Codex review feedback arrived"
       assert body =~ "pull/4"
 
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_fresh_review_feedback"
+
+      assert resolved["resolution_summary"] =~
+               "worker_prompt_defect_resolved_by_fresh_review_feedback"
+
       refute Workspace.blocking_correction_in_workspace?(workspace)
       assert Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
@@ -4993,12 +5909,21 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
 
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
       head_sha = String.trim(head_sha)
 
@@ -5070,15 +5995,21 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_state_update, "issue-cod-152-dirty-progress-worker-prompt-defect", "Rework"}
+
       assert_receive {:memory_tracker_comment, "issue-cod-152-dirty-progress-worker-prompt-defect", body}
+
       assert body =~ "workspace progress appeared after the correction"
       assert body =~ "pull/4"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "worker_prompt_defect_resolved_by_later_workspace_progress"
+
+      assert resolved["resolution_summary"] =~
+               "worker_prompt_defect_resolved_by_later_workspace_progress"
+
       refute Workspace.blocking_correction_in_workspace?(workspace)
     after
       File.rm_rf(test_root)
@@ -5364,14 +6295,340 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Runtime preflight is not worker progress"
 
       assert prompt =~
-               "Target feedback file(s): `src/features/swipe/SwipeDeck.tsx`, `src/app/api/recipe-chats/[chatId]/messages/route.ts`"
+               "Target feedback file(s): `src/features/swipe/SwipeDeck.tsx`"
+
+      refute prompt =~ "Target feedback file(s): `src/app/api/recipe-chats/[chatId]/messages/route.ts`"
 
       assert prompt =~ "Toolchain preflight:"
       assert prompt =~ "Validation command guidance:"
       assert prompt =~ "Review rework execution contract"
-      assert prompt =~ "your first terminal action must be exactly"
-      assert prompt =~ ~s(--tool "review-feedback-classified")
+      assert prompt =~ "do not append `review-feedback-classified` as a first action"
+      assert prompt =~ "classification alone is lifecycle context"
       refute prompt =~ "You are an agent for this repository."
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight keeps test-spec child tickets out of shared PR review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-test-spec-shared-pr-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265-preflight",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Rework",
+        branch_name: "orocsy/cod-265-generated-child-branch",
+        description: """
+        ## Ticket Type
+        test-spec
+
+        ## Base Branch
+        `orocsy/cod-246-preference-miu-guest-setup-controls` on PR #103.
+
+        ## Integration Branch
+        Same shared branch: `orocsy/cod-246-preference-miu-guest-setup-controls`.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - tests/unit/swipe-experience-request.test.ts
+        - tests/integration/cards-route.test.ts
+
+        ### MIU 1 - Frontend request contract
+        Add failing tests for the first cards request payload.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => "61f167a7821990d822f3d06f3d610c7c87a67431",
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "**Apply guest safety preferences before loading cards**",
+                 "commit_id" => "61f167a7821990d822f3d06f3d610c7c87a67431",
+                 "path" => "src/features/swipe/SwipeExperience.tsx",
+                 "line" => 105,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert preflight["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert get_in(preflight, ["review", "feedback_count"]) == 0
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "fresh implementation"
+      refute prompt =~ "Review rework execution contract"
+      refute prompt =~ "Apply guest safety preferences before loading cards"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight keeps in-scope test-spec review feedback" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-test-spec-scoped-review-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265-in-scope-preflight",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Rework",
+        branch_name: "orocsy/cod-265-generated-child-branch",
+        description: """
+        ## Ticket Type
+        test-spec
+
+        ## Integration Branch
+        Same shared branch: `orocsy/cod-246-preference-miu-guest-setup-controls`.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - tests/unit/swipe-experience-request.test.ts
+        - tests/integration/cards-route.test.ts
+
+        ### MIU 1 - Frontend request contract
+        Add failing tests for the first cards request payload.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => "61f167a7821990d822f3d06f3d610c7c87a67431",
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "**Assert first request carries the bounded guest draft**",
+                 "commit_id" => "61f167a7821990d822f3d06f3d610c7c87a67431",
+                 "path" => "tests/unit/swipe-experience-request.test.ts",
+                 "line" => 42,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-test"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert get_in(preflight, ["review", "feedback_count"]) == 1
+
+      assert [%{"path" => "tests/unit/swipe-experience-request.test.ts"}] =
+               get_in(preflight, ["review", "feedback"])
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight filters shared PR review feedback to implementation child write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-impl-shared-pr-scoped-feedback-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266-preflight",
+        identifier: "COD-266",
+        title: "COD-246B impl",
+        state: "Rework",
+        branch_name: "orocsy/cod-266-generated-child-branch",
+        description: """
+        ## Ticket Type
+        implementation
+
+        ## Base Branch
+        `orocsy/cod-246-preference-miu-guest-setup-controls` on PR #103.
+
+        ## Integration Branch
+        Same shared branch: `orocsy/cod-246-preference-miu-guest-setup-controls`.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+        - tests/unit/swipe-experience-request.test.ts
+
+        ## Shared Files
+        - src/app/api/cards/handler.ts is owned by COD-246C. Do not edit it here.
+
+        ## Out Of Scope
+        - src/app/api/cards/handler.ts
+
+        ### MIU 1 - Initial load carries guest safety draft
+        Send the bounded guest preference draft on first cards load and retry.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "**Apply guest safety preferences before loading cards**",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/features/swipe/SwipeExperience.tsx",
+                 "line" => 105,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-1"
+               },
+               %{
+                 "body" => "**Cap guest preference arrays before storing/prompting** Coordinate with `src/features/swipe/SwipeExperience.tsx` after COD-266.",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/app/api/swipes/handler.ts",
+                 "line" => 53,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-2"
+               },
+               %{
+                 "body" => "**Validate recipes before trusting provider safety**",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/lib/server/recipe-chats.ts",
+                 "line" => 359,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-3"
+               },
+               %{
+                 "body" => "**Move the safety header helper** This should be handled in `src/app/api/cards/handler.ts`.",
+                 "commit_id" => "d47b2d36d682f72129cf63f9f2b8416cb4b6bd45",
+                 "path" => "src/features/swipe/SwipeExperience.tsx",
+                 "line" => 121,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-4"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert preflight["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert get_in(preflight, ["review", "feedback_count"]) == 1
+
+      assert [%{"path" => "src/features/swipe/SwipeExperience.tsx"}] =
+               get_in(preflight, ["review", "feedback"])
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Apply guest safety preferences before loading cards"
+      refute prompt =~ "Cap guest preference arrays"
+      refute prompt =~ "Validate recipes before trusting provider safety"
+      refute prompt =~ "Move the safety header helper"
+      refute prompt =~ "src/app/api/swipes/handler.ts"
+      refute prompt =~ "src/lib/server/recipe-chats.ts"
     after
       File.rm_rf(test_root)
     end
@@ -5608,12 +6865,21 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert get_in(preflight, ["review", "pr_number"]) == 33
-      assert get_in(preflight, ["review", "pr_url"]) == "https://github.com/acme/nutribuddy/pull/33"
-      assert get_in(preflight, ["review", "head_ref"]) == "orocsy/feature-deepseek-provider-integration"
+
+      assert get_in(preflight, ["review", "pr_url"]) ==
+               "https://github.com/acme/nutribuddy/pull/33"
+
+      assert get_in(preflight, ["review", "head_ref"]) ==
+               "orocsy/feature-deepseek-provider-integration"
+
       assert preflight["branch"] == "orocsy/feature-deepseek-provider-integration"
       assert get_in(preflight, ["review", "feedback_count"]) == 1
-      assert get_in(preflight, ["requirements", "issue_brief", "path"]) == ".orocsy/delivery/issue-brief.md"
-      assert [%{"path" => "src/app/api/recipe-chats/route.ts"}] = get_in(preflight, ["review", "feedback"])
+
+      assert get_in(preflight, ["requirements", "issue_brief", "path"]) ==
+               ".orocsy/delivery/issue-brief.md"
+
+      assert [%{"path" => "src/app/api/recipe-chats/route.ts"}] =
+               get_in(preflight, ["review", "feedback"])
     after
       File.rm_rf(test_root)
     end
@@ -5675,7 +6941,10 @@ defmodule SymphonyElixir.CoreTest do
 
         cond do
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/cod-199-auth-integration-check-and-final-pr-handoff") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/cod-199-auth-integration-check-and-final-pr-handoff"
+              ) ->
             {:ok, []}
 
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
@@ -5689,7 +6958,10 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 54,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-                 "head" => %{"sha" => "integration-head", "ref" => "orocsy/feature-auth-migration-integration"}
+                 "head" => %{
+                   "sha" => "integration-head",
+                   "ref" => "orocsy/feature-auth-migration-integration"
+                 }
                }
              ]}
 
@@ -5698,7 +6970,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 54,
                "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-               "head" => %{"sha" => "integration-head", "ref" => "orocsy/feature-auth-migration-integration"},
+               "head" => %{
+                 "sha" => "integration-head",
+                 "ref" => "orocsy/feature-auth-migration-integration"
+               },
                "mergeable" => false,
                "mergeable_state" => "dirty"
              }}
@@ -5801,7 +7076,10 @@ defmodule SymphonyElixir.CoreTest do
 
         cond do
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/cod-199-auth-integration-check-and-final-pr-handoff") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/cod-199-auth-integration-check-and-final-pr-handoff"
+              ) ->
             {:ok, []}
 
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
@@ -5815,7 +7093,10 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 54,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-                 "head" => %{"sha" => "integration-head", "ref" => "orocsy/feature-auth-migration-integration"}
+                 "head" => %{
+                   "sha" => "integration-head",
+                   "ref" => "orocsy/feature-auth-migration-integration"
+                 }
                }
              ]}
 
@@ -5824,7 +7105,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 54,
                "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-               "head" => %{"sha" => "integration-head", "ref" => "orocsy/feature-auth-migration-integration"},
+               "head" => %{
+                 "sha" => "integration-head",
+                 "ref" => "orocsy/feature-auth-migration-integration"
+               },
                "mergeable" => true,
                "mergeable_state" => "clean"
              }}
@@ -5916,7 +7200,10 @@ defmodule SymphonyElixir.CoreTest do
 
         cond do
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation"
+              ) ->
             {:ok, []}
 
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
@@ -5924,13 +7211,19 @@ defmodule SymphonyElixir.CoreTest do
             {:ok, []}
 
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/feature-analytics-observability-integration") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/feature-analytics-observability-integration"
+              ) ->
             {:ok,
              [
                %{
                  "number" => 56,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-                 "head" => %{"sha" => "analytics-head", "ref" => "orocsy/feature-analytics-observability-integration"}
+                 "head" => %{
+                   "sha" => "analytics-head",
+                   "ref" => "orocsy/feature-analytics-observability-integration"
+                 }
                }
              ]}
 
@@ -5939,7 +7232,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 56,
                "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-               "head" => %{"sha" => "analytics-head", "ref" => "orocsy/feature-analytics-observability-integration"},
+               "head" => %{
+                 "sha" => "analytics-head",
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               },
                "mergeable" => true,
                "mergeable_state" => "clean"
              }}
@@ -5995,12 +7291,33 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nDirty handoff.\n")
 
       assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
@@ -6014,8 +7331,86 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Mode: handoff recovery"
       assert prompt =~ "Dirty workspace recovery is the only task"
       assert prompt =~ "focused validation fails and names exact in-scope files"
-      assert prompt =~ "Record an Orocsy correction and stop only when validation lacks an actionable in-scope target"
+
+      assert prompt =~
+               "Record an Orocsy correction and stop only when validation lacks an actionable in-scope target"
+
       refute prompt =~ "Mode: fresh implementation"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight gives dirty test-spec handoff expected-failure guidance" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-test-spec-handoff-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265-dirty-preflight",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Rework",
+        branch_name: "orocsy/cod-246-preference-miu-guest-setup-controls",
+        description: """
+        ## Ticket Type
+        test-spec
+
+        ## Write Scope
+        - tests/unit/swipe-experience-request.test.ts
+
+        ## Validation
+        ```bash
+        pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.mkdir_p!(Path.join(workspace, "tests/unit"))
+      File.write!(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"), "test('base', () => {})\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"), "test('expected failure', () => {})\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["first_task"] =~ "dirty test-spec checkpoint"
+      assert preflight["first_task"] =~ "implementation is intentionally not present yet"
+      assert preflight["first_task"] =~ "do not edit production source"
     after
       File.rm_rf(test_root)
     end
@@ -6048,18 +7443,72 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-cloudflare-infra-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-213-cloudflare-runtime-foundation-implementation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "update-ref",
+            "refs/remotes/origin/orocsy/feature-cloudflare-infra-integration",
+            "HEAD"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["switch", "-c", "orocsy/cod-213-cloudflare-runtime-foundation-implementation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nCheckpoint.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add checkpoint"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-cloudflare-infra-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add checkpoint"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/feature-cloudflare-infra-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
@@ -6099,12 +7548,34 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-219-d1-schema-and-migration-smoke-implementation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["switch", "-c", "orocsy/cod-219-d1-schema-and-migration-smoke-implementation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
 
       brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
       File.mkdir_p!(brief_dir)
@@ -6154,18 +7625,70 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-cloudflare-infra-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-215-cloudflare-provider-implementation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "update-ref",
+            "refs/remotes/origin/orocsy/feature-cloudflare-infra-integration",
+            "HEAD"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-215-cloudflare-provider-implementation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nProvider handoff.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add provider handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-cloudflare-infra-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add provider handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/feature-cloudflare-infra-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       events_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -6221,22 +7744,80 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "symphony@example.test"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.name", "Symphony Test"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Initial"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", "main"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["switch", "-c", "orocsy/feature-analytics-observability-integration"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nRecovered handoff.\n")
-      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Recovered handoff"], cd: workspace, stderr_to_stdout: true)
-      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Recovered handoff"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      {head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       head_sha = String.trim(head_sha)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["push", "-u", "origin", "orocsy/feature-analytics-observability-integration"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
 
@@ -6258,7 +7839,11 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(
         Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
-        Jason.encode!(%{"event" => "gate.post-miu", "status" => "passed", "ts" => DateTime.utc_now() |> DateTime.to_iso8601()}) <> "\n"
+        Jason.encode!(%{
+          "event" => "gate.post-miu",
+          "status" => "passed",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
       )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
@@ -6266,17 +7851,26 @@ defmodule SymphonyElixir.CoreTest do
 
         cond do
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation"
+              ) ->
             {:ok, []}
 
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/feature-analytics-observability-integration") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/feature-analytics-observability-integration"
+              ) ->
             {:ok,
              [
                %{
                  "number" => 56,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/feature-analytics-observability-integration"
+                 }
                }
              ]}
 
@@ -6289,7 +7883,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 56,
                "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               },
                "mergeable" => true,
                "mergeable_state" => "clean"
              }}
@@ -6312,9 +7909,18 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
-      assert get_in(preflight, ["review", "head_ref"]) == "orocsy/feature-analytics-observability-integration"
+
+      assert get_in(preflight, ["review", "head_ref"]) ==
+               "orocsy/feature-analytics-observability-integration"
+
       assert get_in(preflight, ["review", "head_sha"]) == head_sha
-      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace, stderr_to_stdout: true)
+
+      assert {current_branch, 0} =
+               System.cmd("git", ["branch", "--show-current"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert String.trim(current_branch) == "orocsy/feature-analytics-observability-integration"
     after
       File.rm_rf(test_root)
@@ -6349,22 +7955,80 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "symphony@example.test"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.name", "Symphony Test"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Initial"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", "main"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["switch", "-c", "orocsy/feature-analytics-observability-integration"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nIntegration handoff.\n")
-      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Integration handoff"], cd: workspace, stderr_to_stdout: true)
-      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Integration handoff"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      {head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       head_sha = String.trim(head_sha)
-      assert {_output, 0} = System.cmd("git", ["push", "-u", "origin", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["push", "-u", "origin", "orocsy/feature-analytics-observability-integration"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
 
@@ -6388,17 +8052,26 @@ defmodule SymphonyElixir.CoreTest do
 
         cond do
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/cod-205-analytics-miu-flow-instrumentation"
+              ) ->
             {:ok, []}
 
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/feature-analytics-observability-integration") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/feature-analytics-observability-integration"
+              ) ->
             {:ok,
              [
                %{
                  "number" => 56,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/feature-analytics-observability-integration"
+                 }
                }
              ]}
 
@@ -6411,7 +8084,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 56,
                "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               },
                "mergeable" => true,
                "mergeable_state" => "clean"
              }}
@@ -6469,7 +8145,8 @@ defmodule SymphonyElixir.CoreTest do
         Application.delete_env(:symphony_elixir, :github_graphql_runner)
       end)
 
-      assert PromptBuilder.workspace_recovery_checkpoint(workspace) =~ "Local handoff recovery checkpoint:"
+      assert PromptBuilder.workspace_recovery_checkpoint(workspace) =~
+               "Local handoff recovery checkpoint:"
 
       assert {:ok, %{"mode" => "review_rework"} = preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
@@ -6477,8 +8154,16 @@ defmodule SymphonyElixir.CoreTest do
       assert preflight["branch"] == "orocsy/feature-analytics-observability-integration"
       assert preflight["checkpoint_event"] == "review-feedback-classified"
       assert get_in(preflight, ["review", "feedback_count"]) == 1
-      assert [%{"path" => "tests/integration/cards-route.test.ts", "line" => 13}] = get_in(preflight, ["review", "feedback"])
-      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace, stderr_to_stdout: true)
+
+      assert [%{"path" => "tests/integration/cards-route.test.ts", "line" => 13}] =
+               get_in(preflight, ["review", "feedback"])
+
+      assert {current_branch, 0} =
+               System.cmd("git", ["branch", "--show-current"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert String.trim(current_branch) == "orocsy/feature-analytics-observability-integration"
     after
       File.rm_rf(test_root)
@@ -6651,7 +8336,131 @@ defmodule SymphonyElixir.CoreTest do
 
       preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
       assert {:ok, decoded} = preflight_path |> File.read!() |> Jason.decode()
-      assert decoded["review"]["feedback"] |> List.first() |> Map.fetch!("body") == feedback["body"]
+
+      assert decoded["review"]["feedback"] |> List.first() |> Map.fetch!("body") ==
+               feedback["body"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review rework preflight adds current-head review paths as temporary scope bundle write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-scope-bundle-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266-preflight",
+        identifier: "COD-266",
+        title: "Send guest safety draft",
+        state: "Rework",
+        branch_name: "orocsy/cod-246-preference-miu-guest-setup-controls",
+        description: """
+        ## Ticket Type
+        Implementation
+
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+
+        ## Out Of Scope
+        - src/app/api/cards/handler.ts
+
+        ### MIU 1 - Guest safety draft
+        Send guest preferences to the first cards request.
+
+        ## Validation
+        ```bash
+        pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      head_sha = "1aebf87ed6ffedf7134581baa6d79c287712fcea"
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => """
+                 **P1** The `/api/cards` handler still ignores guest safety preferences.
+
+                 Update `src/app/api/cards/handler.ts` so the current PR review path is covered.
+                 """,
+                 "commit_id" => head_sha,
+                 "path" => "src/app/api/cards/handler.ts",
+                 "line" => 42,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion_r3533275206"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["requirements", "write_scope"]) == [
+               "src/features/swipe/SwipeExperience.tsx"
+             ]
+
+      assert preflight["policy_hash"] == get_in(preflight, ["requirements", "scope_bundle", "policy_hash"])
+
+      bundle = get_in(preflight, ["requirements", "scope_bundle"])
+
+      assert Enum.any?(bundle["write_scope"], fn entry ->
+               match?(
+                 %{
+                   "path" => "src/app/api/cards/handler.ts",
+                   "source" => "github.current_head_review",
+                   "operation" => "write",
+                   "expires" => "review_thread_resolved_or_outdated",
+                   "review_url" => "https://github.com/acme/nutribuddy/pull/103#discussion_r3533275206"
+                 },
+                 entry
+               ) and entry["reason"] =~ "/api/cards"
+             end)
+
+      assert %{
+               "path" => "src/app/api/cards/handler.ts",
+               "source" => "linear.out_of_scope",
+               "operation" => "read",
+               "expires" => "branch"
+             } in bundle["denied_scope"]
     after
       File.rm_rf(test_root)
     end
@@ -6699,7 +8508,11 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
-      File.write!(Path.join(workspace, ".orocsy/delivery/issue-brief.md"), "# COD-153 Brief\nTarget shape and focused tests.\n")
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+        "# COD-153 Brief\nTarget shape and focused tests.\n"
+      )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -6714,8 +8527,13 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["checkpoint_event"] == "technical-miu-trace"
-      assert get_in(preflight, ["requirements", "base_branch"]) == "orocsy/feature-recipe-chat-integration"
-      assert get_in(preflight, ["requirements", "issue_brief", "path"]) == ".orocsy/delivery/issue-brief.md"
+
+      assert get_in(preflight, ["requirements", "base_branch"]) ==
+               "orocsy/feature-recipe-chat-integration"
+
+      assert get_in(preflight, ["requirements", "issue_brief", "path"]) ==
+               ".orocsy/delivery/issue-brief.md"
+
       assert get_in(preflight, ["toolchain", "executables", "npm", "available"]) in [true, false]
 
       assert get_in(preflight, ["requirements", "write_scope"]) == [
@@ -6862,7 +8680,9 @@ defmodule SymphonyElixir.CoreTest do
       state = Orchestrator.reconcile_no_durable_progress_for_test(state)
       refute Map.has_key?(state.running, issue.id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
       assert correction["guard"]["first_event_max_tokens"] == 1_000
@@ -6973,7 +8793,9 @@ defmodule SymphonyElixir.CoreTest do
       state = Orchestrator.reconcile_no_durable_progress_for_test(state)
       refute Map.has_key?(state.running, issue.id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
@@ -7529,7 +9351,9 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(state.running, issue.id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.no-durable-progress"
@@ -7569,13 +9393,27 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
       File.mkdir_p!(Path.dirname(preflight_path))
@@ -7604,7 +9442,8 @@ defmodule SymphonyElixir.CoreTest do
         started_at: started_at
       }
 
-      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) >= 60_000
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) >=
+               60_000
     after
       File.rm_rf(test_root)
     end
@@ -7674,7 +9513,9 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(state.running, issue.id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
@@ -7722,7 +9563,10 @@ defmodule SymphonyElixir.CoreTest do
       baseline_ts = DateTime.add(started_at, -60, :second) |> DateTime.to_iso8601()
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
@@ -7735,10 +9579,21 @@ defmodule SymphonyElixir.CoreTest do
                )
 
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       File.write!(Path.join(workspace, "progress.txt"), "committed work proves progress\n")
       assert {_output, 0} = System.cmd("git", ["add", "progress.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add progress"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Add progress"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       assert {commit_ts, 0} =
                System.cmd("git", ["log", "-1", "--format=%cI", "HEAD", "--not", "main"], cd: workspace)
@@ -7770,7 +9625,8 @@ defmodule SymphonyElixir.CoreTest do
         codex_total_tokens: 500
       }
 
-      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) <
+               60_000
 
       state =
         %Orchestrator.State{
@@ -7853,7 +9709,8 @@ defmodule SymphonyElixir.CoreTest do
         last_validation_progress_at: DateTime.utc_now()
       }
 
-      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) <
+               60_000
 
       state =
         :sys.get_state(pid)
@@ -8081,7 +9938,9 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.validation-blocker"
@@ -8436,7 +10295,10 @@ defmodule SymphonyElixir.CoreTest do
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "permission_guard_resolved_by_exact_test_search_policy"
+
+      assert resolved["resolution_summary"] =~
+               "permission_guard_resolved_by_exact_test_search_policy"
+
       refute Workspace.blocking_correction_in_workspace?(workspace)
     after
       File.rm_rf(test_root)
@@ -8498,14 +10360,19 @@ defmodule SymphonyElixir.CoreTest do
       rescued = Orchestrator.rescue_open_corrections_for_test([issue], state)
 
       assert rescued == state
+
       assert_receive {:memory_tracker_comment, "issue-exact-test-candidate-search-permission-rescue", body}
+
       assert body =~ "safe read-only permission correction"
       assert body =~ "exact test/spec file paths"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "permission_guard_resolved_by_exact_test_search_policy"
+
+      assert resolved["resolution_summary"] =~
+               "permission_guard_resolved_by_exact_test_search_policy"
+
       refute Workspace.blocking_correction_in_workspace?(workspace)
     after
       File.rm_rf(test_root)
@@ -8569,13 +10436,767 @@ defmodule SymphonyElixir.CoreTest do
       assert rescued == state
       assert_receive {:memory_tracker_comment, "issue-review-polling-permission-rescue", body}
       assert body =~ "PR review polling permission correction"
-      assert body =~ "orchestration/review-monitor owns request, wait, feedback, and clean-review transitions"
+
+      assert body =~
+               "orchestration/review-monitor owns request, wait, feedback, and clean-review transitions"
 
       correction_path = Path.join(workspace, correction["artifacts"]["json"])
       resolved = correction_path |> File.read!() |> Jason.decode!()
       assert resolved["status"] == "resolved"
-      assert resolved["resolution_summary"] =~ "permission_guard_resolved_by_orchestration_review_polling_policy"
+
+      assert resolved["resolution_summary"] =~
+               "permission_guard_resolved_by_orchestration_review_polling_policy"
+
       refute Workspace.blocking_correction_in_workspace?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker with no-progress telemetry parks correction before retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS",
+        state: "In Progress",
+        title: "Normal no-progress worker",
+        description: "A worker can finish normally while still doing no durable work.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      session_id = "thread-normal-no-progress-turn-normal-no-progress"
+      started_at = DateTime.utc_now() |> DateTime.add(-20, :second) |> DateTime.truncate(:second)
+      ended_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => session_id,
+          "thread_id" => "thread-normal-no-progress",
+          "turn_id" => "turn-normal-no-progress",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 42_451,
+          "input_tokens" => 41_706,
+          "cached_input_tokens" => 22_272,
+          "output_tokens" => 745,
+          "counted_guard_tokens" => 19_434,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "handoff", "total_tokens" => 22_061},
+            %{"phase" => "command", "total_tokens" => 20_390}
+          ],
+          "loop_signatures" => ["no_durable_progress", "handoff_loop"]
+        }) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            session_id: session_id,
+            codex_total_tokens: 42_451,
+            codex_cached_input_tokens: 22_272
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 42_451
+      assert correction["guard"]["durable_progress_guard_tokens"] == 19_434
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker preserves validation blocker before first-event block" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-validation-before-first-event-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 100_000,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue_id = "issue-normal-validation-before-first-event"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-VALIDATION-FIRST-EVENT",
+        state: "In Progress",
+        title: "Normal validation failure before first-event block",
+        description: "Validation failure should remain the actionable runtime correction.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      session_id = "thread-validation-first-event-turn"
+      started_at = DateTime.utc_now() |> DateTime.add(-20, :second) |> DateTime.truncate(:second)
+      failed_at = DateTime.add(started_at, 8, :second)
+      ended_at = DateTime.add(started_at, 18, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => session_id,
+          "thread_id" => "thread-validation-first-event",
+          "turn_id" => "turn-validation-first-event",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 2_500,
+          "input_tokens" => 2_350,
+          "cached_input_tokens" => 0,
+          "output_tokens" => 150,
+          "counted_guard_tokens" => 500,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [%{"phase" => "validation", "total_tokens" => 2_500}],
+          "loop_signatures" => ["no_durable_progress", "validation_loop"]
+        }) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            session_id: session_id,
+            codex_total_tokens: 2_500,
+            codex_cached_input_tokens: 0,
+            last_validation_failure_at: failed_at,
+            last_validation_failure_command: "pnpm test -- tests/unit/cards.test.ts",
+            last_validation_failure_evidence: "expected allergies to stay bounded"
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.validation-blocker"
+      assert correction["source_status"] == "retryable"
+      assert correction["next_action"] == "retry"
+      assert correction["guard"]["command"] == "pnpm test -- tests/unit/cards.test.ts"
+      assert correction["guard"]["total_tokens"] == 2_500
+      assert correction["guard"]["durable_progress_guard_tokens"] == 500
+      refute correction["source"] == "symphony.runtime.missing-first-durable-event"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker parks no-progress correction when session id update is missing" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-missing-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-missing-session"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-MISSING-SESSION",
+        state: "In Progress",
+        title: "Normal no-progress worker missing session",
+        description: "A session update can race normal worker completion.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at =
+        DateTime.utc_now() |> DateTime.add(-30, :second) |> DateTime.truncate(:second)
+
+      stale_started_at = DateTime.add(running_started_at, -120, :second)
+      started_at = DateTime.add(running_started_at, 8, :second)
+      ended_at = DateTime.add(started_at, 16, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      stale_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "old-thread-old-turn",
+          "started_at" => DateTime.to_iso8601(stale_started_at),
+          "ended_at" => DateTime.to_iso8601(DateTime.add(stale_started_at, 10, :second)),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 99_999,
+          "cached_input_tokens" => 0,
+          "counted_guard_tokens" => 99_999,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => []
+        })
+
+      current_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "current-thread-current-turn",
+          "thread_id" => "current-thread",
+          "turn_id" => "current-turn",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 43_117,
+          "input_tokens" => 42_079,
+          "cached_input_tokens" => 39_680,
+          "output_tokens" => 1_038,
+          "counted_guard_tokens" => 2_399,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "code_read", "total_tokens" => 22_352},
+            %{"phase" => "command", "total_tokens" => 20_765}
+          ],
+          "loop_signatures" => ["no_durable_progress", "read_loop"]
+        })
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        stale_summary <> "\n" <> current_summary <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: nil,
+            codex_total_tokens: 43_117,
+            codex_cached_input_tokens: 39_680
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 43_117
+      assert correction["guard"]["durable_progress_guard_tokens"] == 43_117
+      assert correction["guard"]["cached_input_tokens"] == 39_680
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker uses newer issue summary when stored session is stale" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-stale-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-stale-session"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-STALE-SESSION",
+        state: "In Progress",
+        title: "Normal no-progress worker with stale session",
+        description: "A stored session id can point at a prior turn while the latest issue summary is blocked.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at =
+        DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+
+      old_started_at = DateTime.add(running_started_at, 5, :second)
+      old_ended_at = DateTime.add(old_started_at, 10, :second)
+      current_started_at = DateTime.add(old_ended_at, 5, :second)
+      current_ended_at = DateTime.add(current_started_at, 18, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      old_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-stale-turn-old",
+          "thread_id" => "thread-stale",
+          "turn_id" => "turn-old",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(old_started_at),
+          "ended_at" => DateTime.to_iso8601(old_ended_at),
+          "status" => "completed",
+          "total_tokens" => 1_200,
+          "cached_input_tokens" => 0,
+          "counted_guard_tokens" => 1_200,
+          "durable_progress_events" => ["tool.finished"],
+          "dirty_files" => [],
+          "new_commits" => []
+        })
+
+      current_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-stale-turn-current",
+          "thread_id" => "thread-stale",
+          "turn_id" => "turn-current",
+          "turn" => 2,
+          "started_at" => DateTime.to_iso8601(current_started_at),
+          "ended_at" => DateTime.to_iso8601(current_ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 20_512,
+          "input_tokens" => 20_088,
+          "cached_input_tokens" => 2_432,
+          "output_tokens" => 424,
+          "counted_guard_tokens" => 17_656,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "command", "total_tokens" => 20_512}
+          ],
+          "loop_signatures" => ["no_durable_progress"]
+        })
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        old_summary <> "\n" <> current_summary <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: "thread-stale-turn-old",
+            codex_total_tokens: 20_512,
+            codex_cached_input_tokens: 2_432
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 20_512
+      assert correction["guard"]["durable_progress_guard_tokens"] == 17_656
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker uses issue summary when stale session timestamp ties latest issue telemetry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-stale-session-tie-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-stale-session-tie"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-STALE-SESSION-TIE",
+        state: "In Progress",
+        title: "Normal no-progress stale session timestamp tie",
+        description: "Second-granularity telemetry ties should prefer the latest issue entry.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at =
+        DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+
+      shared_started_at = DateTime.add(running_started_at, 5, :second)
+      shared_ended_at = DateTime.add(shared_started_at, 10, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      old_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-tie-turn-old",
+          "thread_id" => "thread-tie",
+          "turn_id" => "turn-old",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(shared_started_at),
+          "ended_at" => DateTime.to_iso8601(shared_ended_at),
+          "status" => "completed",
+          "total_tokens" => 1_200,
+          "cached_input_tokens" => 0,
+          "counted_guard_tokens" => 1_200,
+          "durable_progress_events" => ["tool.finished"],
+          "dirty_files" => [],
+          "new_commits" => []
+        })
+
+      current_summary =
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-tie-turn-current",
+          "thread_id" => "thread-tie",
+          "turn_id" => "turn-current",
+          "turn" => 2,
+          "started_at" => DateTime.to_iso8601(shared_started_at),
+          "ended_at" => DateTime.to_iso8601(shared_ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 20_512,
+          "input_tokens" => 20_088,
+          "cached_input_tokens" => 2_432,
+          "output_tokens" => 424,
+          "counted_guard_tokens" => 17_656,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "command", "total_tokens" => 20_512}
+          ],
+          "loop_signatures" => ["no_durable_progress"]
+        })
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        old_summary <> "\n" <> current_summary <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: "thread-tie-turn-old",
+            codex_total_tokens: 20_512,
+            codex_cached_input_tokens: 2_432
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["next_action"] == "block"
+      assert correction["guard"]["total_tokens"] == 20_512
+      assert correction["guard"]["durable_progress_guard_tokens"] == 17_656
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "normally completed worker with retryable correction parks repeated no-progress attempt" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-open-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-open-retry-correction"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-OPEN-RETRY",
+        state: "Rework",
+        title: "Normal no-progress worker with open retry correction",
+        description: "A retryable product correction should not hide a stuck worker loop.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, product_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "controller-pr103-codex-review",
+                 source_status: "failed",
+                 summary: "Fix src/features/swipe/SwipeExperience.tsx so guest preferences are not sent to /api/cards.",
+                 findings: [
+                   "Current review feedback requires a scoped edit in src/features/swipe/SwipeExperience.tsx."
+                 ],
+                 required_corrections: [
+                   "Edit src/features/swipe/SwipeExperience.tsx and run tests/unit/swipe-experience-request.test.ts."
+                 ],
+                 next_action: "retry"
+               })
+
+      running_started_at =
+        DateTime.utc_now() |> DateTime.add(-30, :second) |> DateTime.truncate(:second)
+
+      started_at = DateTime.add(running_started_at, 8, :second)
+      ended_at = DateTime.add(started_at, 16, :second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "retry-thread-retry-turn",
+          "thread_id" => "retry-thread",
+          "turn_id" => "retry-turn",
+          "turn" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(ended_at),
+          "status" => "blocked_no_durable_progress",
+          "total_tokens" => 42_249,
+          "input_tokens" => 41_686,
+          "cached_input_tokens" => 22_272,
+          "output_tokens" => 563,
+          "counted_guard_tokens" => 19_414,
+          "durable_progress_events" => [],
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [
+            %{"phase" => "handoff", "total_tokens" => 21_880},
+            %{"phase" => "command", "total_tokens" => 20_369}
+          ],
+          "loop_signatures" => ["no_durable_progress", "handoff_loop"]
+        }) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: nil,
+            codex_total_tokens: 42_249,
+            codex_cached_input_tokens: 22_272
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert state.retry_attempts == %{}
+
+      open_corrections = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert length(open_corrections) == 2
+
+      assert Enum.any?(
+               open_corrections,
+               &(&1["correction_id"] == product_correction["correction_id"] and
+                   &1["next_action"] == "retry")
+             )
+
+      runtime_correction =
+        Enum.find(open_corrections, &(&1["source"] == "symphony.runtime.no-durable-progress"))
+
+      assert runtime_correction
+      assert runtime_correction["source_status"] == "blocked"
+      assert runtime_correction["next_action"] == "block"
+      assert runtime_correction["guard"]["total_tokens"] == 42_249
+      assert runtime_correction["guard"]["durable_progress_guard_tokens"] == 19_414
     after
       File.rm_rf(test_root)
     end
@@ -8614,11 +11235,19 @@ defmodule SymphonyElixir.CoreTest do
       started_at = DateTime.add(DateTime.utc_now(), -180, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       progress_path = Path.join(workspace, "progress.txt")
       File.write!(progress_path, "dirty handoff work\n")
@@ -8654,7 +11283,9 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.no-durable-progress-handoff"
@@ -8703,7 +11334,10 @@ defmodule SymphonyElixir.CoreTest do
       started_at = DateTime.utc_now() |> DateTime.add(-240, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
@@ -8720,8 +11354,12 @@ defmodule SymphonyElixir.CoreTest do
                  stderr_to_stdout: true
                )
 
-      assert {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-pushed-gate"], cd: workspace)
+      assert {_output, 0} =
+               System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "orocsy/mt-pushed-gate"], cd: workspace)
+
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\nready\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
 
@@ -8732,10 +11370,15 @@ defmodule SymphonyElixir.CoreTest do
                  stderr_to_stdout: true
                )
 
-      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace)
+      assert {_output, 0} =
+               System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace)
 
       assert {_output, 0} =
-               System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-pushed-gate", "HEAD"], cd: workspace)
+               System.cmd(
+                 "git",
+                 ["update-ref", "refs/remotes/origin/orocsy/mt-pushed-gate", "HEAD"],
+                 cd: workspace
+               )
 
       assert {_output, 0} =
                System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-pushed-gate"],
@@ -8798,6 +11441,163 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "open correction blocks pushed review gate no-progress shortcut" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pushed-review-gate-open-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      issue_id = "issue-pushed-review-gate-open-correction"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-PUSHED-GATE-CORRECTION",
+        state: "Rework",
+        title: "Pushed review gate with open correction",
+        description: "Open review correction must override pushed handoff checkpoint",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      old_time = DateTime.utc_now() |> DateTime.add(-180, :second)
+      old_iso = DateTime.to_iso8601(old_time)
+      old_file_time = old_time |> DateTime.to_naive() |> NaiveDateTime.to_erl()
+      started_at = DateTime.utc_now() |> DateTime.add(-240, :second)
+
+      assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "DESIGN.md"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "DESIGN.md"], cd: workspace)
+
+      commit_env = [
+        {"GIT_AUTHOR_DATE", old_iso},
+        {"GIT_COMMITTER_DATE", old_iso}
+      ]
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 env: commit_env,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "orocsy/mt-pushed-gate-correction"], cd: workspace)
+
+      File.write!(Path.join(workspace, "DESIGN.md"), "baseline\nready\n")
+      assert {_output, 0} = System.cmd("git", ["add", "DESIGN.md"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Add pushed checkpoint"],
+                 cd: workspace,
+                 env: commit_env,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["update-ref", "refs/remotes/origin/orocsy/mt-pushed-gate-correction", "HEAD"],
+                 cd: workspace
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-pushed-gate-correction"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework", "issue" => issue.identifier})
+      )
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        [
+          ~s({"event":"gate.post-miu","status":"passed","step":"focused validation passed","ts":"#{old_iso}"}\n),
+          ~s({"event":"tool.finished","tool":"codex-review-requested","status":"passed","ts":"#{old_iso}"}\n)
+        ]
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_open.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_open",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Edit DESIGN.md to address current Codex review feedback.",
+          "required_corrections" => ["Update DESIGN.md and run validation."]
+        })
+      )
+
+      workspace
+      |> Path.join(".git/logs/**/*")
+      |> Path.wildcard()
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.each(&File.touch!(&1, old_file_time))
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 50_000
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.completed, issue_id)
+      refute [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "quiet high-token worker with stale local handoff checkpoint creates handoff retry correction" do
     test_root =
       Path.join(
@@ -8830,14 +11630,24 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       progress_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
       File.mkdir_p!(Path.dirname(progress_path))
       File.write!(progress_path, "baseline swipe deck\n")
-      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.write!(progress_path, "dirty handoff work from an earlier turn\n")
 
@@ -8873,7 +11683,9 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.no-durable-progress-handoff"
@@ -8917,14 +11729,24 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       progress_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
       File.mkdir_p!(Path.dirname(progress_path))
       File.write!(progress_path, "baseline swipe deck\n")
-      assert {_output, 0} = System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["add", "baseline.txt", "src/features/swipe/SwipeDeck.tsx"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.write!(progress_path, "dirty handoff work from an earlier turn\n")
 
@@ -9036,15 +11858,26 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
 
       assert {_output, 0} =
-               System.cmd("git", ["switch", "-c", "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"],
+               System.cmd(
+                 "git",
+                 ["switch", "-c", "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"],
                  cd: workspace,
                  stderr_to_stdout: true
                )
@@ -9077,7 +11910,8 @@ defmodule SymphonyElixir.CoreTest do
         codex_total_tokens: 500
       }
 
-      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) <
+               60_000
 
       state =
         initial_state
@@ -9127,11 +11961,20 @@ defmodule SymphonyElixir.CoreTest do
       started_at = DateTime.add(DateTime.utc_now(), -180, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
 
       branch_name = "orocsy/cod-157-bridge-contract"
@@ -9162,7 +12005,8 @@ defmodule SymphonyElixir.CoreTest do
         codex_total_tokens: 500
       }
 
-      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) >= 60_000
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) >=
+               60_000
 
       state = %Orchestrator.State{
         max_concurrent_agents: 1,
@@ -9178,7 +12022,9 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(state.claimed, issue_id)
       assert state.retry_attempts == %{}
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.no-durable-progress"
@@ -9228,15 +12074,26 @@ defmodule SymphonyElixir.CoreTest do
       started_at = DateTime.add(DateTime.utc_now(), -2, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
 
       assert {_output, 0} =
-               System.cmd("git", ["switch", "-c", "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"],
+               System.cmd(
+                 "git",
+                 ["switch", "-c", "orocsy/cod-152-miu-4-swipe-feed-ui-and-mutation-flow"],
                  cd: workspace,
                  stderr_to_stdout: true
                )
@@ -9278,7 +12135,9 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
@@ -9329,13 +12188,27 @@ defmodule SymphonyElixir.CoreTest do
       started_at = DateTime.add(DateTime.utc_now(), -2, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       File.write!(Path.join(workspace, "progress.txt"), "dirty work proves first progress\n")
 
@@ -9413,13 +12286,27 @@ defmodule SymphonyElixir.CoreTest do
       started_at = DateTime.add(DateTime.utc_now(), -2, :second)
 
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", "worker"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", "worker"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
 
       runtime_state = Path.join(workspace, ".orocsy/delivery/state")
       File.mkdir_p!(runtime_state)
@@ -9455,7 +12342,9 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
-      [_correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
+      [_correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
     end
@@ -9493,13 +12382,25 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
       assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
       File.write!(Path.join(workspace, "baseline.txt"), "baseline\n")
       assert {_output, 0} = System.cmd("git", ["add", "baseline.txt"], cd: workspace)
-      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
 
-      File.write!(Path.join(workspace, "progress.txt"), "dirty handoff work from a previous turn\n")
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Baseline"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      File.write!(
+        Path.join(workspace, "progress.txt"),
+        "dirty handoff work from a previous turn\n"
+      )
+
       started_at = DateTime.utc_now()
 
       state = %Orchestrator.State{
@@ -9612,11 +12513,15 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
-      assert correction["summary"] =~ "first-turn-miu-handoff/technical-miu-trace only proves the worker is alive"
+
+      assert correction["summary"] =~
+               "first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive"
     after
       File.rm_rf(test_root)
     end
@@ -9704,11 +12609,111 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
 
-      [correction_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
       correction = correction_path |> File.read!() |> Jason.decode!()
 
       assert correction["source"] == "symphony.runtime.missing-first-durable-event"
-      assert correction["summary"] =~ "technical-miu-trace only proves the worker is alive"
+
+      assert correction["summary"] =~
+               "first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review feedback classification event alone does not bypass first durable event token budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-classification-progress-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 60_000,
+        codex_durable_progress_min_tokens: 100,
+        codex_durable_progress_first_event_max_tokens: 1_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue_id = "issue-review-classification-only"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-REVIEWCLASSIFYONLY",
+        state: "Rework",
+        title: "Review classification only",
+        description: "Review feedback classification is the designed first checkpoint for review rework",
+        labels: []
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      started_at = DateTime.add(DateTime.utc_now(), -2, :second)
+      event_ts = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(events_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "tool.finished",
+          "status" => "passed",
+          "tool" => "review-feedback-classified",
+          "ts" => event_ts
+        }) <> "\n"
+      )
+
+      worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        if Process.alive?(worker_pid) do
+          Process.exit(worker_pid, :kill)
+        end
+      end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: worker_pid,
+            ref: nil,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: started_at,
+            workspace_path: workspace,
+            codex_total_tokens: 1_500
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      state = Orchestrator.reconcile_no_durable_progress_for_test(state)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+
+      [correction_path] =
+        Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+
+      correction = correction_path |> File.read!() |> Jason.decode!()
+
+      assert correction["source"] == "symphony.runtime.missing-first-durable-event"
+
+      assert correction["summary"] =~
+               "first-turn-miu-handoff/technical-miu-trace/review-feedback-classified only proves the worker is alive"
     after
       File.rm_rf(test_root)
     end
@@ -9791,7 +12796,8 @@ defmodule SymphonyElixir.CoreTest do
         codex_total_tokens: 500
       }
 
-      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) < 60_000
+      assert Orchestrator.durable_progress_quiet_ms_for_test(running_entry, DateTime.utc_now()) <
+               60_000
 
       state =
         initial_state
@@ -9965,7 +12971,9 @@ defmodule SymphonyElixir.CoreTest do
              Orchestrator.handle_call(:request_refresh, {self(), make_ref()}, refreshed_state)
 
     assert coalesced_state.tick_token == refreshed_state.tick_token
-    assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
+
+    assert {:noreply, ^coalesced_state} =
+             Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
   end
 
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
@@ -10056,7 +13064,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
-    workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
+    workflow_prompt =
+      "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
 
@@ -10193,7 +13202,8 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+    assert :ok =
+             Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
 
     Workflow.set_workflow_file_path(Path.join(System.tmp_dir!(), "missing-workflow-#{System.unique_integer([:positive])}.md"))
 
@@ -10279,7 +13289,11 @@ defmodule SymphonyElixir.CoreTest do
     try do
       brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
       File.mkdir_p!(brief_dir)
-      File.write!(Path.join(brief_dir, "MT-202.md"), "Current paths: src/lib/session.ts\nTarget shape: resolveGuestSession()\n")
+
+      File.write!(
+        Path.join(brief_dir, "MT-202.md"),
+        "Current paths: src/lib/session.ts\nTarget shape: resolveGuestSession()\n"
+      )
 
       issue = %Issue{
         identifier: "MT-202",
@@ -10461,7 +13475,7 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Commit and push only after focused validation passes"
       assert prompt =~ "Do not run file-discovery commands such as `git ls-files`"
       assert prompt =~ "Do not query broad Linear/GitHub context"
-      assert prompt =~ "Ticket MT-203"
+      assert prompt =~ "Active issue: `MT-203`"
     after
       File.rm_rf(workspace)
     end
@@ -10480,15 +13494,53 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.mkdir_p!(Path.join(workspace, "tests/e2e"))
-      File.write!(Path.join(workspace, "tests/e2e/ui-state-matrix.spec.ts"), "test('matrix placeholder', () => {});\n")
-      {_output, 0} = System.cmd("git", ["add", "tests/e2e/ui-state-matrix.spec.ts"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial matrix spec"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-261-ui-state-e2e-tdd-route-interaction-matrix"], cd: workspace, stderr_to_stdout: true)
-      File.write!(Path.join(workspace, "tests/e2e/ui-state-matrix.spec.ts"), "test('matrix validates shell states', () => {});\n")
+
+      File.write!(
+        Path.join(workspace, "tests/e2e/ui-state-matrix.spec.ts"),
+        "test('matrix placeholder', () => {});\n"
+      )
+
+      {_output, 0} =
+        System.cmd("git", ["add", "tests/e2e/ui-state-matrix.spec.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial matrix spec"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["switch", "-c", "orocsy/cod-261-ui-state-e2e-tdd-route-interaction-matrix"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(
+        Path.join(workspace, "tests/e2e/ui-state-matrix.spec.ts"),
+        "test('matrix validates shell states', () => {});\n"
+      )
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
       File.mkdir_p!(event_dir)
@@ -10537,16 +13589,46 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-203"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-203"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReview fix.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Fix review feedback"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
 
       issue = %Issue{
         identifier: "MT-203",
@@ -10561,7 +13643,15 @@ defmodule SymphonyElixir.CoreTest do
 
       assert String.starts_with?(prompt, "Local handoff recovery checkpoint:")
       assert prompt =~ "no recent passed Orocsy validation/gate evidence"
-      assert prompt =~ "run the smallest validation needed for those changed files"
+      assert prompt =~ "run the smallest validation needed for the changed files listed above"
+      assert prompt =~ "Local commits ahead of `main` (runtime-provided; do not run `git log`)"
+      assert prompt =~ "Fix review feedback"
+      assert prompt =~ "Diffstat versus `main` (runtime-provided; do not run `git diff`)"
+
+      assert prompt =~
+               "Do not run `git log`, `git diff --stat`, or base-branch diff/history commands"
+
+      refute prompt =~ "inspect the focused local diff and local commits"
       assert prompt =~ "Do not restart or broaden implementation"
       assert prompt =~ "focused validation names exact in-scope files/assertions"
       assert prompt =~ "Ticket MT-203"
@@ -10583,13 +13673,35 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-203"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-203"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
 
       feedback_path = Path.join(workspace, "src/features/swipe/SwipeDeck.tsx")
       File.mkdir_p!(Path.dirname(feedback_path))
@@ -10643,6 +13755,1083 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder uses review preflight base branch for runtime git context" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-base-context-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace)
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDevelop base.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Develop base"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/develop", "HEAD"], cd: workspace)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-207"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDevelop base.\n\nReview fix.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nDevelop base.\n\nReview fix.\n\nPending handoff.\n")
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/mt-207",
+          "issue" => "MT-207",
+          "requirements" => %{"base_branch" => "develop"}
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-207",
+        title: "Review rework base context",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-207",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert prompt =~ "Local commits ahead of `origin/develop` (runtime-provided; do not run `git log`)"
+      assert prompt =~ "Diffstat versus `origin/develop` (runtime-provided; do not run `git diff`)"
+      refute prompt =~ "Local commits ahead of `origin/main`"
+      refute prompt =~ "Diffstat versus `origin/main`"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder enforces open correction mode in review rework preflight prompts" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace_root = Path.join(System.tmp_dir!(), "symphony_workspaces")
+
+    workspace =
+      Path.join(
+        workspace_root,
+        "review-rework-open-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-204"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nCorrection fix.\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Correction scoped fix"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260703000000_1.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260703000000_1",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "created_at" => "2026-07-03T00:00:00Z",
+          "summary" => "Fix the cards preference leakage.",
+          "findings" => ["requestCards must not send guest preferences."],
+          "required_corrections" => ["Remove guest preferences from requestCards."]
+        })
+      )
+
+      File.write!(
+        Path.join(inbox, "correction_20260704000000_2.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260704000000_2",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "created_at" => "2026-07-04T00:00:00Z",
+          "summary" => "Fix the newest chat state contract.",
+          "findings" => ["DESIGN.md must include rejected feedback state."],
+          "required_corrections" => ["Update DESIGN.md chat contract."]
+        })
+      )
+
+      brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
+      File.mkdir_p!(brief_dir)
+
+      File.write!(
+        Path.join(brief_dir, "MT-204.md"),
+        "# MT-204 Brief\n\nRemove the no-op cards preference header.\n"
+      )
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/mt-204",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Resolve the open Orocsy correction before the review shortcut.",
+          "issue" => "MT-204",
+          "requirements" => %{
+            "issue_brief" => %{
+              "path" => ".codex/agentic/issue-briefs/MT-204.md",
+              "bytes" => 60
+            }
+          },
+          "review" => %{
+            "pr_number" => 5,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/5",
+            "head_sha" => "abcdef123456",
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 32,
+                "body" => "Remove the no-op cards preference header.",
+                "url" => "https://github.com/acme/nutribuddy/pull/5#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-204",
+        title: "Resolve open correction",
+        description: "Correction flow",
+        state: "Rework",
+        url: "https://example.org/issues/MT-204",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Open correction mode (runtime enforced):")
+      assert prompt =~ "correction-scoped-fix"
+      assert prompt =~ "`git status --short --branch` (runtime-provided)"
+      refute prompt =~ "Local commits ahead of `main` (runtime-provided; do not run `git log`)"
+      refute prompt =~ "Correction scoped fix"
+      assert prompt =~ "Runtime command policy (enforced by the Symphony command guard):"
+
+      assert prompt =~
+               "Issue brief (`.codex/agentic/issue-briefs/MT-204.md`), inlined by the runtime"
+
+      assert prompt =~ "Remove the no-op cards preference header."
+      assert prompt =~ "Open correction execution contract:"
+      assert prompt =~ "Runtime correction dispatch preflight:"
+      assert prompt =~ "Fix the newest chat state contract."
+      assert prompt =~ "DESIGN.md must include rejected feedback state."
+      assert prompt =~ "Update DESIGN.md chat contract."
+      assert prompt =~ "Fix the cards preference leakage."
+      assert prompt =~ "Remove guest preferences from requestCards."
+      assert prompt =~ "requestCards must not send guest preferences."
+
+      assert :binary.match(prompt, "Fix the newest chat state contract.") <
+               :binary.match(prompt, "Fix the cards preference leakage.")
+
+      assert prompt =~ "Do not read test files first"
+      refute prompt =~ "Runtime dispatch preflight:"
+      refute prompt =~ "Current-head review feedback:"
+      refute prompt =~ "Target feedback file(s):"
+      refute prompt =~ "Review rework limits:"
+      refute prompt =~ "Local handoff recovery checkpoint:"
+
+      refute prompt =~
+               "If a dirty/local handoff checkpoint appears above, follow that checkpoint first"
+
+      refute prompt =~ "inspect the focused local diff and local commits"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "review rework command policy covers design document correction paths" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-design-path-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(Path.join(workspace, "design"))
+      File.write!(Path.join(workspace, "DESIGN.md"), "# Design\n")
+      File.write!(Path.join(workspace, "design/Mobile Top Area.html"), "<main></main>\n")
+      File.write!(Path.join(workspace, "design/state.svg"), "<svg></svg>\n")
+      File.write!(Path.join(workspace, "design/export.png"), "png-bytes\n")
+
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(inbox)
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(inbox, "correction_20260703000000_design.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260703000000_design",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Update DESIGN.md and design/Mobile Top Area.html.",
+          "required_corrections" => [
+            "Check `DESIGN.md`, `design/Mobile Top Area.html`, `design/state.svg`, and `design/export.png`."
+          ]
+        })
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "review_rework", "issue" => "MT-DESIGN"})
+      )
+
+      patterns = AppServer.effective_forbidden_command_patterns_for(workspace)
+      rendered = Enum.join(patterns, "\n")
+
+      assert rendered =~ "git\\s+log"
+      assert rendered =~ "git\\s+diff\\s+--stat"
+      assert rendered =~ "git_diff_base_branch_without_path_scope"
+      assert rendered =~ "command_chain_operator_outside_quotes"
+      assert rendered =~ "DESIGN\\.md"
+      assert rendered =~ "design/Mobile\\ Top\\ Area\\.html"
+      assert rendered =~ "design/state\\.svg"
+      assert rendered =~ "design/export\\.png"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder prepends runtime policy violation interrupt when recovering a denied command" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "MT-206",
+      title: "Policy violation recovery",
+      description: "Recovery flow",
+      state: "Rework",
+      url: "https://example.org/issues/MT-206",
+      labels: []
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        policy_violation: %{
+          command: "/bin/zsh -lc 'git log --oneline origin/main..HEAD'",
+          pattern: "(^|\\s|[\"'])git\\s+log(\\s|$)",
+          attempt: 1,
+          max_attempts: 2,
+          scope_access: %{
+            "operation" => "read",
+            "paths" => ["src/features/landing/GuestStartScreen.tsx"],
+            "decision" => "block",
+            "reason_class" => "read_context_controller_not_enabled"
+          }
+        }
+      )
+
+    assert String.starts_with?(
+             prompt,
+             "Runtime command policy interrupt (recovery attempt 1 of 2):"
+           )
+
+    assert prompt =~ "Denied command: `/bin/zsh -lc 'git log --oneline origin/main..HEAD'`"
+
+    assert prompt =~
+             "Requested scope access: read src/features/landing/GuestStartScreen.tsx; decision block (read_context_controller_not_enabled)"
+
+    assert prompt =~ "Do not run that command again"
+    assert prompt =~ "Ticket MT-206"
+  end
+
+  test "agent runner allows one denied command recovery for strict implementation review rework" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-strict-review-rework-recovery-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"]
+          }
+        })
+      )
+
+      assert AgentRunner.policy_violation_recovery_budget_for_test(workspace) == 1
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{"ticket_type" => "test_spec"}
+        })
+      )
+
+      assert AgentRunner.policy_violation_recovery_budget_for_test(workspace) == 2
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "safe direct import read writes read-context policy patch and retries once" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-auto-unblock-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-SCOPE-ACCESS")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        codex_forbidden_command_patterns: ["(^|\\s|[\"'])rg(\\s|$)"],
+        max_turns: 1
+      )
+
+      File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+      File.mkdir_p!(Path.join(workspace, "src/features/landing"))
+      File.mkdir_p!(Path.join(workspace, "tests/unit"))
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(events_dir)
+
+      File.write!(Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"), """
+      import { GuestPreferenceDraft } from "../landing/GuestStartScreen";
+
+      export function useSwipeDraft(draft: GuestPreferenceDraft) {
+        return draft;
+      }
+      """)
+
+      File.write!(
+        Path.join(workspace, "src/features/landing/GuestStartScreen.tsx"),
+        "export type GuestPreferenceDraft = { adults: number };\n"
+      )
+
+      File.write!(Path.join(workspace, "tests/unit/swipe-experience.test.ts"), "test(\"draft\", () => {});\n")
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-ACCESS",
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      base_preflight = %{
+        "mode" => "review_rework",
+        "issue" => "MT-SCOPE-ACCESS",
+        "branch" => "orocsy/mt-scope-access",
+        "requirements" => %{
+          "ticket_type" => "Implementation",
+          "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+          "validation" => %{
+            "commands" => ["pnpm exec vitest run tests/unit/swipe-experience.test.ts"],
+            "files" => []
+          },
+          "scope_bundle" => scope_bundle
+        }
+      }
+
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(base_preflight))
+
+      issue = %Issue{
+        id: "issue-scope-access",
+        identifier: "MT-SCOPE-ACCESS",
+        title: "Scope access auto unblock",
+        description: """
+        ## Ticket Type
+
+        Implementation
+
+        ## Write Scope
+
+        - `src/features/swipe/SwipeExperience.tsx`
+
+        ## Validation
+
+        ```bash
+        pnpm exec vitest run tests/unit/swipe-experience.test.ts
+        ```
+        """,
+        state: "Rework",
+        branch_name: "orocsy/mt-scope-access",
+        url: "https://example.org/issues/MT-SCOPE-ACCESS",
+        labels: []
+      }
+
+      command = ~s(rg -n "GuestPreferenceDraft" src/features/landing/GuestStartScreen.tsx)
+      pattern = "(^|\\s|[\"'])rg(\\s|$)"
+
+      assert {:error, ^command, ^pattern} =
+               AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:retry, 1, scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 command,
+                 pattern,
+                 0,
+                 1
+               )
+
+      assert scope_access["decision"] == "allow_once"
+      assert scope_access["reason_class"] == "safe_read_context"
+
+      patch_files = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
+      assert length(patch_files) == 1
+
+      patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert patch["decision"] == "allow_once"
+      assert get_in(patch, ["entries", Access.at(0), "path"]) == "src/features/landing/GuestStartScreen.tsx"
+      assert get_in(patch, ["entries", Access.at(0), "source"]) == "scope_access.auto.direct_import"
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+      active_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert active_patch["status"] == "active"
+
+      assert Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
+                 entry["source"] == "scope_access.auto.direct_import"
+             end)
+
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 ~s(rg -n "GuestPreferenceDraft" src/features/landing/GuestStartScreen.tsx)
+               )
+
+      assert :ok = SymphonyElixir.DispatchPreflight.consume_turn_policy_patches(workspace)
+      consumed_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert consumed_patch["status"] == "consumed"
+
+      assert {:ok, expired_preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      refute Enum.any?(get_in(expired_preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
+                 entry["source"] == "scope_access.auto.direct_import"
+             end)
+
+      assert {:error, ^command, ^pattern} =
+               AppServer.command_policy_violation_for_test(workspace, command)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "safe nearest caller read is allowed read-only and never promoted to write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-nearest-caller-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-SCOPE-CALLER")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      events_dir = Path.join(workspace, ".orocsy/delivery/events")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        codex_forbidden_command_patterns: ["(^|\\s|[\"'])sed\\s+-n(\\s|$)"],
+        max_turns: 1
+      )
+
+      File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+      File.mkdir_p!(Path.join(workspace, "src/features/landing"))
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(events_dir)
+
+      File.write!(
+        Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"),
+        "export function SwipeExperience() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, "src/features/landing/GuestStartScreen.tsx"), """
+      import { SwipeExperience } from "../swipe/SwipeExperience";
+
+      export function GuestStartScreen() {
+        return <SwipeExperience />;
+      }
+      """)
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-CALLER",
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-CALLER",
+          "branch" => "orocsy/mt-scope-caller",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      issue = %Issue{
+        id: "issue-scope-caller",
+        identifier: "MT-SCOPE-CALLER",
+        title: "Scope caller read",
+        description: "Allow the nearest caller as read-only context",
+        state: "Rework",
+        branch_name: "orocsy/mt-scope-caller",
+        labels: []
+      }
+
+      command = "sed -n 1,80p src/features/landing/GuestStartScreen.tsx"
+
+      assert {:error, ^command, pattern} =
+               AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:retry, 1, scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 command,
+                 pattern,
+                 0,
+                 1
+               )
+
+      assert scope_access["decision"] == "allow_once"
+      assert scope_access["reason_class"] == "safe_read_context"
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+      write_scope = get_in(preflight, ["requirements", "scope_bundle", "write_scope"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
+                 entry["source"] == "scope_access.auto.nearest_caller" and
+                 entry["operation"] == "read"
+             end)
+
+      refute Enum.any?(write_scope, fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx"
+             end)
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, command)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "scope blocker report includes requested path operation policy hash and next action" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-unblock-report-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      issue = %Issue{
+        id: "issue-scope-unblock-report",
+        identifier: "MT-SCOPE-REPORT",
+        title: "Scope unblock report",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      path = "src/features/landing/GuestStartScreen.tsx"
+      policy_hash = "sha256:policy-scope-report"
+      head_sha = "f00dbabe"
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(
+                 workspace,
+                 issue,
+                 scope_unblock_correction_attrs(issue,
+                   path: path,
+                   operation: "read",
+                   head_sha: head_sha,
+                   policy_hash: policy_hash,
+                   next_action: "retry"
+                 )
+               )
+
+      assert report = correction["unblock_report"]
+      assert report["blocker_class"] == "scope_policy_stale"
+      assert report["requested_operation"] == "read"
+      assert report["requested_paths"] == [path]
+      assert report["policy_hash"] == policy_hash
+      assert report["head_sha"] == head_sha
+
+      assert report["next_action"] ==
+               "add read_context or update Linear write scope, then redispatch"
+
+      markdown = File.read!(Path.join(workspace, correction["artifacts"]["markdown"]))
+      assert markdown =~ "## Unblock Report"
+      assert markdown =~ "Worker asked for: read #{path}"
+      assert markdown =~ "Policy hash: #{policy_hash}"
+      assert markdown =~ "Next action: add read_context or update Linear write scope, then redispatch"
+
+      current_state =
+        workspace
+        |> Path.join(".orocsy/delivery/state/current.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert get_in(current_state, ["unblock_report", "worker_asked_for"]) == "read #{path}"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dashboard distinguishes safe read request from write scope expansion" do
+    path = "src/features/landing/GuestStartScreen.tsx"
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         blocked: [
+           %{
+             "issue" => "MT-READ",
+             "blocker_class" => "safe_read_context_required",
+             "worker_asked_for" => "read #{path}",
+             "next_action" => "add read_context or update Linear write scope, then redispatch",
+             "policy_hash" => "sha256:read-policy",
+             "created_at" => "2026-07-09T00:00:00Z"
+           },
+           %{
+             "issue" => "MT-WRITE",
+             "blocker_class" => "write_scope_expansion_required",
+             "worker_asked_for" => "write #{path}",
+             "next_action" => "update Linear write scope or narrow the worker command, then redispatch",
+             "policy_hash" => "sha256:write-policy",
+             "created_at" => "2026-07-09T00:00:01Z"
+           }
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+
+    assert rendered =~ "Blocked"
+    assert rendered =~ "MT-READ"
+    assert rendered =~ "safe_read_context_required"
+    assert rendered =~ "asked=read #{path}"
+    assert rendered =~ "MT-WRITE"
+    assert rendered =~ "write_scope_expansion_required"
+    assert rendered =~ "asked=write #{path}"
+  end
+
+  test "Linear correction comment explains why retry is parked until policy changes" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-unblock-comment-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      issue = %Issue{
+        id: "issue-scope-unblock-comment",
+        identifier: "MT-SCOPE-COMMENT",
+        title: "Scope unblock comment",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      path = "src/features/landing/GuestStartScreen.tsx"
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(
+                 workspace,
+                 issue,
+                 scope_unblock_correction_attrs(issue,
+                   path: path,
+                   operation: "read",
+                   next_action: "retry",
+                   policy_hash: "sha256:unchanged-scope-policy"
+                 )
+               )
+
+      body =
+        Orchestrator.runtime_failure_comment_for_test(issue, correction, %{
+          kind: "scope_access",
+          source_status: "blocked",
+          next_action: "retry",
+          summary: "Scope access retry is parked until policy changes."
+        })
+
+      assert body =~ "Unblock report:"
+      assert body =~ "Blocked: scope_policy_stale"
+      assert body =~ "Worker asked for: read #{path}"
+      assert body =~ "Why no retry: same head and same policy hash"
+      assert body =~ "Next action: add read_context or update Linear write scope, then redispatch"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "unsafe write expansion creates correction and does not retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-write-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      set -eu
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$line" in
+          *'"method":"initialize"'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"method":"thread/start"'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-write"}}}'
+            ;;
+          *'"method":"turn/start"'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-write"}}}'
+            printf '%s\\n' '{"method":"codex/event/response_item","params":{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"apply_patch *** Update File: src/features/landing/GuestStartScreen.tsx\\"}"}}}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_forbidden_command_patterns: ["apply_patch"],
+        max_turns: 3
+      )
+
+      issue = %Issue{
+        id: "issue-scope-write",
+        identifier: "MT-SCOPE-WRITE",
+        title: "Scope write block",
+        description: """
+        ## Ticket Type
+
+        Implementation
+
+        ## Write Scope
+
+        - `src/features/swipe/SwipeExperience.tsx`
+
+        ## Validation
+
+        ```bash
+        pnpm test
+        ```
+        """,
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SCOPE-WRITE",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil)
+
+      trace = File.read!(trace_file)
+      assert length(Regex.scan(~r/^RUN$/m, trace)) == 1
+
+      workspace = Path.join(workspace_root, "MT-SCOPE-WRITE")
+      corrections = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert [correction] = corrections
+      assert correction["source"] == "symphony.runtime.scope-access"
+      assert correction["guard"]["reason_class"] == "write_scope_expansion_requires_operator"
+      assert correction["guard"]["retry_fingerprint"]["source"] == "symphony.runtime.scope-access"
+      assert correction["guard"]["retry_fingerprint"]["operation"] == "write"
+      assert correction["guard"]["retry_fingerprint"]["paths"] == ["src/features/landing/GuestStartScreen.tsx"]
+      assert correction["guard"]["retry_fingerprint"]["policy_hash"] =~ "sha256:"
+      assert correction["unblock_report"]["blocker_class"] == "write_scope_expansion_required"
+
+      assert correction["unblock_report"]["next_action"] ==
+               "update Linear write scope or narrow the worker command, then redispatch"
+
+      assert Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json")) == []
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "knowledge ledger loads unchanged read context by git blob" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-knowledge-unchanged-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-KNOWLEDGE")
+      path = "src/features/landing/GuestStartScreen.tsx"
+
+      File.mkdir_p!(Path.dirname(Path.join(workspace, path)))
+      File.write!(Path.join(workspace, path), "export type GuestPreferenceDraft = { adults: number };\n")
+      write_knowledge_preflight!(workspace, "MT-KNOWLEDGE")
+
+      assert {:ok, entry} =
+               SymphonyElixir.KnowledgeLedger.append(workspace, %{
+                 issue: "MT-KNOWLEDGE",
+                 path: path,
+                 summary: "Defines GuestPreferenceDraft for the guest setup handoff.",
+                 relevant_symbols: ["GuestPreferenceDraft"]
+               })
+
+      assert entry["git_blob"] != ""
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == path and
+                 entry["source"] == "knowledge_ledger.issue" and
+                 entry["operation"] == "read" and
+                 entry["expires"] == "file_changes" and
+                 entry["summary"] =~ "GuestPreferenceDraft"
+             end)
+
+      assert [%{"path" => ^path, "status" => "fresh"}] = get_in(preflight, ["knowledge_ledger", "fresh"])
+      assert get_in(preflight, ["knowledge_ledger", "stale"]) == []
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "knowledge ledger marks changed blob stale and permits bounded refresh" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-knowledge-stale-refresh-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-KNOWLEDGE-STALE")
+      path = "src/features/landing/GuestStartScreen.tsx"
+
+      File.mkdir_p!(Path.dirname(Path.join(workspace, path)))
+      File.write!(Path.join(workspace, path), "export const guestDraftVersion = 1;\n")
+      write_knowledge_preflight!(workspace, "MT-KNOWLEDGE-STALE")
+
+      assert {:ok, stored} =
+               SymphonyElixir.KnowledgeLedger.append(workspace, %{
+                 issue: "MT-KNOWLEDGE-STALE",
+                 path: path,
+                 summary: "Defines the first guest draft handoff version.",
+                 relevant_symbols: ["guestDraftVersion"]
+               })
+
+      File.write!(Path.join(workspace, path), "export const guestDraftVersion = 2;\n")
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      assert [
+               %{
+                 "path" => ^path,
+                 "status" => "stale",
+                 "git_blob" => stored_blob,
+                 "current_git_blob" => current_blob,
+                 "refresh_allowed" => true
+               }
+             ] = get_in(preflight, ["knowledge_ledger", "stale"])
+
+      assert stored_blob == stored["git_blob"]
+      refute current_blob == stored["git_blob"]
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == path and
+                 entry["source"] == "knowledge_ledger.stale_refresh" and
+                 entry["operation"] == "read" and
+                 entry["expires"] == "turn" and
+                 entry["stale_git_blob"] == stored["git_blob"]
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "parent workstream knowledge is read context only and cannot broaden write scope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-knowledge-parent-read-only-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      producer_workspace = Path.join(test_root, "MT-KNOWLEDGE-PRODUCER")
+      workspace = Path.join(test_root, "MT-KNOWLEDGE-CHILD")
+      parent = "MT-KNOWLEDGE-PARENT"
+      path = "src/features/landing/GuestStartScreen.tsx"
+      write_path = "src/features/swipe/SwipeExperience.tsx"
+
+      File.mkdir_p!(Path.dirname(Path.join(producer_workspace, path)))
+      File.mkdir_p!(Path.dirname(Path.join(workspace, path)))
+      File.mkdir_p!(Path.dirname(Path.join(workspace, write_path)))
+      File.write!(Path.join(producer_workspace, path), "export function GuestStartScreen() { return null; }\n")
+      File.write!(Path.join(workspace, path), "export function GuestStartScreen() { return null; }\n")
+      File.write!(Path.join(workspace, write_path), "export function SwipeExperience() { return null; }\n")
+      write_knowledge_preflight!(workspace, "MT-KNOWLEDGE-CHILD", parent, [write_path])
+
+      assert {:ok, _entry} =
+               SymphonyElixir.KnowledgeLedger.append(producer_workspace, %{
+                 scope: "parent",
+                 parent: parent,
+                 path: path,
+                 operation: "write",
+                 summary: "GuestStartScreen owns the parent handoff entry point.",
+                 relevant_symbols: ["GuestStartScreen"]
+               })
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      read_context = get_in(preflight, ["requirements", "scope_bundle", "read_context"])
+      write_scope = get_in(preflight, ["requirements", "scope_bundle", "write_scope"])
+
+      assert Enum.any?(read_context, fn entry ->
+               entry["path"] == path and
+                 entry["source"] == "knowledge_ledger.parent" and
+                 entry["operation"] == "read"
+             end)
+
+      refute Enum.any?(write_scope, fn entry -> entry["path"] == path end)
+      assert Enum.any?(write_scope, fn entry -> entry["path"] == write_path and entry["operation"] == "write" end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "prompt builder suppresses pushed handoff checkpoint in review rework preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
@@ -10656,21 +14845,73 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-205"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       feedback_path = Path.join(workspace, "tests/integration/cards-route.test.ts")
       File.mkdir_p!(Path.dirname(feedback_path))
       File.write!(feedback_path, "test('cards route', () => expect(true).toBe(true));\n")
-      {_output, 0} = System.cmd("git", ["add", "tests/integration/cards-route.test.ts"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add cards route test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "tests/integration/cards-route.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add cards route test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -10732,6 +14973,498 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder suppresses clean ahead local checkpoint in review rework prompts" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-clean-ahead-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-246-review-rework"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      feedback_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      File.mkdir_p!(Path.dirname(feedback_path))
+      File.write!(feedback_path, "export const cardsRequest = true;\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Apply prior COD-246 work"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/main"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-246-review-rework",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Fix current-head feedback.",
+          "issue" => "COD-246",
+          "review" => %{
+            "pr_number" => 103,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/103",
+            "head_sha" => "61f167a782",
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 105,
+                "body" => "Apply guest safety preferences before loading cards.",
+                "url" => "https://github.com/acme/nutribuddy/pull/103#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "COD-246",
+        title: "Fix current review feedback",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/COD-246",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Runtime dispatch preflight:")
+      assert prompt =~ "Apply guest safety preferences before loading cards."
+      refute prompt =~ "Local handoff recovery checkpoint:"
+      refute prompt =~ "Local commits ahead of `origin/main`"
+      refute prompt =~ "Ticket COD-246"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder uses minimal handoff prompt for dirty validated review rework" do
+    workflow_prompt = """
+    You must read AGENTS.md, load every project doc, and inspect historical delivery logs.
+    Ticket {{ issue.identifier }}
+    """
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-dirty-validated-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-266-review-rework"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["update-ref", "refs/remotes/origin/orocsy/cod-266-review-rework", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/cod-266-review-rework"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      source_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
+      File.mkdir_p!(Path.dirname(source_path))
+      File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = false;\n")
+      File.write!(test_path, "test('request cards', () => false);\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add swipe request files"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(source_path, "export const requestCards = true;\n")
+      File.write!(test_path, "test('request cards', () => true);\n")
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(state_dir)
+      validated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"#{validated_at}"}\n)
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-266-review-rework",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Finish dirty validated handoff.",
+          "issue" => "COD-266",
+          "review" => %{
+            "pr_number" => 103,
+            "pr_url" => "https://github.com/acme/nutribuddy/pull/103",
+            "head_sha" => "d47b2d36d6",
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 105,
+                "body" => "Apply guest safety preferences before loading cards.",
+                "url" => "https://github.com/acme/nutribuddy/pull/103#discussion"
+              }
+            ]
+          }
+        })
+      )
+
+      issue = %Issue{
+        identifier: "COD-266",
+        title: "Send bounded guest safety draft",
+        description: "Retry flow",
+        state: "Rework",
+        url: "https://example.org/issues/COD-266",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Dirty validated handoff checkpoint:")
+      assert prompt =~ "Dirty validated review-rework handoff contract:"
+      assert prompt =~ "do not rerun the same validation command"
+      assert prompt =~ "Stage only the intended dirty product/test files"
+      assert prompt =~ "Runtime dispatch preflight:"
+      assert prompt =~ "Apply guest safety preferences before loading cards."
+      refute prompt =~ "Review rework execution contract:"
+      refute prompt =~ "You must read AGENTS.md"
+      refute prompt =~ "Ticket COD-266"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "review rework command policy blocks dirty validated handoff rechecks before commit" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-dirty-validated-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      source_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
+      File.mkdir_p!(Path.dirname(source_path))
+      File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = false;\n")
+      File.write!(test_path, "test('request cards', () => false);\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add swipe request files"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(source_path, "export const requestCards = true;\n")
+      File.write!(test_path, "test('request cards', () => true);\n")
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(state_dir)
+      validated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"#{validated_at}"}\n)
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-266-review-rework",
+          "checkpoint_event" => "review-feedback-classified",
+          "first_task" => "Finish dirty validated handoff.",
+          "issue" => "COD-266",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "validation" => %{
+              "commands" => ["pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"],
+              "files" => ["tests/unit/swipe-experience-request.test.ts"]
+            }
+          },
+          "review" => %{
+            "feedback" => [
+              %{
+                "path" => "src/features/swipe/SwipeExperience.tsx",
+                "line" => 105,
+                "body" => "Apply guest safety preferences before loading cards."
+              }
+            ]
+          }
+        })
+      )
+
+      assert {:error, _command, "dirty_validated_handoff_recheck_before_commit"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff -- src/features/swipe/SwipeExperience.tsx"
+               )
+
+      assert {:error, _command, "dirty_validated_handoff_recheck_before_commit"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "sed -n '1,220p' tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert {:error, _command, "dirty_validated_handoff_recheck_before_commit"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git add src/features/swipe/SwipeExperience.tsx tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git commit -m 'COD-266: send guest safety draft to cards request'"
+               )
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git push")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "review rework command policy allows revalidation when dirty files changed after evidence" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-stale-dirty-validation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      source_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
+      File.mkdir_p!(Path.dirname(source_path))
+      File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = false;\n")
+      File.write!(test_path, "test('request cards', () => false);\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add swipe request files"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"2026-01-01T00:00:00Z"}\n)
+      )
+
+      File.write!(source_path, "export const requestCards = true;\n")
+      File.write!(test_path, "test('request cards', () => true);\n")
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-266-review-rework",
+          "first_task" => "Finish dirty validated handoff.",
+          "issue" => "COD-266"
+        })
+      )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff -- src/features/swipe/SwipeExperience.tsx"
+               )
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder preserves local handoff checkpoint in integration check preflight prompts" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
@@ -10745,19 +15478,52 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "-M", "main"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
 
       feedback_path = Path.join(workspace, "tests/unit/recipe-chat-page-view.test.ts")
       File.mkdir_p!(Path.dirname(feedback_path))
       File.write!(feedback_path, "export const integrationFix = false;\n")
-      {_output, 0} = System.cmd("git", ["add", "tests/unit/recipe-chat-page-view.test.ts"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add integration test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "tests/unit/recipe-chat-page-view.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add integration test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(feedback_path, "export const integrationFix = true;\n")
 
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
@@ -10813,19 +15579,68 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-204"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReady.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add ready state"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-204", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add ready state"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-204", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-204"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -10850,8 +15665,13 @@ defmodule SymphonyElixir.CoreTest do
       assert String.starts_with?(prompt, "Pushed validated handoff checkpoint:")
       assert prompt =~ "Minimal review handoff mode:"
       assert prompt =~ "handoff-ready validation passed"
-      assert prompt =~ "current ticket, current workspace branch/code, and the current GitHub/Codex PR review only"
-      assert prompt =~ "Do not read AGENTS.md, skills, broad project docs, historical delivery logs, unrelated tickets"
+
+      assert prompt =~
+               "current ticket, current workspace branch/code, and the current GitHub/Codex PR review only"
+
+      assert prompt =~
+               "Do not read AGENTS.md, skills, broad project docs, historical delivery logs, unrelated tickets"
+
       assert prompt =~ "Active issue: `MT-204`"
       refute prompt =~ "You must read AGENTS.md"
       refute prompt =~ "Ticket MT-204"
@@ -10877,19 +15697,72 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-213-runtime-foundation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-213-runtime-foundation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nCheckpoint.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add checkpoint"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/cod-213-runtime-foundation", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/cod-213-runtime-foundation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add checkpoint"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["update-ref", "refs/remotes/origin/orocsy/cod-213-runtime-foundation", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/cod-213-runtime-foundation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -10938,19 +15811,68 @@ defmodule SymphonyElixir.CoreTest do
     try do
       File.mkdir_p!(workspace)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-205"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReview fix.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Fix review feedback"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Fix review feedback"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://example.org/repo.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -11018,19 +15940,68 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-204"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReady.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add ready handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-204", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-204"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add ready handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-204", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-204"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       event_dir = Path.join(workspace, ".orocsy/delivery/events")
@@ -11059,7 +16030,10 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-disabled-direct-handoff", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-disabled-direct-handoff", "Human Review"},
+                     50
+
       refute_receive {:memory_tracker_comment, "issue-disabled-direct-handoff", _body}, 50
       refute_receive {:unexpected_review_inspection, _endpoint}, 50
       refute_receive {:unexpected_review_graphql_inspection, _variables}, 50
@@ -11101,20 +16075,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-205"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReady.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add ready handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add ready handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-205", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-205"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -11249,20 +16274,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-208"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-208"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReady locally.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add local handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-208", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-208"], cd: workspace, stderr_to_stdout: true)
-      {local_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add local handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-208", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-208"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {local_head, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       local_head = String.trim(local_head)
       live_head = "remote-advanced-head"
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
@@ -11326,7 +16402,8 @@ defmodule SymphonyElixir.CoreTest do
       assert {:blocked, {:pushed_handoff_head_mismatch, ^local_head, ^live_head}} =
                Orchestrator.complete_pushed_handoff_for_test(issue)
 
-      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-stale-head", "Human Review"}, 50
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-stale-head", "Human Review"},
+                     50
 
       [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
       assert correction["source"] == "symphony.runtime.handoff-review"
@@ -11368,20 +16445,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-206"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-206"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nNeeds feedback fix.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add review state"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-206", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-206"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add review state"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-206", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-206"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -11466,7 +16594,9 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-feedback", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-feedback", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -11504,15 +16634,43 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-206"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-206"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nFeedback fixed.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
 
       commit_env = [
         {"GIT_AUTHOR_DATE", "2026-05-15T09:30:00Z"},
@@ -11526,10 +16684,27 @@ defmodule SymphonyElixir.CoreTest do
           stderr_to_stdout: true
         )
 
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-206", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-206"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-206", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-206"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -11621,9 +16796,12 @@ defmodule SymphonyElixir.CoreTest do
       assert body =~ short_sha
 
       assert_receive {:memory_tracker_comment, "issue-direct-handoff-request-review", tracker_body}
+
       assert tracker_body =~ "without starting another Codex worker"
       assert tracker_body =~ short_sha
-      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-request-review", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-request-review", "Human Review"},
+                     50
 
       events = File.read!(Path.join(event_dir, "events.jsonl"))
       assert events =~ ~s("tool":"codex-review-requested")
@@ -11667,19 +16845,77 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nAnalytics ready.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Add analytics handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-analytics-observability-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add analytics handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "update-ref",
+            "refs/remotes/origin/orocsy/feature-analytics-observability-integration",
+            "HEAD"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "branch",
+            "--set-upstream-to",
+            "origin/orocsy/feature-analytics-observability-integration"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -11690,13 +16926,19 @@ defmodule SymphonyElixir.CoreTest do
 
         cond do
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
-              String.contains?(decoded, "head=acme:orocsy/feature-analytics-observability-integration") ->
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/feature-analytics-observability-integration"
+              ) ->
             {:ok,
              [
                %{
                  "number" => 56,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-                 "head" => %{"sha" => handoff_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+                 "head" => %{
+                   "sha" => handoff_sha,
+                   "ref" => "orocsy/feature-analytics-observability-integration"
+                 }
                }
              ]}
 
@@ -11705,7 +16947,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 56,
                "html_url" => "https://github.com/acme/nutribuddy/pull/56",
-               "head" => %{"sha" => handoff_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "head" => %{
+                 "sha" => handoff_sha,
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               },
                "mergeable" => true,
                "mergeable_state" => "clean"
              }}
@@ -11805,19 +17050,69 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-auth-migration-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/feature-auth-migration-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nReview feedback already fixed.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Resolve review feedback"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-auth-migration-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-auth-migration-integration"], cd: workspace, stderr_to_stdout: true)
-      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Resolve review feedback"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["update-ref", "refs/remotes/origin/orocsy/feature-auth-migration-integration", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/feature-auth-migration-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       head_sha = String.trim(head_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -11859,7 +17154,10 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 54,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-auth-migration-integration"}
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/feature-auth-migration-integration"
+                 }
                }
              ]}
 
@@ -11932,9 +17230,12 @@ defmodule SymphonyElixir.CoreTest do
       assert body =~ String.slice(head_sha, 0, 10)
 
       assert_receive {:memory_tracker_comment, "issue-review-classification-request", tracker_body}
+
       assert tracker_body =~ "no-code review classification checkpoint"
       assert tracker_body =~ "without starting another product-code worker"
-      refute_receive {:memory_tracker_state_update, "issue-review-classification-request", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-review-classification-request", "Human Review"},
+                     50
 
       events = File.read!(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
       assert events =~ ~s("tool":"codex-review-requested")
@@ -11978,20 +17279,78 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nFeedback already resolved.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Resolve feedback"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/cod-205-analytics-miu-flow-instrumentation", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
-      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Resolve feedback"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "update-ref",
+            "refs/remotes/origin/orocsy/cod-205-analytics-miu-flow-instrumentation",
+            "HEAD"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "branch",
+            "--set-upstream-to",
+            "origin/orocsy/cod-205-analytics-miu-flow-instrumentation"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       head_sha = String.trim(head_sha)
 
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
@@ -12039,7 +17398,10 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 55,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/55",
-                 "head" => %{"sha" => head_sha, "ref" => "orocsy/cod-205-analytics-miu-flow-instrumentation"}
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/cod-205-analytics-miu-flow-instrumentation"
+                 }
                }
              ]}
 
@@ -12143,20 +17505,81 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
-      File.write!(Path.join(workspace, "README.md"), "# Test\n\nReview feedback already resolved.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Resolve review feedback"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-analytics-observability-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-analytics-observability-integration"], cd: workspace, stderr_to_stdout: true)
-      {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/feature-analytics-observability-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.write!(
+        Path.join(workspace, "README.md"),
+        "# Test\n\nReview feedback already resolved.\n"
+      )
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Resolve review feedback"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "update-ref",
+            "refs/remotes/origin/orocsy/feature-analytics-observability-integration",
+            "HEAD"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          [
+            "branch",
+            "--set-upstream-to",
+            "origin/orocsy/feature-analytics-observability-integration"
+          ],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       head_sha = String.trim(head_sha)
 
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
@@ -12197,7 +17620,10 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 58,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/58",
-                 "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"}
+                 "head" => %{
+                   "sha" => head_sha,
+                   "ref" => "orocsy/feature-analytics-observability-integration"
+                 }
                }
              ]}
 
@@ -12206,7 +17632,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 58,
                "html_url" => "https://github.com/acme/nutribuddy/pull/58",
-               "head" => %{"sha" => head_sha, "ref" => "orocsy/feature-analytics-observability-integration"},
+               "head" => %{
+                 "sha" => head_sha,
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               },
                "mergeable" => false,
                "mergeable_state" => "dirty"
              }}
@@ -12258,7 +17687,9 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert :not_ready = Orchestrator.complete_review_classification_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-review-classification-dirty-integration", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-review-classification-dirty-integration", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -12296,19 +17727,50 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {stale_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {stale_head, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       stale_head = String.trim(stale_head)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/cod-205-analytics-miu-flow-instrumentation"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nFresh review feedback arrived.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Advance head"], cd: workspace, stderr_to_stdout: true)
-      {current_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Advance head"], cd: workspace, stderr_to_stdout: true)
+
+      {current_head, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       current_head = String.trim(current_head)
       assert stale_head != current_head
 
@@ -12398,20 +17860,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-254"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-254"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed review fix.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Push review fix"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-254", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-254"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Push review fix"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-254", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-254"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -12496,7 +18009,9 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert {:blocked, :review_pending} = Orchestrator.complete_pushed_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-local-review-request", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-local-review-request", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -12534,20 +18049,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-207"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-207"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed review fix.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Push review fix"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-207", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-207"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Push review fix"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-207", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-207"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -12641,7 +18207,9 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert {:blocked, :review_pending} = Orchestrator.complete_pushed_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-review-pending", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-review-pending", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -12688,20 +18256,75 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/feature-auth-migration-integration"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/feature-auth-migration-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed integration branch.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Push integration branch"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/feature-auth-migration-integration", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/feature-auth-migration-integration"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Push integration branch"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["update-ref", "refs/remotes/origin/orocsy/feature-auth-migration-integration", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd(
+          "git",
+          ["branch", "--set-upstream-to", "origin/orocsy/feature-auth-migration-integration"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -12721,7 +18344,10 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "number" => 54,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-                 "head" => %{"sha" => handoff_sha, "ref" => "orocsy/feature-auth-migration-integration"}
+                 "head" => %{
+                   "sha" => handoff_sha,
+                   "ref" => "orocsy/feature-auth-migration-integration"
+                 }
                }
              ]}
 
@@ -12730,7 +18356,10 @@ defmodule SymphonyElixir.CoreTest do
              %{
                "number" => 54,
                "html_url" => "https://github.com/acme/nutribuddy/pull/54",
-               "head" => %{"sha" => handoff_sha, "ref" => "orocsy/feature-auth-migration-integration"},
+               "head" => %{
+                 "sha" => handoff_sha,
+                 "ref" => "orocsy/feature-auth-migration-integration"
+               },
                "mergeable" => false,
                "mergeable_state" => "dirty"
              }}
@@ -12779,7 +18408,9 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert :not_ready = Orchestrator.complete_pushed_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-dirty-integration", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-handoff-dirty-integration", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -12817,20 +18448,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-252"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-252"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed clean handoff.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Push clean handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-252", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-252"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Push clean handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-252", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-252"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -12906,9 +18588,12 @@ defmodule SymphonyElixir.CoreTest do
       assert body =~ short_sha
 
       assert_receive {:memory_tracker_comment, "issue-direct-clean-handoff-review-missing", tracker_body}
+
       assert tracker_body =~ "without starting another Codex worker"
       assert tracker_body =~ short_sha
-      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-missing", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-missing", "Human Review"},
+                     50
 
       events = File.read!(Path.join(event_dir, "events.jsonl"))
       assert events =~ ~s("tool":"codex-review-requested")
@@ -12950,20 +18635,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-253"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-253"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed clean handoff.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Push clean handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-253", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-253"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Push clean handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-253", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-253"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -13026,7 +18762,8 @@ defmodule SymphonyElixir.CoreTest do
       assert {:blocked, {:clean_codex_review_lookup_failed, {:error, _reason}}} =
                Orchestrator.complete_pushed_handoff_for_test(issue)
 
-      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-lookup-fails", "Human Review"}, 50
+      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-lookup-fails", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -13064,20 +18801,71 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["switch", "-c", "orocsy/mt-251"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", "orocsy/mt-251"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nPushed clean handoff.\n")
-      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["commit", "-m", "Push clean handoff"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-251", "HEAD"], cd: workspace, stderr_to_stdout: true)
-      {_output, 0} = System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-251"], cd: workspace, stderr_to_stdout: true)
-      {handoff_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Push clean handoff"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/nutribuddy.git"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["update-ref", "refs/remotes/origin/orocsy/mt-251", "HEAD"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["branch", "--set-upstream-to", "origin/orocsy/mt-251"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {handoff_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
       handoff_sha = String.trim(handoff_sha)
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
@@ -13145,7 +18933,9 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       assert {:blocked, :review_pending} = Orchestrator.complete_pushed_handoff_for_test(issue)
-      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-pending", "Human Review"}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-direct-clean-handoff-review-pending", "Human Review"},
+                     50
     after
       File.rm_rf(test_root)
     end
@@ -14201,7 +19991,10 @@ defmodule SymphonyElixir.CoreTest do
 
       pushed_handoff_sha = fn ->
         workspace = Path.join(workspace_root, "MT-249")
-        {head_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+        {head_sha, 0} =
+          System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
         String.trim(head_sha)
       end
 
@@ -14772,10 +20565,15 @@ defmodule SymphonyElixir.CoreTest do
 
   test "pending review correction stays parked while fresh Codex review request is pending" do
     test_root =
-      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-pending-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-review-correction-pending-#{System.unique_integer([:positive])}"
+      )
 
     try do
-      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-pending")
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(test_root, "issue-pending-review-correction-pending")
+
       head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
       feedback_at = iso_seconds(-300)
       request_at = iso_seconds(-30)
@@ -14793,7 +20591,10 @@ defmodule SymphonyElixir.CoreTest do
       assert parked["status"] == "open"
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-      refute_receive {:memory_tracker_state_update, "issue-pending-review-correction-pending", _state}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-pending-review-correction-pending", _state},
+                     50
+
       refute_receive {:github_post, _endpoint, _fields}, 50
     after
       File.rm_rf(test_root)
@@ -14802,20 +20603,27 @@ defmodule SymphonyElixir.CoreTest do
 
   test "continuation review-rework correction stays parked while external review is pending" do
     test_root =
-      Path.join(System.tmp_dir!(), "symphony-elixir-continuation-review-correction-pending-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-continuation-review-correction-pending-#{System.unique_integer([:positive])}"
+      )
 
     try do
       {issue, workspace, correction} =
-        pending_review_correction_fixture(test_root, "issue-continuation-review-correction-pending", %{
-          source: "continuation-review-rework",
-          summary: "External review result is still pending for pushed clean head",
-          findings: [
-            "Branch is clean and synced to origin at 6c42573; latest automated review still targets an older commit."
-          ],
-          required_corrections: [
-            "Retry/monitor PR state until external review posts for commit 6c42573; then dispatch only if new current-head feedback exists."
-          ]
-        })
+        pending_review_correction_fixture(
+          test_root,
+          "issue-continuation-review-correction-pending",
+          %{
+            source: "continuation-review-rework",
+            summary: "External review result is still pending for pushed clean head",
+            findings: [
+              "Branch is clean and synced to origin at 6c42573; latest automated review still targets an older commit."
+            ],
+            required_corrections: [
+              "Retry/monitor PR state until external review posts for commit 6c42573; then dispatch only if new current-head feedback exists."
+            ]
+          }
+        )
 
       head_sha = "6c425739b51d7ffdde65e3469e8d2f38421d1736"
       request_at = iso_seconds(-30)
@@ -14832,7 +20640,10 @@ defmodule SymphonyElixir.CoreTest do
       assert parked["status"] == "open"
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-      refute_receive {:memory_tracker_state_update, "issue-continuation-review-correction-pending", _state}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-continuation-review-correction-pending", _state},
+                     50
+
       refute_receive {:github_post, _endpoint, _fields}, 50
     after
       File.rm_rf(test_root)
@@ -14841,20 +20652,27 @@ defmodule SymphonyElixir.CoreTest do
 
   test "review rework continuation correction stays parked while provider result is pending" do
     test_root =
-      Path.join(System.tmp_dir!(), "symphony-elixir-review-rework-continuation-correction-pending-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-continuation-correction-pending-#{System.unique_integer([:positive])}"
+      )
 
     try do
       {issue, workspace, correction} =
-        pending_review_correction_fixture(test_root, "issue-review-rework-continuation-correction-pending", %{
-          source: "review-rework-continuation",
-          summary: "Provider result pending after pushed fix",
-          findings: [
-            "Branch is clean and synced to origin at fbd1f7a; latest automated result still targets an older commit."
-          ],
-          required_corrections: [
-            "Wait for provider result for fbd1f7a; retry state inspection later before moving tracker state."
-          ]
-        })
+        pending_review_correction_fixture(
+          test_root,
+          "issue-review-rework-continuation-correction-pending",
+          %{
+            source: "review-rework-continuation",
+            summary: "Provider result pending after pushed fix",
+            findings: [
+              "Branch is clean and synced to origin at fbd1f7a; latest automated result still targets an older commit."
+            ],
+            required_corrections: [
+              "Wait for provider result for fbd1f7a; retry state inspection later before moving tracker state."
+            ]
+          }
+        )
 
       head_sha = "fbd1f7ace58e2c60ce89589db38e652c4286834e"
       request_at = iso_seconds(-30)
@@ -14871,7 +20689,10 @@ defmodule SymphonyElixir.CoreTest do
       assert parked["status"] == "open"
       assert Workspace.blocking_correction_in_workspace?(workspace)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-      refute_receive {:memory_tracker_state_update, "issue-review-rework-continuation-correction-pending", _state}, 50
+
+      refute_receive {:memory_tracker_state_update, "issue-review-rework-continuation-correction-pending", _state},
+                     50
+
       refute_receive {:github_post, _endpoint, _fields}, 50
     after
       File.rm_rf(test_root)
@@ -14880,10 +20701,15 @@ defmodule SymphonyElixir.CoreTest do
 
   test "pending review correction resolves to rework when fresh current-head feedback arrives" do
     test_root =
-      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-feedback-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-review-correction-feedback-#{System.unique_integer([:positive])}"
+      )
 
     try do
-      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-feedback")
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(test_root, "issue-pending-review-correction-feedback")
+
       head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
       request_at = iso_seconds(-300)
       feedback_at = iso_seconds(-30)
@@ -14897,6 +20723,7 @@ defmodule SymphonyElixir.CoreTest do
       assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
 
       assert_receive {:memory_tracker_state_update, "issue-pending-review-correction-feedback", "Rework"}
+
       assert_receive {:memory_tracker_comment, "issue-pending-review-correction-feedback", body}
       assert body =~ "fresh current-head feedback"
       assert body =~ "pull/7"
@@ -14914,10 +20741,15 @@ defmodule SymphonyElixir.CoreTest do
 
   test "pending review correction resolves clean review to review handoff state" do
     test_root =
-      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-clean-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-review-correction-clean-#{System.unique_integer([:positive])}"
+      )
 
     try do
-      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-clean")
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(test_root, "issue-pending-review-correction-clean")
+
       head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
       request_at = iso_seconds(-300)
       clean_at = iso_seconds(-30)
@@ -14934,6 +20766,7 @@ defmodule SymphonyElixir.CoreTest do
       assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
 
       assert_receive {:memory_tracker_state_update, "issue-pending-review-correction-clean", "Human Review"}
+
       assert_receive {:memory_tracker_comment, "issue-pending-review-correction-clean", body}
       assert body =~ "clean current review"
       assert body =~ "Human Review"
@@ -14950,12 +20783,17 @@ defmodule SymphonyElixir.CoreTest do
 
   test "pending review correction re-requests stale Codex review without dispatching a worker" do
     test_root =
-      Path.join(System.tmp_dir!(), "symphony-elixir-pending-review-correction-stale-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-review-correction-stale-#{System.unique_integer([:positive])}"
+      )
 
     try do
       Application.put_env(:symphony_elixir, :codex_review_request_stale_after_ms, 1)
 
-      {issue, workspace, correction} = pending_review_correction_fixture(test_root, "issue-pending-review-correction-stale")
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(test_root, "issue-pending-review-correction-stale")
+
       head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
       feedback_at = iso_seconds(-30)
       request_at = iso_seconds(-10)
@@ -14969,6 +20807,7 @@ defmodule SymphonyElixir.CoreTest do
       assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
 
       assert_receive {:github_post, "repos/acme/nutribuddy/issues/7/comments", %{"body" => "@codex review"}}
+
       assert_receive {:memory_tracker_comment, "issue-pending-review-correction-stale", body}
       assert body =~ "re-requested Codex review"
 
@@ -14979,6 +20818,55 @@ defmodule SymphonyElixir.CoreTest do
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
       Application.delete_env(:symphony_elixir, :codex_review_request_stale_after_ms)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "design document retry correction is dispatchable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-design-doc-retry-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["In Progress"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-design-doc-retry-correction",
+        identifier: "COD-273",
+        title: "Design Source: Responsive Feature Surface Pack",
+        state: "In Progress",
+        branch_name: "orocsy/cod-273"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert {:ok, _correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "controller.audit.incomplete-miu",
+                 source_status: "failed",
+                 summary: "COD-273 needs a retry because DESIGN.md is missing the state matrix.",
+                 findings: [
+                   "DESIGN.md lacks the Responsive Interaction State Matrix required by the issue brief."
+                 ],
+                 required_corrections: [
+                   "Edit DESIGN.md and .codex/agentic/issue-briefs/COD-273.md, then run pnpm lint and record gate.post-miu evidence."
+                 ],
+                 next_action: "retry"
+               })
+
+      state = empty_orchestrator_state()
+
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
       File.rm_rf(test_root)
     end
   end
@@ -15117,6 +21005,181 @@ defmodule SymphonyElixir.CoreTest do
       "created_at" => created_at,
       "html_url" => "https://github.com/acme/nutribuddy/pull/7#issuecomment-clean"
     }
+  end
+
+  defp write_scope_retry_preflight!(workspace, issue_identifier, head_sha, policy_hash, scope_bundle \\ nil) do
+    state_dir = Path.join(workspace, ".orocsy/delivery/state")
+    File.mkdir_p!(state_dir)
+
+    scope_bundle =
+      scope_bundle ||
+        %{
+          "policy_hash" => policy_hash,
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        }
+
+    File.write!(
+      Path.join(state_dir, "dispatch-preflight.json"),
+      Jason.encode!(%{
+        "mode" => "review_rework",
+        "issue" => issue_identifier,
+        "branch" => "orocsy/#{String.downcase(issue_identifier)}",
+        "policy_hash" => policy_hash,
+        "review" => %{
+          "head_sha" => head_sha,
+          "head_ref" => "orocsy/#{String.downcase(issue_identifier)}"
+        },
+        "requirements" => %{
+          "ticket_type" => "Implementation",
+          "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+          "scope_bundle" => scope_bundle
+        }
+      })
+    )
+  end
+
+  defp write_scope_retry_correction!(workspace, issue, head_sha, policy_hash) do
+    inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+    File.mkdir_p!(inbox)
+
+    File.write!(
+      Path.join(inbox, "correction_20260709000000_stale_scope.json"),
+      Jason.encode!(%{
+        "correction_id" => "correction_20260709000000_stale_scope",
+        "status" => "open",
+        "source" => "symphony.runtime.scope-access",
+        "source_status" => "retryable",
+        "summary" => "Scope policy stale for src/features/landing/GuestStartScreen.tsx",
+        "findings" => [
+          "Worker requested read src/features/landing/GuestStartScreen.tsx under unchanged policy #{policy_hash}."
+        ],
+        "required_corrections" => [
+          "Update src/features/swipe/SwipeExperience.tsx or add read context, then rerun focused validation."
+        ],
+        "next_action" => "retry",
+        "guard" => %{
+          "scope_access" => %{
+            "operation" => "read",
+            "paths" => ["src/features/landing/GuestStartScreen.tsx"],
+            "command_fingerprint" => "scope-read-guest-start"
+          },
+          "retry_fingerprint" => %{
+            "issue" => issue.identifier,
+            "issue_id" => issue.id,
+            "source" => "symphony.runtime.scope-access",
+            "head_sha" => head_sha,
+            "policy_hash" => policy_hash,
+            "operation" => "read",
+            "paths" => ["src/features/landing/GuestStartScreen.tsx"],
+            "command_fingerprint" => "scope-read-guest-start"
+          }
+        },
+        "issue" => issue.identifier,
+        "issue_id" => issue.id,
+        "created_at" => "2026-07-09T00:00:00Z",
+        "resolved_at" => nil,
+        "resolution_summary" => ""
+      })
+    )
+  end
+
+  defp scope_unblock_correction_attrs(issue, opts) do
+    path = Keyword.fetch!(opts, :path)
+    operation = Keyword.get(opts, :operation, "read")
+    head_sha = Keyword.get(opts, :head_sha, "abc123")
+    policy_hash = Keyword.get(opts, :policy_hash, "sha256:scope-policy")
+    next_action = Keyword.get(opts, :next_action, "retry")
+    reason_class = Keyword.get(opts, :reason_class, "read_context_controller_not_enabled")
+
+    %{
+      source: "symphony.runtime.scope-access",
+      source_status: "retryable",
+      summary: "Scope policy stale for #{path}",
+      findings: [
+        "Worker requested #{operation} #{path} under unchanged policy #{policy_hash}."
+      ],
+      required_corrections: [
+        "Update issue scope, add read context, or narrow the worker command before redispatch."
+      ],
+      next_action: next_action,
+      guard: %{
+        "scope_access" => %{
+          "operation" => operation,
+          "paths" => [path],
+          "command_fingerprint" => "scope-access-#{operation}"
+        },
+        "decision" => "block",
+        "reason_class" => reason_class,
+        "retry_fingerprint" => %{
+          "issue" => issue.identifier,
+          "issue_id" => issue.id,
+          "source" => "symphony.runtime.scope-access",
+          "head_sha" => head_sha,
+          "policy_hash" => policy_hash,
+          "operation" => operation,
+          "paths" => [path],
+          "command_fingerprint" => "scope-access-#{operation}"
+        }
+      }
+    }
+  end
+
+  defp write_knowledge_preflight!(workspace, issue_identifier, parent_identifier \\ nil, write_paths \\ []) do
+    state_dir = Path.join(workspace, ".orocsy/delivery/state")
+    File.mkdir_p!(state_dir)
+
+    write_scope =
+      Enum.map(write_paths, fn path ->
+        %{
+          "path" => path,
+          "source" => "test.write_scope",
+          "operation" => "write",
+          "expires" => "branch"
+        }
+      end)
+
+    scope_bundle =
+      SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+        "issue" => issue_identifier,
+        "write_scope" => write_scope,
+        "read_context" => [],
+        "conflict_scope" => [],
+        "denied_scope" => []
+      })
+
+    requirements =
+      %{
+        "identifier" => issue_identifier,
+        "ticket_type" => "Implementation",
+        "write_scope" => write_paths,
+        "scope_bundle" => scope_bundle
+      }
+      |> then(fn requirements ->
+        if is_binary(parent_identifier) and parent_identifier != "" do
+          Map.put(requirements, "feature_group", parent_identifier)
+        else
+          requirements
+        end
+      end)
+
+    File.write!(
+      Path.join(state_dir, "dispatch-preflight.json"),
+      Jason.encode!(%{
+        "mode" => "review_rework",
+        "issue" => issue_identifier,
+        "requirements" => requirements
+      })
+    )
   end
 
   defp empty_orchestrator_state do

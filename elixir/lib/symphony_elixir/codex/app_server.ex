@@ -4,7 +4,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, DispatchPreflight, PathSafety, SSH, TokenTelemetry, Workspace}
+
+  alias SymphonyElixir.{
+    Codex.DynamicTool,
+    Config,
+    DispatchPreflight,
+    PathSafety,
+    ScopeAccess,
+    SSH,
+    TokenTelemetry,
+    Workspace
+  }
 
   @initialize_id 1
   @thread_start_id 2
@@ -49,11 +59,19 @@ defmodule SymphonyElixir.Codex.AppServer do
     "vercel@openai-curated"
   ]
   @worker_disabled_mcp_servers []
+  @review_rework_command_chain_pattern "command_chain_operator_outside_quotes"
+  @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
+  @review_rework_dirty_validated_handoff_recheck_pattern "dirty_validated_handoff_recheck_before_commit"
   @review_rework_forbidden_command_patterns [
+    @review_rework_command_chain_pattern,
+    @review_rework_dirty_validated_handoff_recheck_pattern,
     "(^|\\s|[\"'])rg(\\s|$)",
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
     "(^|\\s|[\"'])find(\\s|$)",
+    "(^|\\s|[\"'])git\\s+log(\\s|$)",
+    "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
+    @review_rework_git_diff_base_pattern,
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
     "(^|\\s|[\"'])ls(\\s|$)"
   ]
@@ -546,15 +564,16 @@ defmodule SymphonyElixir.Codex.AppServer do
     This thread exists only to resolve current-head PR review feedback already named in the user prompt.
     Do not load Codex skills, plugins, apps, MCP tools, broad project docs, prior session JSONL, or unrelated issue history.
     Do not refetch GitHub or Linear review text when the prompt already includes the current-head feedback body.
-    Before the `review-feedback-classified` first-action shortcut or a dirty/local handoff shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`. If guidance or the dispatch preflight reports any open Orocsy correction, that correction is the first task: read only the exact named code/test file, make the smallest in-scope fix or record a scoped blocker, run focused validation, and resolve the correction only after evidence is recorded. Do not append `review-feedback-classified`, run validation-only retries, commit, push, or request review while any open correction remains.
-    Only when guidance reports no open corrections and there is no dirty/local handoff checkpoint, your first terminal action must be exactly: `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`. Classify the supplied current-head feedback from the prompt before any file read.
+    Before a dirty/local handoff shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`. If guidance or the dispatch preflight reports any open Orocsy correction, that correction is the first task: read only the exact named code/test file, make the smallest in-scope fix or record a scoped blocker, run focused validation, and resolve the correction only after evidence is recorded. Do not append `review-feedback-classified`, run validation-only retries, commit, push, or request review while any open correction remains.
+    When guidance reports no open corrections and there is no dirty/local handoff checkpoint, do not append `review-feedback-classified` as a standalone first action. The supplied current-head feedback is already classified enough to begin; read only the referenced in-scope file range, then make the scoped fix or record an explicit blocker.
     Do not run broad rg, grep, find, ls, git ls-files, mutating gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
     If current-head feedback or an Orocsy correction names exact files and a symbol lookup is truly needed after the active checkpoint, use only bounded `rg -n "literal" <exact named file...>` over those named files. Never use grep, recursive flags, or bare directories such as `src`, `app`, `lib`, or `tests`.
+    For implementation-child review rework, shared-file or owned-by-other notes are not automatically readable. Read only write-scope files plus shared files explicitly labeled read-only/context/support; never read files listed as out of scope or owned by another ticket.
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state.
     For review-request handoff comments, use `gh pr comment <pr-number> --body '@codex review'`; never use `gh api --method POST` or issue-comment API endpoints.
     If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff and run focused validation. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit, push, request fresh review after validation passes, and leave Linear state transitions to Symphony's review monitor.
     For Vitest validation, use `--configLoader runner` to avoid Vite writing startup temp files into symlinked `node_modules/.vite-temp`. If the issue brief names a focused test, run the exact `pnpm exec vitest run --configLoader runner <test-file>` command. If the declared full-suite command is `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not run `pnpm test <test-file>` and do not probe or request approval for `node_modules/.vite-temp`.
-    After the `review-feedback-classified` checkpoint, start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
+    Start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
     If the issue brief names an exact write-scope file that does not exist yet, create that exact file; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
     If the issue brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
@@ -577,6 +596,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Treat `.orocsy/delivery/state/dispatch-preflight.json` as read-only runtime context; never patch it to record validation evidence.
     Start from `git status --short --branch`, then read `.orocsy/delivery/issue-brief.md` if present.
     Use exact files, line ranges, data shapes, tests, and validation commands from the issue brief. Do not run `rg`, `grep`, `find`, `git ls-files`, GitHub, or Linear discovery before the first scoped edit unless the issue brief is missing required code-level scope.
+    Shared-file or owned-by-other notes are not automatically readable. Read only write-scope files plus shared files explicitly labeled read-only/context/support; never read files listed as out of scope or owned by another ticket.
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state; use `gh pr create` or `gh pr comment` for PR creation and Codex review requests.
     For Vitest validation, use `--configLoader runner` to avoid Vite writing startup temp files into symlinked `node_modules/.vite-temp`. If the issue brief names a focused test, run the exact `pnpm exec vitest run --configLoader runner <test-file>` command. If the declared full-suite command is `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not run `pnpm test <test-file>` and do not probe or request approval for `node_modules/.vite-temp`.
     If the brief is missing exact write scope, dependencies, target files, target tests, or acceptance criteria, write an Orocsy blocker/correction and stop instead of searching broadly.
@@ -605,7 +625,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     If the preflight PR is unknown, use bounded read-only `gh pr view`/`gh pr list` for the configured integration branch before deciding whether a same-branch PR handoff is missing. If you use `gh api` for PR lookup, it must include `--method GET`; never pass `-f`, `-F`, `--field`, or `--raw-field` without `--method GET`.
     If no PR exists for the configured integration branch after bounded lookup, create exactly one PR for that branch only when the branch contains the intended handoff commits; do not create a new branch.
     For full-suite Vitest validation, if the issue/preflight declares `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not rerun plain `pnpm test` after a `node_modules/.vite-temp` EPERM.
-    If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only `git diff --stat` plus focused diffs for the dirty files. If recent passed Orocsy validation/gate evidence already covers those dirty files and the diff has not changed since that evidence, do not rerun the same validation command before committing; stage, commit, push the existing PR branch, and request fresh review. Rerun exact focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
+    If `git status --short --branch` shows staged or unstaged product edits but no unmerged files, this is dirty handoff recovery. Do not make another product edit first. Inspect only focused `git diff -- <dirty-file>` reads for the dirty files; do not run `git log` or `git diff --stat` — the runtime denies them. If recent passed Orocsy validation/gate evidence already covers those dirty files and the diff has not changed since that evidence, do not rerun the same validation command before committing; stage, commit, push the existing PR branch, and request fresh review. Rerun exact focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
     In dirty handoff recovery, edit again only when focused validation fails and names the exact broken file/assertion.
     If no unmerged files remain and the issue brief has a `Current Validation Rework` section or an open correction names validation failures, treat the turn as validation rework: inspect and edit only the named in-scope helper/test files before rerunning validation.
     In validation rework, do not just rerun the same failing validation command and create the same correction again. First restore the missing export, fallback behavior, or directly named assertion path from the issue brief/correction; then rerun the exact focused validation command.
@@ -624,10 +644,35 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> String.trim()
   end
 
+  @doc """
+  Returns the effective forbidden command patterns for a workspace, merging the
+  configured patterns with the dispatch-mode-specific additions. Used by the
+  prompt builder to surface the command policy to workers instead of leaving it
+  as an invisible tripwire.
+  """
+  @spec effective_forbidden_command_patterns_for(String.t()) :: [String.t()]
+  def effective_forbidden_command_patterns_for(workspace) when is_binary(workspace) do
+    patterns = Config.settings!().codex.forbidden_command_patterns
+    effective_forbidden_command_patterns(workspace, patterns)
+  rescue
+    _error -> []
+  end
+
+  def effective_forbidden_command_patterns_for(_workspace), do: []
+
+  if Mix.env() == :test do
+    def command_policy_violation_for_test(workspace, command) do
+      payload = %{"params" => %{"msg" => %{"command" => command}}}
+      patterns = effective_forbidden_command_patterns_for(workspace)
+      forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
+    end
+  end
+
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case dispatch_preflight_mode(workspace) do
       "review_rework" ->
-        Enum.uniq(patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
+        configured_patterns = review_rework_configured_forbidden_patterns(workspace, patterns)
+        Enum.uniq(configured_patterns ++ @review_rework_forbidden_command_patterns ++ review_rework_path_guard_patterns(workspace))
 
       "fresh_implementation" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
@@ -641,6 +686,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
+
+  defp review_rework_configured_forbidden_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"} = preflight} ->
+        if review_rework_implementation_child?(preflight) do
+          Enum.reject(patterns, &broad_sed_range_forbidden_pattern?/1)
+        else
+          patterns
+        end
+
+      _ ->
+        patterns
+    end
+  rescue
+    _error -> patterns
+  end
+
+  defp review_rework_configured_forbidden_patterns(_workspace, patterns), do: patterns
+
+  defp broad_sed_range_forbidden_pattern?(pattern) when is_binary(pattern) do
+    String.contains?(pattern, "sed -n") and
+      String.contains?(pattern, ["1,(1[6-9]", "260,560p"])
+  end
+
+  defp broad_sed_range_forbidden_pattern?(_pattern), do: false
 
   defp dispatch_preflight_mode(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
@@ -666,6 +736,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_allowed_read_paths(%{} = preflight, workspace) do
+    if review_rework_implementation_child?(preflight) do
+      review_rework_strict_implementation_read_paths(preflight, workspace)
+    else
+      review_rework_broad_read_paths(preflight, workspace)
+    end
+  end
+
+  defp review_rework_broad_read_paths(%{} = preflight, workspace) do
     base_paths =
       (review_rework_feedback_paths(preflight) ++
          review_rework_requirement_paths(preflight) ++
@@ -684,6 +762,105 @@ defmodule SymphonyElixir.Codex.AppServer do
        review_rework_local_import_paths(workspace, base_paths ++ counterpart_paths ++ route_helper_paths))
     |> Enum.uniq()
   end
+
+  defp review_rework_implementation_child?(%{"requirements" => %{"ticket_type" => ticket_type}})
+       when is_binary(ticket_type) do
+    ticket_type
+    |> String.trim()
+    |> String.downcase()
+    |> Kernel.==("implementation")
+  end
+
+  defp review_rework_implementation_child?(_preflight), do: false
+
+  defp review_rework_strict_implementation_read_paths(%{} = preflight, workspace) do
+    (review_rework_feedback_target_paths(preflight) ++
+       review_rework_implementation_write_scope_paths(preflight) ++
+       review_rework_scope_bundle_read_paths(preflight) ++
+       review_rework_implementation_shared_file_paths(preflight) ++
+       review_rework_implementation_validation_paths(preflight) ++
+       review_rework_correction_paths(workspace, :open_only) ++
+       review_rework_validation_metadata_paths(workspace))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_implementation_write_scope_paths(%{"requirements" => %{"write_scope" => write_scope}}) do
+    write_scope
+    |> string_values()
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_implementation_write_scope_paths(_preflight), do: []
+
+  defp review_rework_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+       when is_map(bundle) do
+    (scope_bundle_entry_paths(Map.get(bundle, "write_scope"), ["write", "write-if-conflicted"]) ++
+       scope_bundle_entry_paths(Map.get(bundle, "read_context"), ["read", "search"]))
+    |> Enum.uniq()
+  end
+
+  defp review_rework_scope_bundle_read_paths(_preflight), do: []
+
+  defp scope_bundle_entry_paths(entries, allowed_operations) when is_list(entries) do
+    entries
+    |> Enum.flat_map(fn
+      %{"path" => path, "operation" => operation}
+      when is_binary(path) and (is_binary(operation) or is_nil(operation)) ->
+        if operation in allowed_operations or is_nil(operation) do
+          [normalize_requirement_path(path)]
+        else
+          []
+        end
+
+      %{"path" => path} when is_binary(path) ->
+        [normalize_requirement_path(path)]
+
+      _ ->
+        []
+    end)
+    |> Enum.filter(&review_rework_path_like?/1)
+    |> Enum.uniq()
+  end
+
+  defp scope_bundle_entry_paths(_entries, _allowed_operations), do: []
+
+  defp review_rework_implementation_shared_file_paths(%{"requirements" => %{"shared_files" => shared_files}}) do
+    shared_files
+    |> string_values()
+    |> Enum.filter(&review_rework_read_only_shared_file?/1)
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_implementation_shared_file_paths(_preflight), do: []
+
+  defp review_rework_read_only_shared_file?(value) when is_binary(value) do
+    text = String.downcase(value)
+
+    read_only_context? =
+      String.contains?(text, "read-only") or
+        String.contains?(text, "readonly") or
+        String.contains?(text, "context") or
+        String.contains?(text, "support path")
+
+    excluded? =
+      String.contains?(text, "owned by") or
+        String.contains?(text, "owned-by") or
+        String.contains?(text, "out of scope") or
+        String.contains?(text, "out-of-scope")
+
+    read_only_context? and not excluded?
+  end
+
+  defp review_rework_read_only_shared_file?(_value), do: false
+
+  defp review_rework_implementation_validation_paths(%{"requirements" => %{"validation" => validation}})
+       when is_map(validation) do
+    [Map.get(validation, "commands"), Map.get(validation, "files")]
+    |> Enum.flat_map(&string_values/1)
+    |> Enum.flat_map(&paths_from_requirement_text/1)
+  end
+
+  defp review_rework_implementation_validation_paths(_preflight), do: []
 
   defp review_rework_feedback_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
     feedback
@@ -704,6 +881,18 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp review_rework_feedback_paths(_preflight), do: []
+
+  defp review_rework_feedback_target_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
+    feedback
+    |> Enum.flat_map(fn
+      %{"path" => path} when is_binary(path) and path != "" -> [path]
+      %{"body" => body} -> paths_from_review_rework_text(body)
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp review_rework_feedback_target_paths(_preflight), do: []
 
   defp review_rework_requirement_paths(%{"requirements" => requirements}) when is_map(requirements) do
     requirements
@@ -742,21 +931,23 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp review_rework_referenced_api_route_paths(_preflight, _workspace), do: []
 
-  defp review_rework_correction_paths(workspace) when is_binary(workspace) do
+  defp review_rework_correction_paths(workspace, mode \\ :default)
+
+  defp review_rework_correction_paths(workspace, mode) when is_binary(workspace) do
     workspace
     |> Path.join(".orocsy/delivery/inbox/correction_*.json")
     |> Path.wildcard()
-    |> Enum.flat_map(&review_rework_correction_file_paths(workspace, &1))
+    |> Enum.flat_map(&review_rework_correction_file_paths(workspace, &1, mode))
     |> Enum.uniq()
   end
 
-  defp review_rework_correction_paths(_workspace), do: []
+  defp review_rework_correction_paths(_workspace, _mode), do: []
 
-  defp review_rework_correction_file_paths(workspace, path) do
+  defp review_rework_correction_file_paths(workspace, path, mode) do
     with true <- File.regular?(path),
          {:ok, content} <- File.read(path),
          {:ok, %{} = correction} <- Jason.decode(content),
-         true <- correction_path_reference_allowed?(correction) do
+         true <- correction_path_reference_allowed?(correction, mode) do
       correction
       |> correction_reference_text()
       |> paths_from_review_rework_text()
@@ -768,11 +959,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> []
   end
 
-  defp correction_path_reference_allowed?(%{} = correction) do
+  defp correction_path_reference_allowed?(%{} = correction, :open_only) do
+    open_correction?(correction)
+  end
+
+  defp correction_path_reference_allowed?(%{} = correction, _mode) do
     open_correction?(correction) or runtime_validation_reference_correction?(correction)
   end
 
-  defp correction_path_reference_allowed?(_correction), do: false
+  defp correction_path_reference_allowed?(_correction, _mode), do: false
 
   defp runtime_validation_reference_correction?(%{} = correction) do
     source = correction["source"] |> to_string() |> String.downcase()
@@ -893,7 +1088,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp paths_from_requirement_text(_text), do: []
 
   defp paths_from_review_rework_text(text) when is_binary(text) do
-    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:tsx|ts|jsx|js|mjs|cjs|md|json|yml|yaml|css|scss|html|svg|png))}
     |> Regex.scan(text)
     |> Enum.flat_map(fn captures ->
       captures
@@ -1100,7 +1295,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       ".yml",
       ".yaml",
       ".css",
-      ".scss"
+      ".scss",
+      ".html",
+      ".svg",
+      ".png"
     ]
   end
 
@@ -1297,7 +1495,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     path != "" and
       review_rework_supported_file?(path) and
       (String.contains?(path, "/") or review_rework_root_config_path?(path)) and
-      not String.contains?(path, [" ", "\t", "\n", "\r"]) and
+      not String.contains?(path, ["\t", "\n", "\r"]) and
       not String.starts_with?(path, ["http://", "https://", "origin/"])
   end
 
@@ -1316,7 +1514,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       "wrangler.json",
       "wrangler.jsonc",
       "package.json",
-      "tsconfig.json"
+      "tsconfig.json",
+      "DESIGN.md",
+      "README.md",
+      "AGENTS.md"
     ] or String.starts_with?(path, "vitest.config.")
   end
 
@@ -1327,8 +1528,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp review_rework_path_guard_patterns_for_paths(paths) do
     allowed_paths =
       paths
-      |> Enum.map(&review_rework_allowed_path_pattern/1)
-      |> Enum.join("|")
+      |> Enum.map_join("|", &review_rework_allowed_path_pattern/1)
 
     [
       "(^|\\s|[\"'])sed\\s+-n\\s+\\S+\\s+(?!(?:--\\s+)?(?:#{allowed_paths})(\\s|[\"']|$))",
@@ -1340,11 +1540,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     variants =
       path
       |> review_rework_allowed_path_variants()
-      |> Enum.map(fn variant ->
+      |> Enum.map_join("|", fn variant ->
         escaped = Regex.escape(variant)
         "(?:#{escaped}|'#{escaped}'|\"#{escaped}\")"
       end)
-      |> Enum.join("|")
 
     "(?:#{variants})"
   end
@@ -1682,6 +1881,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       true ->
         case forbidden_command_violation(payload, command_guard) do
           {:error, command, pattern} ->
+            record_scope_access_events(command_guard, command, pattern)
+
             emit_message(
               on_message,
               :forbidden_command,
@@ -1825,6 +2026,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       symlinked_vitest_full_test_command?(command_for_patterns, workspace) ->
         {:error, command, "symlinked_vitest_full_test_requires_configLoader_runner"}
 
+      dirty_validated_handoff_recheck_before_commit?(command_for_patterns, workspace) ->
+        {:error, command, @review_rework_dirty_validated_handoff_recheck_pattern}
+
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
@@ -1874,6 +2078,63 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp record_scope_access_events(%{workspace: workspace}, command, pattern)
+       when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
+    workspace
+    |> scope_access_events(command, pattern)
+    |> Enum.each(&append_scope_access_event(workspace, &1))
+  rescue
+    error ->
+      Logger.warning("Failed to record scope access events: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_scope_access_events(_command_guard, _command, _pattern), do: :ok
+
+  defp scope_access_events(workspace, command, pattern) do
+    ScopeAccess.events(command, pattern, scope_access_policy_bundle(workspace), scope_access_attrs(workspace))
+  end
+
+  defp scope_access_policy_bundle(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"requirements" => %{"scope_bundle" => bundle}}} when is_map(bundle) -> bundle
+      {:ok, %{"requirements" => requirements}} when is_map(requirements) -> requirements
+      {:ok, preflight} when is_map(preflight) -> preflight
+      _ -> %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp scope_access_policy_bundle(_workspace), do: %{}
+
+  defp scope_access_attrs(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, preflight} when is_map(preflight) ->
+        %{
+          "issue" => Map.get(preflight, "issue"),
+          "branch" => Map.get(preflight, "branch"),
+          "dispatch_mode" => Map.get(preflight, "mode")
+        }
+        |> Map.reject(fn {_key, value} -> is_nil(value) end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp scope_access_attrs(_workspace), do: %{}
+
+  defp append_scope_access_event(workspace, event) when is_binary(workspace) and is_map(event) do
+    path = Path.join(workspace, @delivery_event_path)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, Jason.encode!(event) <> "\n", [:append])
+  end
+
+  defp append_scope_access_event(_workspace, _event), do: :ok
 
   defp open_correction_blocks_review_classification?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
@@ -1953,6 +2214,80 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp symlinked_vitest_full_test_command?(_command, _workspace), do: false
+
+  defp dirty_validated_handoff_recheck_before_commit?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    dispatch_preflight_mode(workspace) == "review_rework" and
+      dirty_validated_handoff_pending?(workspace) and
+      dirty_validated_handoff_recheck_command?(command, workspace)
+  rescue
+    _error -> false
+  end
+
+  defp dirty_validated_handoff_recheck_before_commit?(_command, _workspace), do: false
+
+  defp dirty_validated_handoff_pending?(workspace) when is_binary(workspace) do
+    dirty_paths = meaningful_git_dirty_paths(workspace)
+
+    dirty_paths != [] and dirty_paths_validated_after_last_change?(workspace, dirty_paths)
+  end
+
+  defp dirty_validated_handoff_pending?(_workspace), do: false
+
+  defp dirty_paths_validated_after_last_change?(workspace, dirty_paths) do
+    case latest_passed_validation_or_gate_event_at(workspace) do
+      %DateTime{} = validated_at ->
+        Enum.all?(dirty_paths, &dirty_path_not_newer_than?(workspace, &1, validated_at))
+
+      :unknown ->
+        true
+
+      nil ->
+        false
+    end
+  end
+
+  defp dirty_path_not_newer_than?(workspace, path, %DateTime{} = validated_at) do
+    case File.stat(Path.join(workspace, path), time: :posix) do
+      {:ok, %File.Stat{mtime: mtime}} when is_integer(mtime) ->
+        DateTime.diff(DateTime.from_unix!(mtime), validated_at, :second) <= 0
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp dirty_validated_handoff_recheck_command?(command, workspace) do
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    git_diff_command?(normalized) or
+      file_read_of_dirty_path?(normalized, workspace) or
+      validation_command?(normalized)
+  end
+
+  defp git_diff_command?(command) when is_binary(command) do
+    Regex.match?(~r/(^|[\s"'])git\s+diff(\s|["']|$)/, command)
+  end
+
+  defp file_read_of_dirty_path?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    simple_file_read_command?(command) and
+      command
+      |> paths_from_review_rework_text()
+      |> Enum.any?(&(&1 in meaningful_git_dirty_paths(workspace)))
+  end
+
+  defp validation_command?(command) when is_binary(command) do
+    Regex.match?(~r/(^|[\s"'])(?:corepack\s+)?(?:pnpm|npm|yarn|npx)\s+/, command) and
+      String.contains?(command, ["test", "vitest", "lint", "type-check", "typecheck", "build"])
+  end
+
+  defp validation_command?(_command), do: false
 
   defp plain_pnpm_test_command?(command) when is_binary(command) do
     normalized =
@@ -2261,7 +2596,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       not Regex.match?(~r/(^|\s)-[^-\s]*[Rr][^-\s]*(\s|$)/, command) and
       not Regex.match?(~r/(^|\s)--recursive(\s|=|$)/, command) and
       not broad_search_path_token?(command) and
-      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+      not command_chain_operator_outside_quotes?(command) and
+      not Regex.match?(~r/\$\(|`/, command)
   end
 
   defp file_scoped_grep_command?(_command), do: false
@@ -2271,7 +2607,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       (String.contains?(command, "-n") or String.contains?(command, "--line-number")) and
       not Regex.match?(~r/(^|\s)(--files|--glob|-g|--type|-t|--replace|-r)(\s|=|$)/, command) and
       not broad_search_path_token?(command) and
-      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+      not command_chain_operator_outside_quotes?(command) and
+      not Regex.match?(~r/\$\(|`/, command)
   end
 
   defp file_scoped_rg_command?(_command), do: false
@@ -2291,7 +2628,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp broad_search_path_token?(_command), do: false
 
   defp search_path_tokens(command) when is_binary(command) do
-    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)(?=$|[\s"'])/
+    ~r/(?:^|[\s"'])(\.?\/?(?:(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*|(?:opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|package\.json|tsconfig\.json|DESIGN\.md|README\.md|AGENTS\.md|vitest\.config\.[A-Za-z0-9]+)))(?=$|[\s"'])/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_requirement_path(path)]
@@ -2475,6 +2812,104 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> false
   end
 
+  defp latest_passed_validation_or_gate_event_at(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(@delivery_event_path)
+    |> cached_latest_passed_validation_or_gate_event_at()
+  end
+
+  defp latest_passed_validation_or_gate_event_at(_workspace), do: nil
+
+  defp cached_latest_passed_validation_or_gate_event_at(events_path) when is_binary(events_path) do
+    cache_key = {__MODULE__, :latest_passed_validation_or_gate_event_at, events_path}
+
+    case Process.get(cache_key) do
+      {signature, result} ->
+        current_signature = delivery_event_file_signature(events_path)
+
+        if current_signature == signature do
+          result
+        else
+          scan_cached_latest_passed_validation_or_gate_event_at(events_path, cache_key, current_signature)
+        end
+
+      _ ->
+        scan_cached_latest_passed_validation_or_gate_event_at(
+          events_path,
+          cache_key,
+          delivery_event_file_signature(events_path)
+        )
+    end
+  end
+
+  defp scan_cached_latest_passed_validation_or_gate_event_at(events_path, cache_key, signature) do
+    result =
+      if signature == :missing do
+        nil
+      else
+        events_path
+        |> File.stream!()
+        |> Enum.reduce([], fn line, acc -> [String.trim(line) | acc] |> Enum.take(40) end)
+        |> Enum.reverse()
+        |> Enum.reduce(nil, fn line, latest ->
+          case passed_validation_or_gate_event_at(line) do
+            nil -> latest
+            timestamp -> timestamp
+          end
+        end)
+      end
+
+    Process.put(cache_key, {signature, result})
+    result
+  rescue
+    _error ->
+      Process.put(cache_key, {signature, nil})
+      nil
+  end
+
+  defp passed_validation_or_gate_event_at(line) when is_binary(line) do
+    case Jason.decode(line) do
+      {:ok, %{"status" => "passed"} = event} ->
+        event_name = Map.get(event, "event", "") |> to_string()
+        tool = Map.get(event, "tool", "") |> to_string() |> String.downcase()
+        text = inspect(event, limit: :infinity, printable_limit: :infinity) |> String.downcase()
+
+        if passed_validation_or_gate_event?(event_name, tool, text) do
+          event_timestamp(event) || :unknown
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp passed_validation_or_gate_event_at(_line), do: nil
+
+  defp passed_validation_or_gate_event?(event_name, tool, text) do
+    event_name in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+      (event_name == "validation" and String.contains?(text, ["test", "vitest", "typecheck", "lint", "build"])) or
+      (event_name == "tool.finished" and
+         (String.contains?(tool, ["validation", "test", "vitest", "typecheck", "lint", "build"]) or
+            String.contains?(text, ["validation", "test", "vitest", "typecheck", "lint", "build"])))
+  end
+
+  defp event_timestamp(event) when is_map(event) do
+    ["ts", "timestamp", "created_at"]
+    |> Enum.find_value(fn key ->
+      case Map.get(event, key) do
+        value when is_binary(value) -> parse_event_timestamp(value)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp parse_event_timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
+
   defp fresh_implementation_checkpoint_ready?(workspace) when is_binary(workspace) do
     technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
   rescue
@@ -2618,12 +3053,94 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp first_matching_command_pattern(command, patterns) when is_binary(command) do
     Enum.find(patterns, fn pattern ->
-      case Regex.compile(pattern) do
-        {:ok, regex} -> Regex.match?(regex, command)
-        {:error, _reason} -> false
+      cond do
+        pattern == @review_rework_command_chain_pattern ->
+          command_chain_operator_outside_quotes?(command)
+
+        pattern == @review_rework_git_diff_base_pattern ->
+          git_diff_base_branch_without_path_scope?(command)
+
+        pattern == @review_rework_dirty_validated_handoff_recheck_pattern ->
+          false
+
+        true ->
+          case Regex.compile(pattern) do
+            {:ok, regex} -> Regex.match?(regex, command)
+            {:error, _reason} -> false
+          end
       end
     end)
   end
+
+  defp command_chain_operator_outside_quotes?(command) when is_binary(command) do
+    command
+    |> String.graphemes()
+    |> chain_operator_scan(nil, nil)
+  end
+
+  defp command_chain_operator_outside_quotes?(_command), do: false
+
+  defp chain_operator_scan([], _quote, _previous), do: false
+
+  defp chain_operator_scan(["\\" | [_escaped | rest]], quote, _previous) do
+    chain_operator_scan(rest, quote, "\\")
+  end
+
+  defp chain_operator_scan([char | rest], nil, previous) when char in ["'", "\""] do
+    chain_operator_scan(rest, char, previous)
+  end
+
+  defp chain_operator_scan([char | rest], quote, previous) when char == quote do
+    chain_operator_scan(rest, nil, previous)
+  end
+
+  defp chain_operator_scan([char | rest], nil, previous) do
+    next = List.first(rest)
+
+    cond do
+      char == ";" ->
+        true
+
+      char == "|" and previous not in ["|", "\\"] and next != "|" ->
+        true
+
+      char == "|" and next == "|" ->
+        true
+
+      char == "&" and next == "&" ->
+        true
+
+      true ->
+        chain_operator_scan(rest, nil, char)
+    end
+  end
+
+  defp chain_operator_scan([char | rest], quote, _previous), do: chain_operator_scan(rest, quote, char)
+
+  defp git_diff_base_branch_without_path_scope?(command) when is_binary(command) do
+    normalized = String.replace(command, ~r/\s+/, " ")
+
+    with true <- Regex.match?(~r/(^|[\s"'])git\s+diff\s+/, normalized),
+         false <- Regex.match?(~r/(^|[\s"'])git\s+diff\s+--stat(\s|$)/, normalized) do
+      diff_args =
+        normalized
+        |> String.split(~r/(^|[\s"'])git\s+diff\s+/, parts: 2, include_captures: false)
+        |> List.last()
+        |> Kernel.||("")
+
+      before_path_scope =
+        diff_args
+        |> String.split(" -- ", parts: 2)
+        |> List.first()
+
+      String.contains?(before_path_scope, ["origin/", "release/", "@{upstream}"]) or
+        Regex.match?(~r/(^|\s)(main|develop)(\s|$|\.{2})/, before_path_scope)
+    else
+      _ -> false
+    end
+  end
+
+  defp git_diff_base_branch_without_path_scope?(_command), do: false
 
   defp command_text(%{} = payload) do
     payload

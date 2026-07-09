@@ -3,7 +3,16 @@ defmodule SymphonyElixir.DispatchPreflight do
   Writes a small machine-owned dispatch checkpoint before Codex starts.
   """
 
-  alias SymphonyElixir.{Config, IssueRequirements, PromptBuilder, ReviewMonitor, Workspace}
+  alias SymphonyElixir.{
+    Config,
+    IssueRequirements,
+    KnowledgeLedger,
+    PromptBuilder,
+    ReviewMonitor,
+    ScopeAccess,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @preflight_path ".orocsy/delivery/state/dispatch-preflight.json"
@@ -24,6 +33,8 @@ defmodule SymphonyElixir.DispatchPreflight do
           "integration_check" -> integration_check_preflight(workspace, issue, requirements, inspection)
           _ -> fresh_implementation_preflight(workspace, issue, requirements, inspection)
         end
+        |> merge_policy_patches(workspace)
+        |> merge_knowledge_ledger(workspace)
 
       :ok = write_preflight(workspace, preflight)
       :ok = append_preflight_event(workspace, preflight)
@@ -45,8 +56,17 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       true ->
         case File.read(path) do
-          {:ok, body} -> Jason.decode(body)
-          {:error, reason} -> {:error, reason}
+          {:ok, body} ->
+            with {:ok, preflight} <- Jason.decode(body) do
+              {:ok,
+               preflight
+               |> drop_inactive_turn_policy_patch_entries(workspace)
+               |> merge_policy_patches(workspace)
+               |> merge_knowledge_ledger(workspace)}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   rescue
@@ -54,6 +74,18 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   def read(_workspace), do: :none
+
+  @spec consume_turn_policy_patches(String.t() | nil) :: :ok
+  def consume_turn_policy_patches(workspace) when is_binary(workspace) do
+    workspace
+    |> policy_patches()
+    |> Enum.each(&consume_turn_policy_patch(workspace, &1))
+
+    prune_persisted_turn_policy_patch_entries(workspace)
+    :ok
+  end
+
+  def consume_turn_policy_patches(_workspace), do: :ok
 
   @spec prompt_context(String.t() | nil) :: String.t()
   def prompt_context(workspace) do
@@ -244,12 +276,16 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp review_feedback?(%{feedback: feedback}) when is_list(feedback), do: feedback != []
   defp review_feedback?(_inspection), do: false
 
+  defp scoped_review_feedback?(inspection, requirements) do
+    review_feedback?(inspection) and review_feedback_for_requirements(inspection, requirements) != []
+  end
+
   defp preflight_mode(workspace, requirements, inspection) do
     cond do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
-      review_feedback?(inspection) ->
+      scoped_review_feedback?(inspection, requirements) ->
         "review_rework"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
@@ -310,6 +346,198 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp implementation_issue?(_requirements), do: false
+
+  defp test_spec_issue?(requirements) when is_map(requirements) do
+    ticket_type =
+      requirements
+      |> Map.get("ticket_type", "")
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    title =
+      requirements
+      |> Map.get("title", "")
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    ticket_type in ["test-spec", "test spec", "test"] or
+      String.contains?(title, "test-spec") or
+      String.contains?(title, "test spec")
+  end
+
+  defp test_spec_issue?(_requirements), do: false
+
+  defp review_feedback_for_requirements(inspection, requirements) do
+    feedback = Map.get(inspection, :feedback, [])
+
+    cond do
+      test_spec_issue?(requirements) ->
+        Enum.filter(feedback, &feedback_in_write_scope?(&1, requirements))
+
+      implementation_issue?(requirements) ->
+        Enum.filter(feedback, &implementation_review_feedback_in_scope?(&1, requirements))
+
+      true ->
+        feedback
+    end
+  end
+
+  defp feedback_in_write_scope?(feedback, requirements) when is_map(requirements) do
+    summary = feedback_summary(feedback)
+
+    cond do
+      summary["type"] == "check" ->
+        true
+
+      true ->
+        target_paths = feedback_target_paths(summary)
+        write_scope_paths = feedback_write_scope_paths(summary)
+
+        write_scope_paths != [] and
+          Enum.any?(write_scope_paths, fn path -> path_in_write_scope?(path, requirements["write_scope"] || []) end) and
+          not Enum.any?(target_paths, fn path -> path_in_scope_list?(path, requirements["out_of_scope"] || []) end)
+    end
+  end
+
+  defp feedback_in_write_scope?(_feedback, _requirements), do: false
+
+  defp implementation_review_feedback_in_scope?(feedback, requirements) when is_map(requirements) do
+    feedback_in_write_scope?(feedback, requirements) or
+      current_review_path_supersedes_stale_out_of_scope?(feedback, requirements)
+  end
+
+  defp implementation_review_feedback_in_scope?(_feedback, _requirements), do: false
+
+  defp current_review_path_supersedes_stale_out_of_scope?(feedback, requirements) do
+    summary = feedback_summary(feedback)
+
+    case summary["path"] do
+      path when is_binary(path) and path != "" ->
+        path_in_scope_list?(path, requirements["out_of_scope"] || []) and
+          not protected_shared_scope_path?(path, requirements)
+
+      _ ->
+        false
+    end
+  end
+
+  defp protected_shared_scope_path?(path, requirements) when is_binary(path) and is_map(requirements) do
+    requirements
+    |> Map.get("shared_files", [])
+    |> Enum.any?(fn shared_file ->
+      protected_shared_scope_text?(shared_file) and path_in_scope_list?(path, [shared_file])
+    end)
+  end
+
+  defp protected_shared_scope_path?(_path, _requirements), do: false
+
+  defp protected_shared_scope_text?(value) when is_binary(value) do
+    value
+    |> String.downcase()
+    |> String.contains?(["owned by", "owned-by", "do not edit", "out of scope", "out-of-scope"])
+  end
+
+  defp protected_shared_scope_text?(_value), do: false
+
+  defp path_in_write_scope?(path, write_scope) when is_binary(path) and is_list(write_scope) do
+    path_in_scope_list?(path, write_scope)
+  end
+
+  defp path_in_write_scope?(_path, _write_scope), do: false
+
+  defp path_in_scope_list?(path, scope_items) when is_binary(path) and is_list(scope_items) do
+    normalized_path = normalize_scope_path(path)
+
+    Enum.any?(scope_items, fn scope ->
+      scope
+      |> scope_path_candidates()
+      |> Enum.any?(fn normalized_scope ->
+        path_matches_scope?(normalized_path, normalized_scope)
+      end)
+    end)
+  end
+
+  defp path_in_scope_list?(_path, _scope_items), do: false
+
+  defp path_matches_scope?(normalized_path, normalized_scope) do
+    cond do
+      normalized_scope == "" ->
+        false
+
+      String.ends_with?(normalized_scope, "/**") ->
+        prefix = String.trim_trailing(normalized_scope, "/**")
+        normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
+
+      String.ends_with?(normalized_scope, "/*") ->
+        prefix = String.trim_trailing(normalized_scope, "/*")
+        normalized_path == prefix or String.starts_with?(normalized_path, prefix <> "/")
+
+      String.contains?(normalized_scope, "*") ->
+        glob_scope_matches?(normalized_path, normalized_scope)
+
+      true ->
+        normalized_path == normalized_scope or String.starts_with?(normalized_path, normalized_scope <> "/")
+    end
+  end
+
+  defp glob_scope_matches?(normalized_path, normalized_scope) do
+    normalized_scope
+    |> Regex.escape()
+    |> String.replace("\\*", ".*")
+    |> then(&Regex.compile!("^#{&1}$"))
+    |> Regex.match?(normalized_path)
+  rescue
+    _error -> false
+  end
+
+  defp feedback_target_paths(%{"path" => path} = summary) when is_binary(path) and path != "" do
+    ([path] ++ feedback_paths([Map.delete(summary, "path")]))
+    |> Enum.uniq()
+  end
+
+  defp feedback_target_paths(summary) when is_map(summary), do: feedback_paths([summary])
+  defp feedback_target_paths(_summary), do: []
+
+  defp feedback_write_scope_paths(%{"path" => path}) when is_binary(path) and path != "", do: [path]
+  defp feedback_write_scope_paths(summary) when is_map(summary), do: feedback_paths([summary])
+  defp feedback_write_scope_paths(_summary), do: []
+
+  defp scope_path_candidates(scope) when is_binary(scope) do
+    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]*]+(?:/\*\*|/\*|\.[A-Za-z0-9]+)(?:[A-Za-z0-9_\-./\[\]*]*)?)}
+    |> Regex.scan(scope)
+    |> Enum.flat_map(fn captures ->
+      captures
+      |> tl()
+      |> Enum.find(&(&1 != ""))
+      |> case do
+        value when is_binary(value) -> [normalize_scope_path(value)]
+        _ -> []
+      end
+    end)
+    |> Enum.reject(&(&1 == "" or String.starts_with?(&1, ["http://", "https://"])))
+    |> case do
+      [] -> [normalize_scope_path(scope)]
+      candidates -> candidates
+    end
+  end
+
+  defp scope_path_candidates(_scope), do: []
+
+  defp normalize_scope_path(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> String.trim("-")
+    |> String.trim()
+    |> String.trim("`")
+    |> String.trim_leading("./")
+    |> String.trim_trailing(".")
+    |> String.trim_trailing(",")
+    |> String.trim_trailing(";")
+    |> String.trim()
+  end
 
   defp requirement_state(requirements) when is_map(requirements) do
     requirements
@@ -468,7 +696,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp present_review_value?(value), do: value not in [false, [], %{}]
 
   defp review_rework_preflight(workspace, issue, requirements, inspection) do
-    feedback = Map.get(inspection, :feedback, [])
+    feedback = review_feedback_for_requirements(inspection, requirements)
+    requirements = add_review_scope_bundle_entries(requirements, feedback)
     open_corrections = open_correction_summaries(workspace)
     correction_active? = open_corrections != []
 
@@ -479,6 +708,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
+      "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "review-feedback-classified"),
       "first_task" => review_rework_first_task(open_corrections),
       "open_corrections" => open_corrections,
@@ -507,8 +737,10 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
+    requirements = add_review_scope_bundle_entries(requirements, if(test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])))
     open_corrections = open_correction_summaries(workspace)
     correction_active? = open_corrections != []
+    feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
       "schema_version" => 1,
@@ -517,8 +749,9 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
+      "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu"),
-      "first_task" => handoff_recovery_first_task(open_corrections),
+      "first_task" => handoff_recovery_first_task(open_corrections, requirements),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
@@ -530,19 +763,27 @@ defmodule SymphonyElixir.DispatchPreflight do
         "mergeable" => Map.get(inspection, :mergeable),
         "mergeable_state" => Map.get(inspection, :mergeable_state),
         "feedback_source" => Map.get(inspection, :feedback_source) |> to_string(),
-        "feedback_count" => length(Map.get(inspection, :feedback, [])),
-        "feedback" => Enum.map(Map.get(inspection, :feedback, []), &feedback_summary/1)
+        "feedback_count" => length(feedback),
+        "feedback" => Enum.map(feedback, &feedback_summary/1)
       }
     }
   end
 
-  defp handoff_recovery_first_task([correction | _]) do
+  defp handoff_recovery_first_task([correction | _], _requirements) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
     "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
   end
 
-  defp handoff_recovery_first_task(_open_corrections) do
+  defp handoff_recovery_first_task(_open_corrections, requirements) when is_map(requirements) do
+    if test_spec_issue?(requirements) do
+      "Recover the existing dirty test-spec checkpoint: inspect git status and focused dirty diffs only. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
+    else
+      handoff_recovery_first_task([], nil)
+    end
+  end
+
+  defp handoff_recovery_first_task(_open_corrections, _requirements) do
     "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
   end
 
@@ -563,6 +804,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp integration_check_preflight(workspace, issue, requirements, inspection) do
+    requirements = add_conflict_scope_bundle_entries(requirements, inspection)
+
     %{
       "schema_version" => 1,
       "mode" => "integration_check",
@@ -570,6 +813,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name),
+      "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" => integration_check_first_task(inspection),
       "requirements" => compact_requirements(requirements),
@@ -608,7 +852,8 @@ defmodule SymphonyElixir.DispatchPreflight do
       "created_at" => now_iso8601(),
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
-      "branch" => requirements["branch"] || issue_value(issue, :branch_name),
+      "branch" => fresh_implementation_branch(workspace, issue, requirements),
+      "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" =>
         "Start with the first MIU and the first declared write-scope path only; make a scoped code/test change and then record technical-miu-trace, or record an explicit blocker before broad project scanning. Trace-only/read-only MIU notes are not durable progress.",
@@ -625,6 +870,49 @@ defmodule SymphonyElixir.DispatchPreflight do
         "feedback" => []
       }
     }
+  end
+
+  defp fresh_implementation_branch(workspace, issue, requirements) do
+    current_branch(workspace) ||
+      shared_existing_branch_from_requirements(requirements) ||
+      requirements["branch"] ||
+      issue_value(issue, :branch_name)
+  end
+
+  defp shared_existing_branch_from_requirements(requirements) when is_map(requirements) do
+    integration_branch = requirements["integration_branch"] |> to_string()
+
+    if integration_branch |> String.downcase() |> String.contains?("same shared branch") do
+      clean_branch_token(integration_branch)
+    end
+  end
+
+  defp shared_existing_branch_from_requirements(_requirements), do: nil
+
+  defp clean_branch_token(value) do
+    value = to_string(value)
+
+    value =
+      case Regex.run(~r/`([^`]+)`/, value, capture: :all_but_first) do
+        [code] -> code
+        _ -> value
+      end
+
+    value
+    |> String.replace(~r/^same shared branch:\s*/i, "")
+    |> String.trim()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> to_string()
+    |> String.trim("`")
+    |> String.trim_trailing(".")
+    |> String.trim_trailing(",")
+    |> String.trim_trailing(";")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      branch -> branch
+    end
   end
 
   defp write_preflight(workspace, preflight) do
@@ -712,7 +1000,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp review_rework_checkpoint_guidance(checkpoint_event, _correction_active?) do
-    "`#{checkpoint_event}` after classifying current-head feedback."
+    "`#{checkpoint_event}` after making the scoped review fix or recording an explicit blocker; classification alone is lifecycle context."
   end
 
   defp fresh_prompt_context(preflight) do
@@ -761,7 +1049,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
     - First task: #{preflight["first_task"]}
     - Open Orocsy corrections: #{format_corrections(open_corrections)}
-    - Dirty workspace recovery is the only task. Use `git status --short --branch`, `git diff --stat`, and focused `git diff -- <dirty-file>` reads before any edit.
+    - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
     - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
     - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
@@ -958,6 +1246,413 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp validation_script_hint(_scripts), do: ""
 
+  defp add_review_scope_bundle_entries(requirements, feedback) when is_map(requirements) and is_list(feedback) do
+    entries =
+      feedback
+      |> Enum.flat_map(&review_scope_bundle_entries/1)
+
+    put_scope_bundle_entries(requirements, "write_scope", entries)
+  end
+
+  defp add_review_scope_bundle_entries(requirements, _feedback), do: requirements
+
+  defp review_scope_bundle_entries(feedback) when is_map(feedback) do
+    summary = feedback_summary(feedback)
+    reason = summary["body"] || "Current-head review feedback"
+    review_url = summary["url"]
+
+    [summary]
+    |> feedback_paths()
+    |> Enum.map(fn path ->
+      %{
+        "path" => path,
+        "source" => "github.current_head_review",
+        "operation" => "write",
+        "expires" => "review_thread_resolved_or_outdated",
+        "reason" => reason
+      }
+      |> maybe_put("review_url", review_url)
+    end)
+  end
+
+  defp review_scope_bundle_entries(_feedback), do: []
+
+  defp add_conflict_scope_bundle_entries(requirements, inspection) when is_map(requirements) and is_map(inspection) do
+    entries =
+      inspection
+      |> conflict_paths()
+      |> Enum.map(fn path ->
+        %{
+          "path" => path,
+          "source" => "github.mergeability",
+          "operation" => "write-if-conflicted",
+          "expires" => "mergeable",
+          "reason" => "Current PR mergeability names this conflict path"
+        }
+      end)
+
+    put_scope_bundle_entries(requirements, "conflict_scope", entries)
+  end
+
+  defp add_conflict_scope_bundle_entries(requirements, _inspection), do: requirements
+
+  defp put_scope_bundle_entries(requirements, _key, []), do: ensure_scope_bundle(requirements)
+
+  defp put_scope_bundle_entries(requirements, key, entries) when is_map(requirements) do
+    bundle =
+      requirements
+      |> scope_bundle()
+      |> Map.update(key, entries, &(&1 ++ entries))
+      |> IssueRequirements.refresh_scope_bundle_hash()
+
+    Map.put(requirements, "scope_bundle", bundle)
+  end
+
+  defp ensure_scope_bundle(requirements) when is_map(requirements) do
+    Map.put(requirements, "scope_bundle", scope_bundle(requirements))
+  end
+
+  defp scope_bundle(%{"scope_bundle" => bundle}) when is_map(bundle) do
+    IssueRequirements.refresh_scope_bundle_hash(bundle)
+  end
+
+  defp scope_bundle(requirements) when is_map(requirements) do
+    %{
+      "schema_version" => 2,
+      "issue" => requirements["identifier"] || "",
+      "write_scope" => [],
+      "read_context" => [],
+      "conflict_scope" => [],
+      "denied_scope" => []
+    }
+    |> IssueRequirements.refresh_scope_bundle_hash()
+  end
+
+  defp policy_hash(requirements) when is_map(requirements) do
+    requirements
+    |> scope_bundle()
+    |> Map.get("policy_hash")
+  end
+
+  defp policy_hash(_requirements), do: nil
+
+  defp conflict_paths(inspection) when is_map(inspection) do
+    inspection
+    |> map_value([:conflict_paths, "conflict_paths", :merge_conflict_paths, "merge_conflict_paths"])
+    |> case do
+      paths when is_list(paths) -> paths
+      path when is_binary(path) -> [path]
+      _ -> []
+    end
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp maybe_put(map, _key, value) when value in [nil, ""], do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp merge_policy_patches(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
+    patches = policy_patches(workspace)
+
+    case patches do
+      [] ->
+        preflight
+
+      patches ->
+        requirements =
+          preflight
+          |> Map.get("requirements", %{})
+          |> apply_policy_patches_to_requirements(patches)
+
+        policy_hash = policy_hash(requirements)
+
+        preflight
+        |> Map.put("requirements", requirements)
+        |> Map.put("policy_hash", policy_hash)
+        |> Map.put("policy_patches", Enum.map(patches, &policy_patch_summary/1))
+    end
+  end
+
+  defp merge_policy_patches(preflight, _workspace), do: preflight
+
+  defp merge_knowledge_ledger(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
+    knowledge = KnowledgeLedger.load(workspace, preflight)
+
+    if empty_knowledge_ledger?(knowledge) do
+      preflight
+    else
+      read_context = Map.get(knowledge, "read_context", [])
+
+      preflight =
+        case read_context do
+          [] ->
+            preflight
+
+          entries ->
+            requirements =
+              preflight
+              |> requirements_map()
+              |> put_scope_bundle_entries("read_context", entries)
+
+            preflight
+            |> Map.put("requirements", requirements)
+            |> Map.put("policy_hash", policy_hash(requirements))
+        end
+
+      Map.put(preflight, "knowledge_ledger", Map.delete(knowledge, "read_context"))
+    end
+  end
+
+  defp merge_knowledge_ledger(preflight, _workspace), do: preflight
+
+  defp empty_knowledge_ledger?(%{} = knowledge) do
+    Enum.all?(["fresh", "stale", "read_context"], fn key ->
+      case Map.get(knowledge, key) do
+        values when is_list(values) -> values == []
+        _ -> true
+      end
+    end)
+  end
+
+  defp empty_knowledge_ledger?(_knowledge), do: true
+
+  defp requirements_map(%{"requirements" => requirements}) when is_map(requirements), do: requirements
+  defp requirements_map(_preflight), do: %{}
+
+  defp policy_patches(workspace) when is_binary(workspace) do
+    workspace
+    |> Path.join(Path.join(ScopeAccess.Controller.policy_patch_dir(), "*.json"))
+    |> Path.wildcard()
+    |> Enum.sort()
+    |> Enum.flat_map(&read_policy_patch/1)
+    |> Enum.filter(&active_policy_patch?/1)
+  end
+
+  defp read_policy_patch(path) do
+    case File.read(path) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, %{} = patch} ->
+            workspace = path |> Path.dirname() |> Path.dirname() |> Path.dirname() |> Path.dirname()
+            [Map.put_new(patch, "path", Path.relative_to(path, workspace))]
+
+          _ ->
+            []
+        end
+
+      _ ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp active_policy_patch?(%{"status" => status}) when status in ["active", "applied"], do: true
+  defp active_policy_patch?(%{"status" => status}) when is_binary(status), do: false
+  defp active_policy_patch?(_patch), do: true
+
+  defp drop_inactive_turn_policy_patch_entries(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
+    active_patch_ids = active_policy_patch_ids(workspace)
+
+    pruned =
+      preflight
+      |> prune_preflight_scope_bundle(active_patch_ids)
+      |> prune_policy_patch_summaries(active_patch_ids)
+
+    if pruned == preflight do
+      preflight
+    else
+      refresh_preflight_policy_hash(pruned)
+    end
+  end
+
+  defp drop_inactive_turn_policy_patch_entries(preflight, _workspace), do: preflight
+
+  defp active_policy_patch_ids(workspace) when is_binary(workspace) do
+    workspace
+    |> policy_patches()
+    |> Enum.map(& &1["patch_id"])
+    |> Enum.filter(&is_binary/1)
+    |> MapSet.new()
+  end
+
+  defp prune_preflight_scope_bundle(preflight, active_patch_ids) when is_map(preflight) do
+    preflight
+    |> prune_requirements_scope_bundle(active_patch_ids)
+    |> prune_top_level_scope_bundle(active_patch_ids)
+  end
+
+  defp prune_requirements_scope_bundle(%{"requirements" => requirements} = preflight, active_patch_ids)
+       when is_map(requirements) do
+    Map.put(preflight, "requirements", prune_scope_bundle_in_requirements(requirements, active_patch_ids))
+  end
+
+  defp prune_requirements_scope_bundle(preflight, _active_patch_ids), do: preflight
+
+  defp prune_scope_bundle_in_requirements(%{"scope_bundle" => bundle} = requirements, active_patch_ids)
+       when is_map(bundle) do
+    Map.put(requirements, "scope_bundle", prune_scope_bundle_turn_entries(bundle, active_patch_ids))
+  end
+
+  defp prune_scope_bundle_in_requirements(requirements, _active_patch_ids), do: requirements
+
+  defp prune_top_level_scope_bundle(%{"scope_bundle" => bundle} = preflight, active_patch_ids) when is_map(bundle) do
+    Map.put(preflight, "scope_bundle", prune_scope_bundle_turn_entries(bundle, active_patch_ids))
+  end
+
+  defp prune_top_level_scope_bundle(preflight, _active_patch_ids), do: preflight
+
+  defp prune_scope_bundle_turn_entries(bundle, active_patch_ids) when is_map(bundle) do
+    {pruned, changed?} =
+      Enum.reduce(["read_context", "write_scope", "conflict_scope", "denied_scope"], {bundle, false}, fn key, {acc, changed?} ->
+        case Map.get(acc, key) do
+          entries when is_list(entries) ->
+            kept = Enum.reject(entries, &inactive_turn_policy_patch_entry?(&1, active_patch_ids))
+            {Map.put(acc, key, kept), changed? or kept != entries}
+
+          _ ->
+            {acc, changed?}
+        end
+      end)
+
+    if changed? do
+      IssueRequirements.refresh_scope_bundle_hash(pruned)
+    else
+      bundle
+    end
+  end
+
+  defp inactive_turn_policy_patch_entry?(%{"policy_patch_id" => patch_id, "expires" => "turn"}, active_patch_ids)
+       when is_binary(patch_id) do
+    not MapSet.member?(active_patch_ids, patch_id)
+  end
+
+  defp inactive_turn_policy_patch_entry?(_entry, _active_patch_ids), do: false
+
+  defp prune_policy_patch_summaries(preflight, active_patch_ids) when is_map(preflight) do
+    case Map.get(preflight, "policy_patches", :missing) do
+      :missing ->
+        preflight
+
+      summaries when is_list(summaries) ->
+        Map.put(preflight, "policy_patches", Enum.reject(summaries, &inactive_policy_patch_summary?(&1, active_patch_ids)))
+
+      _other ->
+        preflight
+    end
+  end
+
+  defp inactive_policy_patch_summary?(%{"patch_id" => patch_id}, active_patch_ids) when is_binary(patch_id) do
+    not MapSet.member?(active_patch_ids, patch_id)
+  end
+
+  defp inactive_policy_patch_summary?(_summary, _active_patch_ids), do: false
+
+  defp refresh_preflight_policy_hash(%{"requirements" => requirements} = preflight) when is_map(requirements) do
+    Map.put(preflight, "policy_hash", policy_hash(requirements))
+  end
+
+  defp refresh_preflight_policy_hash(%{"scope_bundle" => %{"policy_hash" => policy_hash}} = preflight) when is_binary(policy_hash) do
+    Map.put(preflight, "policy_hash", policy_hash)
+  end
+
+  defp refresh_preflight_policy_hash(preflight), do: preflight
+
+  defp prune_persisted_turn_policy_patch_entries(workspace) when is_binary(workspace) do
+    path = Path.join(workspace, @preflight_path)
+
+    with true <- File.regular?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{} = preflight} <- Jason.decode(body) do
+      pruned = drop_inactive_turn_policy_patch_entries(preflight, workspace)
+
+      if pruned != preflight do
+        File.write!(path, Jason.encode!(pruned, pretty: true) <> "\n")
+      end
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_turn_policy_patch(workspace, %{"path" => relative_path} = patch) when is_binary(relative_path) do
+    if turn_policy_patch?(patch) do
+      path = Path.join(workspace, relative_path)
+
+      patch
+      |> Map.put("status", "consumed")
+      |> Map.put_new("consumed_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> then(&File.write!(path, Jason.encode!(&1, pretty: true) <> "\n"))
+    end
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_turn_policy_patch(_workspace, _patch), do: :ok
+
+  defp turn_policy_patch?(%{"decision" => "allow_once"}), do: true
+
+  defp turn_policy_patch?(%{"entries" => entries}) when is_list(entries) do
+    Enum.any?(entries, &(&1["expires"] == "turn"))
+  end
+
+  defp turn_policy_patch?(_patch), do: false
+
+  defp apply_policy_patches_to_requirements(requirements, patches) when is_map(requirements) do
+    Enum.reduce(patches, ensure_scope_bundle(requirements), fn patch, acc ->
+      patch
+      |> policy_patch_entries()
+      |> Enum.reduce(acc, fn {target, entries}, requirements ->
+        put_scope_bundle_entries(requirements, target, entries)
+      end)
+    end)
+  end
+
+  defp policy_patch_entries(%{"entries" => entries} = patch) when is_list(entries) do
+    target = policy_patch_target(patch)
+
+    entries =
+      entries
+      |> Enum.filter(&is_map/1)
+      |> Enum.map(&normalize_policy_patch_entry(&1, patch))
+
+    [{target, entries}]
+  end
+
+  defp policy_patch_entries(_patch), do: []
+
+  defp normalize_policy_patch_entry(entry, patch) do
+    entry
+    |> Map.put_new("source", patch["source"] || "symphony.runtime.scope-access-controller")
+    |> Map.put_new("operation", policy_patch_entry_operation(patch))
+    |> Map.put_new("expires", "turn")
+    |> maybe_put("policy_patch_id", patch["patch_id"])
+  end
+
+  defp policy_patch_target(%{"target" => target}) when target in ["write_scope", "read_context", "conflict_scope", "denied_scope"], do: target
+  defp policy_patch_target(_patch), do: "read_context"
+
+  defp policy_patch_entry_operation(%{"target" => "write_scope"}), do: "write"
+  defp policy_patch_entry_operation(%{"target" => "conflict_scope"}), do: "write-if-conflicted"
+  defp policy_patch_entry_operation(%{"target" => "denied_scope"}), do: "deny"
+  defp policy_patch_entry_operation(_patch), do: "read"
+
+  defp policy_patch_summary(patch) do
+    %{
+      "patch_id" => patch["patch_id"],
+      "source" => patch["source"],
+      "target" => policy_patch_target(patch),
+      "decision" => patch["decision"],
+      "reason_class" => patch["reason_class"],
+      "path" => patch["path"]
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
   defp compact_requirements(requirements) when is_map(requirements) do
     Map.take(requirements, [
       "identifier",
@@ -971,12 +1666,14 @@ defmodule SymphonyElixir.DispatchPreflight do
       "expected_test_state",
       "test_activation",
       "write_scope",
+      "read_context",
       "shared_files",
       "dependencies",
       "mius",
       "validation",
       "out_of_scope",
-      "issue_brief"
+      "issue_brief",
+      "scope_bundle"
     ])
   end
 
@@ -1156,10 +1853,6 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp feedback_paths(_items), do: []
-
-  defp feedback_item_paths(%{"path" => path, "body" => body}) when is_binary(path) and path != "" do
-    [path | feedback_body_paths(body)]
-  end
 
   defp feedback_item_paths(%{"path" => path}) when is_binary(path) and path != "" do
     [path]

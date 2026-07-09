@@ -327,7 +327,7 @@ defmodule SymphonyElixir.TokenTelemetryTest do
   end
 
   test "ignores lifecycle-only Orocsy checkpoints as durable progress" do
-    for tool <- ["first-turn-miu-handoff", "technical-miu-trace"] do
+    for tool <- ["first-turn-miu-handoff", "technical-miu-trace", "review-feedback-classified"] do
       workspace = temp_workspace("lifecycle-event-summary")
 
       try do

@@ -1133,7 +1133,11 @@ defmodule SymphonyElixir.TokenTelemetry do
 
   defp lifecycle_only_tool_finished?(event) when is_map(event) do
     event_name(event) == "tool.finished" and
-      Map.get(event, "tool") in ["first-turn-miu-handoff", "technical-miu-trace"]
+      Map.get(event, "tool") in [
+        "first-turn-miu-handoff",
+        "technical-miu-trace",
+        "review-feedback-classified"
+      ]
   end
 
   defp event_name(event) do

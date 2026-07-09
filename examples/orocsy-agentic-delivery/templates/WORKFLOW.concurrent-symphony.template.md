@@ -192,8 +192,10 @@ Orocsy worker prelude:
 6. First durable progress checkpoint:
    - Before optional skills, broad docs, recursive listings, or reading more
      than eight implementation files, produce one real checkpoint:
-     - Rework or existing PR: inspect only the current PR review threads for
-       this branch, classify current-head feedback, then append:
+     - Rework or existing PR: use only the current PR review threads supplied
+       by the runtime for this branch, inspect the referenced in-scope file
+       range, then make the scoped edit or record a blocker. Append this
+       lifecycle marker only after that edit/blocker decision exists:
        `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "review-feedback-classified"`
      - Fresh implementation: first run `git status --short --branch`,
        switch/create the exact Linear issue branch from `origin/main` if

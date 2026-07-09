@@ -5,10 +5,21 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
+
+  alias SymphonyElixir.{
+    Config,
+    DispatchPreflight,
+    Linear.Issue,
+    PromptBuilder,
+    ReviewMonitor,
+    ScopeAccess,
+    Tracker,
+    Workspace
+  }
 
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
+  @strict_review_rework_policy_violation_recoveries 1
 
   @type worker_host :: String.t() | nil
 
@@ -82,6 +93,27 @@ defmodule SymphonyElixir.AgentRunner do
     def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
     def pushed_handoff_stop_for_test(workspace), do: pushed_handoff_stop?(workspace)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
+    def policy_violation_recovery_budget_for_test(workspace), do: policy_violation_recovery_budget(workspace)
+
+    def policy_violation_recovery_action_for_test(
+          workspace,
+          issue,
+          command,
+          pattern,
+          recovery_count,
+          max_policy_recoveries,
+          worker_host \\ nil
+        ),
+        do:
+          policy_violation_recovery_action(
+            workspace,
+            issue,
+            command,
+            pattern,
+            recovery_count,
+            max_policy_recoveries,
+            worker_host
+          )
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -114,18 +146,312 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  @max_policy_violation_recoveries 2
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, 0)
+  end
+
+  # A denied command used to kill the whole run and park the issue behind a
+  # human-resolved correction, so the worker never learned which command was
+  # denied and every redispatch replayed the same violation. Recover in-run
+  # instead: restart the worker with an explicit policy-violation prelude naming
+  # the denied command, bounded by @max_policy_violation_recoveries before the
+  # existing parking path takes over.
+  defp run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, recovery_count) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    max_policy_recoveries = policy_violation_recovery_budget(workspace)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, worker_host)
-      after
-        AppServer.stop_session(session)
+    result =
+      with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+        try do
+          do_run_codex_turns(
+            session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            opts,
+            issue_state_fetcher,
+            1,
+            max_turns,
+            worker_host
+          )
+        after
+          AppServer.stop_session(session)
+          consume_policy_violation_patches_after_turn(workspace, opts)
+        end
       end
+
+    case result do
+      {:error, {:forbidden_command, command, pattern}} ->
+        case policy_violation_recovery_action(
+               workspace,
+               issue,
+               command,
+               pattern,
+               recovery_count,
+               max_policy_recoveries,
+               worker_host
+             ) do
+          {:retry, attempt, scope_access} ->
+            Logger.warning("Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{max_policy_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}")
+
+            record_policy_violation_event(workspace, issue, command, pattern, attempt, scope_access, worker_host)
+
+            send_codex_update(codex_update_recipient, issue, %{
+              event: :policy_violation_recovery,
+              command: command,
+              pattern: pattern,
+              attempt: attempt,
+              max_attempts: max_policy_recoveries,
+              scope_access: scope_access,
+              timestamp: DateTime.utc_now()
+            })
+
+            opts =
+              Keyword.put(opts, :policy_violation, %{
+                command: command,
+                pattern: pattern,
+                attempt: attempt,
+                max_attempts: max_policy_recoveries,
+                scope_access: scope_access
+              })
+
+            run_codex_turns_with_policy_recovery(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host,
+              attempt
+            )
+
+          {:parked, scope_access} ->
+            record_policy_violation_event(
+              workspace,
+              issue,
+              command,
+              pattern,
+              recovery_count + 1,
+              scope_access,
+              worker_host
+            )
+
+            :ok
+
+          :stop ->
+            result
+        end
+
+      other ->
+        other
     end
   end
+
+  defp policy_violation_recovery_budget(workspace) do
+    if strict_review_rework_implementation_child?(workspace) do
+      @strict_review_rework_policy_violation_recoveries
+    else
+      @max_policy_violation_recoveries
+    end
+  end
+
+  defp consume_policy_violation_patches_after_turn(workspace, opts) when is_binary(workspace) and is_list(opts) do
+    if Keyword.has_key?(opts, :policy_violation) do
+      DispatchPreflight.consume_turn_policy_patches(workspace)
+    end
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_policy_violation_patches_after_turn(_workspace, _opts), do: :ok
+
+  defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
+    with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),
+         ticket_type when is_binary(ticket_type) <- get_in(preflight, ["requirements", "ticket_type"]),
+         true <- String.downcase(String.trim(ticket_type)) == "implementation" do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp strict_review_rework_implementation_child?(_workspace), do: false
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
+       when recovery_count >= max_policy_recoveries,
+       do: :stop
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, worker_host)
+       when is_binary(worker_host),
+       do: {:retry, recovery_count + 1, nil}
+
+  defp policy_violation_recovery_action(workspace, issue, command, pattern, recovery_count, _max_policy_recoveries, nil)
+       when is_binary(workspace) and is_binary(command) do
+    attempt = recovery_count + 1
+    policy = policy_violation_policy(workspace)
+
+    case ScopeAccess.classify_command(command, policy) do
+      %{} = request ->
+        case ScopeAccess.Controller.decide(request, policy, workspace) do
+          {:allow_once, patch} ->
+            case ScopeAccess.Controller.write_policy_patch(workspace, patch) do
+              {:ok, written_patch} ->
+                {:retry, attempt, scope_access_with_decision(request, written_patch)}
+
+              {:error, reason} ->
+                Logger.warning("Failed to write scope access policy patch for #{issue_context(issue)} reason=#{inspect(reason)}")
+                {:retry, attempt, scope_access_with_decision(request, ScopeAccess.decision_for(request) || %{})}
+            end
+
+          {decision, correction_attrs} when decision in [:block, :escalate] ->
+            correction_attrs = put_scope_access_retry_fingerprint(correction_attrs, issue, request, policy)
+            scope_access = scope_access_with_decision(request, correction_attrs)
+
+            case Workspace.create_correction_in_workspace(workspace, issue, correction_attrs) do
+              {:ok, _correction} ->
+                Logger.warning("Parking #{issue_context(issue)} after denied #{request["operation"] || "unknown"} scope access command=#{inspect(command)} pattern=#{inspect(pattern)}")
+                {:parked, scope_access}
+
+              {:error, reason} ->
+                Logger.warning("Failed to create scope access correction for #{issue_context(issue)} reason=#{inspect(reason)}")
+                {:retry, attempt, scope_access}
+            end
+        end
+
+      _ ->
+        {:retry, attempt, nil}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to decide scope access recovery for #{issue_context(issue)} error=#{Exception.message(error)}")
+      {:retry, recovery_count + 1, nil}
+  end
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, _worker_host) do
+    {:retry, recovery_count + 1, nil}
+  end
+
+  defp policy_violation_policy(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, preflight} when is_map(preflight) -> preflight
+      _ -> %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp policy_violation_policy(_workspace), do: %{}
+
+  defp put_scope_access_retry_fingerprint(correction_attrs, %Issue{} = issue, %{} = request, %{} = policy)
+       when is_map(correction_attrs) do
+    fingerprint =
+      %{
+        "issue" => issue.identifier,
+        "issue_id" => issue.id,
+        "source" => correction_source(correction_attrs),
+        "head_sha" => policy_head_sha(policy),
+        "policy_hash" => policy_hash(policy),
+        "operation" => request["operation"],
+        "paths" => request["paths"],
+        "command_fingerprint" => request["command_fingerprint"]
+      }
+      |> Enum.reject(fn {_key, value} -> value in [nil, "", []] end)
+      |> Map.new()
+
+    if fingerprint == %{} do
+      correction_attrs
+    else
+      guard =
+        correction_attrs
+        |> Map.get(:guard, %{})
+        |> stringify_scope_access_decision()
+        |> Map.put("retry_fingerprint", fingerprint)
+
+      Map.put(correction_attrs, :guard, guard)
+    end
+  end
+
+  defp put_scope_access_retry_fingerprint(correction_attrs, _issue, _request, _policy), do: correction_attrs
+
+  defp correction_source(%{source: source}) when is_binary(source), do: source
+  defp correction_source(%{"source" => source}) when is_binary(source), do: source
+  defp correction_source(_correction_attrs), do: "symphony.runtime.scope-access"
+
+  defp policy_head_sha(policy) when is_map(policy) do
+    Map.get(policy, "head_sha") ||
+      get_in(policy, ["review", "head_sha"]) ||
+      get_in(policy, ["review", "head"])
+  end
+
+  defp policy_head_sha(_policy), do: nil
+
+  defp policy_hash(policy) when is_map(policy) do
+    Map.get(policy, "policy_hash") ||
+      get_in(policy, ["requirements", "scope_bundle", "policy_hash"]) ||
+      get_in(policy, ["scope_bundle", "policy_hash"])
+  end
+
+  defp policy_hash(_policy), do: nil
+
+  defp scope_access_with_decision(%{} = request, %{} = decision) do
+    decision_payload =
+      decision
+      |> stringify_scope_access_decision()
+      |> Map.take([
+        "decision",
+        "decision_class",
+        "reason_class",
+        "status",
+        "requires_policy_patch",
+        "patch_id",
+        "path",
+        "target"
+      ])
+
+    Map.merge(request, decision_payload)
+  end
+
+  defp stringify_scope_access_decision(decision) when is_map(decision) do
+    Map.new(decision, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {key, value}
+    end)
+  end
+
+  defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, scope_access, nil)
+       when is_binary(workspace) do
+    event =
+      %{
+        "event" => "runtime.command-policy-violation",
+        "status" => "warn",
+        "tool" => "command-guard",
+        "ts" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+        "issue" => identifier,
+        "command" => command,
+        "pattern" => pattern,
+        "recovery_attempt" => attempt,
+        "source" => "symphony.runtime.command-guard",
+        "schema_version" => 1
+      }
+      |> put_if_present("scope_access", scope_access)
+
+    path = Path.join(workspace, @delivery_event_path)
+    File.write!(path, Jason.encode!(event) <> "\n", [:append])
+    :ok
+  rescue
+    error ->
+      Logger.warning("Failed to record command policy violation event: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_policy_violation_event(_workspace, _issue, _command, _pattern, _attempt, _scope_access, _worker_host), do: :ok
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, worker_host) do
     prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)
@@ -447,7 +773,7 @@ defmodule SymphonyElixir.AgentRunner do
       - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
       - Resume from the current workspace and workpad state instead of restarting from scratch.
       - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read before handoff. Do not rerun the same validation command before committing when the checkpoint already lists passed `gate.post-miu`/`tool.finished` evidence for the dirty files and the diff has not changed since that evidence; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
+      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run only `git status --short --branch` and a focused `git diff -- <dirty-file>` read before handoff; do not run `git log` or `git diff --stat` — the runtime denies them and the checkpoint context above already lists commit/diffstat state. Do not rerun the same validation command before committing when the checkpoint already lists passed `gate.post-miu`/`tool.finished` evidence for the dirty files and the diff has not changed since that evidence; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
       - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
       - After focused validation passes, immediately stage, commit, push the existing branch, and request/update PR review.
       - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.

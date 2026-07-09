@@ -632,9 +632,13 @@ Important nuance:
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
-- Once the worker exits normally, the orchestrator still schedules a short continuation retry
+- Once the worker exits normally, the orchestrator normally schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
+- If the latest worker telemetry shows the worker already hit a configured runtime progress guard
+  such as `blocked_no_durable_progress`, the orchestrator MUST classify that guard before scheduling
+  the continuation retry. Validation failures remain the most actionable retryable class, then
+  first-durable-event budget failures, then no-durable-progress or handoff-recovery handling.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -1997,7 +2001,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
-- Normal worker exit schedules a short continuation retry (attempt 1)
+- Normal worker exit schedules a short continuation retry (attempt 1) unless latest worker telemetry
+  already satisfies a configured runtime progress guard that must be parked or retried as a runtime
+  correction first
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error

@@ -89,7 +89,11 @@ defmodule SymphonyElixir.ReviewMonitor do
           :ok
 
         {:ok, %{feedback: []} = inspection} ->
-          maybe_advance_clean_codex_review(issue, monitor, inspection)
+          if merge_conflict_inspection?(inspection) do
+            mark_rework(issue, monitor, build_merge_conflict_feedback(inspection))
+          else
+            maybe_advance_clean_codex_review(issue, monitor, inspection)
+          end
 
         {:ok, %{repo: repo, pr: pr, feedback: feedback}} ->
           mark_rework(issue, monitor, build_feedback(repo, pr, feedback))
@@ -1091,6 +1095,39 @@ defmodule SymphonyElixir.ReviewMonitor do
     }
   end
 
+  defp build_merge_conflict_feedback(%{repo: repo, pr: pr} = inspection) do
+    %{
+      repo: repo,
+      pr_number: pr_number(pr),
+      pr_url: pr_url(pr),
+      head_sha: head_sha(pr),
+      feedback: [
+        %{
+          type: :mergeability,
+          payload: %{
+            "mergeable" => Map.get(inspection, :mergeable),
+            "mergeable_state" => Map.get(inspection, :mergeable_state),
+            "html_url" => pr_url(pr)
+          }
+        }
+      ]
+    }
+  end
+
+  defp merge_conflict_inspection?(%{mergeable: false, mergeable_state: state}) do
+    normalize_mergeable_state(state) in ["dirty", "conflicting"]
+  end
+
+  defp merge_conflict_inspection?(_inspection), do: false
+
+  defp normalize_mergeable_state(state) when is_binary(state) do
+    state
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_mergeable_state(_state), do: ""
+
   defp mark_rework(%Issue{} = issue, monitor, feedback) do
     comment = feedback_comment(issue, monitor, feedback)
 
@@ -1122,6 +1159,7 @@ defmodule SymphonyElixir.ReviewMonitor do
     - Issue: `#{issue.identifier}`
     - PR: ##{feedback.pr_number} #{feedback.pr_url}
     - Reviewed head: `#{short_sha(feedback.head_sha)}`
+    - Marker: `review_rework_needed`
     - Next action: Symphony should fix accepted current-code findings on the existing PR branch, revalidate, push, request `@codex review` again, and return to Human Review only after a fresh review scan is clean.
 
     Active feedback:
@@ -1140,6 +1178,22 @@ defmodule SymphonyElixir.ReviewMonitor do
       |> Enum.join(":")
 
     [location, first_body_line(comment["body"]), comment["html_url"]]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" - ")
+  end
+
+  defp feedback_item_summary(%{type: :mergeability, payload: payload}) do
+    state =
+      payload
+      |> Map.get("mergeable_state")
+      |> to_string()
+      |> String.trim()
+
+    [
+      "PR mergeability",
+      "mergeable_state=#{if state == "", do: "unknown", else: state}",
+      payload["html_url"]
+    ]
     |> Enum.reject(&blank?/1)
     |> Enum.join(" - ")
   end

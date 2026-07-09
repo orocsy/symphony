@@ -926,6 +926,94 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "issue requirements build scope bundle with provenance and legacy compatibility" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-bundle-requirements-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+        """
+        ## Read Context
+        - src/features/landing/GuestStartScreen.tsx
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-scope-bundle",
+        identifier: "COD-266",
+        title: "Scope bundle provenance",
+        state: "In Progress",
+        branch_name: "orocsy/cod-266-scope-bundle",
+        description: """
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+
+        ## Shared Files
+        - package.json read-only context
+
+        ## Out Of Scope
+        - src/lib/**
+
+        ### MIU 1 - Scope bundle
+        Preserve write scope compatibility while adding provenance.
+
+        ## Validation
+        ```bash
+        pnpm test -- tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
+      assert requirements["shared_files"] == ["package.json read-only context"]
+      assert requirements["read_context"] == ["src/features/landing/GuestStartScreen.tsx"]
+      assert requirements["out_of_scope"] == ["src/lib/**"]
+
+      bundle = requirements["scope_bundle"]
+      assert bundle["schema_version"] == 2
+      assert bundle["issue"] == "COD-266"
+      assert String.starts_with?(bundle["policy_hash"], "sha256:")
+
+      assert %{
+               "path" => "src/features/swipe/SwipeExperience.tsx",
+               "source" => "linear.write_scope",
+               "operation" => "write",
+               "expires" => "branch"
+             } in bundle["write_scope"]
+
+      assert %{
+               "path" => "src/features/landing/GuestStartScreen.tsx",
+               "source" => "local_issue_brief.read_context",
+               "operation" => "read",
+               "expires" => "turn"
+             } in bundle["read_context"]
+
+      assert %{
+               "path" => "package.json",
+               "source" => "linear.shared_files",
+               "operation" => "read",
+               "expires" => "branch"
+             } in bundle["read_context"]
+
+      assert %{
+               "path" => "src/lib/**",
+               "source" => "linear.out_of_scope",
+               "operation" => "read",
+               "expires" => "branch"
+             } in bundle["denied_scope"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "workspace hydration parses scope and validation commands template headings" do
     workspace_root =
       Path.join(
@@ -1089,7 +1177,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-902.md"), """
       ## Write Scope
+
+      In:
+
       - src/features/fallback.ts
+
+      Out:
+
+      - src/app/api/cards/handler.ts
 
       ### MIU 1 - Fallback Brief Hydration
       Hydrate requirements from the copied issue brief.
@@ -1111,6 +1206,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
       assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-902.md"
       assert requirements["write_scope"] == ["src/features/fallback.ts"]
+      assert requirements["out_of_scope"] == ["src/app/api/cards/handler.ts"]
       assert requirements["mius"] == ["MIU 1 - Fallback Brief Hydration"]
       assert requirements["validation"]["commands"] == ["pnpm test -- fallback"]
     after
@@ -1168,6 +1264,80 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert requirements["write_scope"] == ["src/features/primary.ts"]
       assert requirements["mius"] == ["MIU 1 - Primary Brief"]
       assert requirements["validation"]["commands"] == ["pnpm test -- primary"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "issue requirements merge repeated list sections from appended issue brief" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-requirements-merge-brief-sections-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".codex/agentic/issue-briefs"))
+
+      File.write!(Path.join(workspace, ".codex/agentic/issue-briefs/COD-904.md"), """
+      ## Write Scope
+
+      In:
+
+      - `src/features/swipe/SwipeExperience.tsx`
+
+      Out:
+
+      - `src/app/api/cards/handler.ts`
+      - `src/lib/server/recipe-chats.ts`
+
+      ## Shared Files
+
+      - Read-only context: `src/app/api/cards/route.ts` only to confirm the existing `/api/cards` request contract.
+
+      ## Validation
+      ```bash
+      pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+      ```
+      """)
+
+      issue = %Issue{
+        id: "issue-merge-brief-sections",
+        identifier: "COD-904",
+        title: "Merge issue brief sections",
+        state: "Rework",
+        description: """
+        ## Write Scope
+        - src/features/swipe/SwipeExperience.tsx
+
+        ## Shared Files
+        - src/app/api/cards/handler.ts is owned by another ticket. Do not edit it here.
+
+        ### MIU 1 - Initial load carries guest safety draft
+        Send local setup state on the first cards request.
+
+        ## Validation
+        ```bash
+        pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts
+        ```
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["shared_files"] == [
+               "src/app/api/cards/handler.ts is owned by another ticket. Do not edit it here.",
+               "Read-only context: src/app/api/cards/route.ts only to confirm the existing /api/cards request contract."
+             ]
+
+      assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
+
+      assert requirements["out_of_scope"] == [
+               "src/app/api/cards/handler.ts",
+               "src/lib/server/recipe-chats.ts"
+             ]
+
+      assert requirements["issue_brief"]["path"] == ".codex/agentic/issue-briefs/COD-904.md"
     after
       File.rm_rf(workspace)
     end
@@ -1459,6 +1629,130 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
       refute String.contains?(status, "origin/main")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace uses existing shared PR branch when child ticket contract forbids a new branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-shared-pr-branch-contract-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      shared_branch = "orocsy/cod-246-preference-miu-guest-setup-controls"
+      generated_child_branch = "orocsy/cod-265-cod-246a-test-spec-cards-request-uses-guest-safety-draft"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", shared_branch], cd: source_repo, stderr_to_stdout: true)
+      File.mkdir_p!(Path.join(source_repo, "tests/unit"))
+      File.write!(Path.join(source_repo, "tests/unit/swipe-experience-request.test.ts"), "export const shared = true;\n")
+      assert {_output, 0} = System.cmd("git", ["add", "tests/unit/swipe-experience-request.test.ts"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Add shared PR work"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-265",
+        identifier: "COD-265",
+        title: "COD-246A test-spec",
+        state: "Ready for Symphony",
+        branch_name: generated_child_branch,
+        description: """
+        ## Base Branch
+        `#{shared_branch}` on PR #103.
+
+        ## Integration Branch
+        Same shared branch: #{shared_branch}.
+
+        ## Branch / PR Contract
+        Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - `tests/unit/swipe-experience-request.test.ts`
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == shared_branch
+      refute String.trim(current_branch) == generated_child_branch
+      assert File.regular?(Path.join(workspace, "tests/unit/swipe-experience-request.test.ts"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace does not treat base branch as shared PR head" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-shared-pr-base-is-not-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      shared_branch = "orocsy/cod-246-preference-miu-guest-setup-controls"
+      generated_child_branch = "orocsy/cod-266-generated-child-branch"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "base\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", shared_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "shared-pr\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Shared PR head"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266",
+        identifier: "COD-266",
+        title: "COD-246B implementation child",
+        state: "Ready for Symphony",
+        branch_name: generated_child_branch,
+        description: """
+        ## Base Branch
+        `main`
+
+        ## Branch / PR Contract
+        - Branch: `#{shared_branch}`
+        - Base: `main`
+        - Use the existing branch/PR only. Do not open a new PR. Do not merge.
+
+        ## Write Scope
+        - `src/features/swipe/SwipeExperience.tsx`
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == shared_branch
+      refute String.trim(current_branch) == "main"
+      refute String.trim(current_branch) == generated_child_branch
+      assert File.read!(Path.join(workspace, "README.md")) == "shared-pr\n"
     after
       File.rm_rf(test_root)
     end
