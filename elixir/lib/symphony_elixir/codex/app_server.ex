@@ -2227,10 +2227,37 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp dirty_validated_handoff_recheck_before_commit?(_command, _workspace), do: false
 
   defp dirty_validated_handoff_pending?(workspace) when is_binary(workspace) do
-    meaningful_git_dirty_paths(workspace) != [] and recent_passed_validation_or_gate_event?(workspace)
+    dirty_paths = meaningful_git_dirty_paths(workspace)
+
+    dirty_paths != [] and dirty_paths_validated_after_last_change?(workspace, dirty_paths)
   end
 
   defp dirty_validated_handoff_pending?(_workspace), do: false
+
+  defp dirty_paths_validated_after_last_change?(workspace, dirty_paths) do
+    case latest_passed_validation_or_gate_event_at(workspace) do
+      %DateTime{} = validated_at ->
+        Enum.all?(dirty_paths, &dirty_path_not_newer_than?(workspace, &1, validated_at))
+
+      :unknown ->
+        true
+
+      nil ->
+        false
+    end
+  end
+
+  defp dirty_path_not_newer_than?(workspace, path, %DateTime{} = validated_at) do
+    case File.stat(Path.join(workspace, path), time: :posix) do
+      {:ok, %File.Stat{mtime: mtime}} when is_integer(mtime) ->
+        DateTime.diff(DateTime.from_unix!(mtime), validated_at, :second) <= 0
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
 
   defp dirty_validated_handoff_recheck_command?(command, workspace) do
     normalized =
@@ -2785,16 +2812,16 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> false
   end
 
-  defp recent_passed_validation_or_gate_event?(workspace) when is_binary(workspace) do
+  defp latest_passed_validation_or_gate_event_at(workspace) when is_binary(workspace) do
     workspace
     |> Path.join(@delivery_event_path)
-    |> cached_recent_passed_validation_or_gate_event?()
+    |> cached_latest_passed_validation_or_gate_event_at()
   end
 
-  defp recent_passed_validation_or_gate_event?(_workspace), do: false
+  defp latest_passed_validation_or_gate_event_at(_workspace), do: nil
 
-  defp cached_recent_passed_validation_or_gate_event?(events_path) when is_binary(events_path) do
-    cache_key = {__MODULE__, :recent_passed_validation_or_gate_event, events_path}
+  defp cached_latest_passed_validation_or_gate_event_at(events_path) when is_binary(events_path) do
+    cache_key = {__MODULE__, :latest_passed_validation_or_gate_event_at, events_path}
 
     case Process.get(cache_key) do
       {signature, result} ->
@@ -2803,11 +2830,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         if current_signature == signature do
           result
         else
-          scan_cached_recent_passed_validation_or_gate_event(events_path, cache_key, current_signature)
+          scan_cached_latest_passed_validation_or_gate_event_at(events_path, cache_key, current_signature)
         end
 
       _ ->
-        scan_cached_recent_passed_validation_or_gate_event(
+        scan_cached_latest_passed_validation_or_gate_event_at(
           events_path,
           cache_key,
           delivery_event_file_signature(events_path)
@@ -2815,42 +2842,73 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp scan_cached_recent_passed_validation_or_gate_event(events_path, cache_key, signature) do
+  defp scan_cached_latest_passed_validation_or_gate_event_at(events_path, cache_key, signature) do
     result =
-      signature != :missing and
+      if signature == :missing do
+        nil
+      else
         events_path
         |> File.stream!()
         |> Enum.reduce([], fn line, acc -> [String.trim(line) | acc] |> Enum.take(40) end)
         |> Enum.reverse()
-        |> Enum.any?(&passed_validation_or_gate_event_line?/1)
+        |> Enum.reduce(nil, fn line, latest ->
+          case passed_validation_or_gate_event_at(line) do
+            nil -> latest
+            timestamp -> timestamp
+          end
+        end)
+      end
 
     Process.put(cache_key, {signature, result})
     result
   rescue
     _error ->
-      Process.put(cache_key, {signature, false})
-      false
+      Process.put(cache_key, {signature, nil})
+      nil
   end
 
-  defp passed_validation_or_gate_event_line?(line) when is_binary(line) do
+  defp passed_validation_or_gate_event_at(line) when is_binary(line) do
     case Jason.decode(line) do
       {:ok, %{"status" => "passed"} = event} ->
         event_name = Map.get(event, "event", "") |> to_string()
         tool = Map.get(event, "tool", "") |> to_string() |> String.downcase()
         text = inspect(event, limit: :infinity, printable_limit: :infinity) |> String.downcase()
 
-        event_name in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
-          (event_name == "validation" and String.contains?(text, ["test", "vitest", "typecheck", "lint", "build"])) or
-          (event_name == "tool.finished" and
-             (String.contains?(tool, ["validation", "test", "vitest", "typecheck", "lint", "build"]) or
-                String.contains?(text, ["validation", "test", "vitest", "typecheck", "lint", "build"])))
+        if passed_validation_or_gate_event?(event_name, tool, text) do
+          event_timestamp(event) || :unknown
+        end
 
       _ ->
-        false
+        nil
     end
   end
 
-  defp passed_validation_or_gate_event_line?(_line), do: false
+  defp passed_validation_or_gate_event_at(_line), do: nil
+
+  defp passed_validation_or_gate_event?(event_name, tool, text) do
+    event_name in ["gate.post-miu", "gate.required-evidence", "gate.declared-scope"] or
+      (event_name == "validation" and String.contains?(text, ["test", "vitest", "typecheck", "lint", "build"])) or
+      (event_name == "tool.finished" and
+         (String.contains?(tool, ["validation", "test", "vitest", "typecheck", "lint", "build"]) or
+            String.contains?(text, ["validation", "test", "vitest", "typecheck", "lint", "build"])))
+  end
+
+  defp event_timestamp(event) when is_map(event) do
+    ["ts", "timestamp", "created_at"]
+    |> Enum.find_value(fn key ->
+      case Map.get(event, key) do
+        value when is_binary(value) -> parse_event_timestamp(value)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp parse_event_timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
 
   defp fresh_implementation_checkpoint_ready?(workspace) when is_binary(workspace) do
     technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)

@@ -179,6 +179,7 @@ defmodule SymphonyElixir.AgentRunner do
           )
         after
           AppServer.stop_session(session)
+          consume_policy_violation_patches_after_turn(workspace, opts)
         end
       end
 
@@ -255,6 +256,16 @@ defmodule SymphonyElixir.AgentRunner do
       @max_policy_violation_recoveries
     end
   end
+
+  defp consume_policy_violation_patches_after_turn(workspace, opts) when is_binary(workspace) and is_list(opts) do
+    if Keyword.has_key?(opts, :policy_violation) do
+      DispatchPreflight.consume_turn_policy_patches(workspace)
+    end
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_policy_violation_patches_after_turn(_workspace, _opts), do: :ok
 
   defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),

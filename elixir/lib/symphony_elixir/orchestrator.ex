@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Orchestrator do
     AgentRunner,
     Config,
     DispatchPreflight,
+    IssueRequirements,
     PromptBuilder,
     RescueSupervisor,
     ReviewMonitor,
@@ -5030,7 +5031,7 @@ defmodule SymphonyElixir.Orchestrator do
         "issue_id" => correction["issue_id"],
         "correction_id" => correction["correction_id"],
         "source" => correction["source"],
-        "head_sha" => retry_fingerprint_head_sha(preflight),
+        "head_sha" => retry_fingerprint_head_sha(workspace_path, preflight),
         "policy_hash" => retry_fingerprint_policy_hash(preflight),
         "operation" => scope_access["operation"] || stored["operation"],
         "paths" => scope_access["paths"] || stored["paths"],
@@ -5045,6 +5046,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp current_retry_fingerprint(_correction, _workspace_path, _required_keys), do: nil
 
+  defp retry_fingerprint_head_sha(workspace_path, preflight) when is_binary(workspace_path) do
+    git_head_sha(workspace_path) || retry_fingerprint_head_sha(preflight)
+  end
+
+  defp retry_fingerprint_head_sha(_workspace_path, preflight), do: retry_fingerprint_head_sha(preflight)
+
   defp retry_fingerprint_head_sha(preflight) when is_map(preflight) do
     Map.get(preflight, "head_sha") ||
       get_in(preflight, ["review", "head_sha"]) ||
@@ -5053,13 +5060,57 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_fingerprint_head_sha(_preflight), do: nil
 
+  defp git_head_sha(workspace_path) when is_binary(workspace_path) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace_path, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      _ -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
   defp retry_fingerprint_policy_hash(preflight) when is_map(preflight) do
-    Map.get(preflight, "policy_hash") ||
+    stable_retry_policy_hash(preflight) ||
+      Map.get(preflight, "policy_hash") ||
       get_in(preflight, ["requirements", "scope_bundle", "policy_hash"]) ||
       get_in(preflight, ["scope_bundle", "policy_hash"])
   end
 
   defp retry_fingerprint_policy_hash(_preflight), do: nil
+
+  defp stable_retry_policy_hash(%{"requirements" => %{"scope_bundle" => %{} = bundle}}) do
+    stable_retry_policy_hash_for_bundle(bundle)
+  end
+
+  defp stable_retry_policy_hash(%{"scope_bundle" => %{} = bundle}) do
+    stable_retry_policy_hash_for_bundle(bundle)
+  end
+
+  defp stable_retry_policy_hash(_preflight), do: nil
+
+  defp stable_retry_policy_hash_for_bundle(bundle) when is_map(bundle) do
+    pruned = prune_turn_policy_patch_entries(bundle)
+
+    if pruned == bundle do
+      nil
+    else
+      pruned
+      |> IssueRequirements.refresh_scope_bundle_hash()
+      |> Map.get("policy_hash")
+    end
+  end
+
+  defp prune_turn_policy_patch_entries(bundle) when is_map(bundle) do
+    Enum.reduce(["read_context", "write_scope", "conflict_scope", "denied_scope"], bundle, fn key, acc ->
+      case Map.get(acc, key) do
+        entries when is_list(entries) -> Map.put(acc, key, Enum.reject(entries, &turn_policy_patch_entry?/1))
+        _ -> acc
+      end
+    end)
+  end
+
+  defp turn_policy_patch_entry?(%{"policy_patch_id" => patch_id, "expires" => "turn"}) when is_binary(patch_id), do: true
+  defp turn_policy_patch_entry?(_entry), do: false
 
   defp fingerprint_values_match?(stored, current) when is_map(stored) and is_map(current) do
     stored

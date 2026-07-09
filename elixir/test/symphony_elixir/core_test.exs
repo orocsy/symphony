@@ -319,6 +319,113 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "stored retry fingerprint compares against live git head when preflight is stale" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-live-head-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-live-head",
+        identifier: "COD-STALE-LIVE-HEAD",
+        title: "Stale scope correction live head changed",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+
+      write_scope_retry_preflight!(workspace, issue.identifier, "stale-preflight-head", "sha256:policy-a")
+      write_scope_retry_correction!(workspace, issue, "stale-preflight-head", "sha256:policy-a")
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "stored retry fingerprint ignores consumed turn policy patches" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-scope-turn-patch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-stale-scope-turn-patch",
+        identifier: "COD-STALE-TURN-PATCH",
+        title: "Stale scope correction with consumed turn patch",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+
+      base_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => issue.identifier,
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      turn_patch_bundle =
+        base_bundle
+        |> Map.update!("read_context", fn entries ->
+          entries ++
+            [
+              %{
+                "path" => "src/features/landing/GuestStartScreen.tsx",
+                "source" => "scope_access.auto.direct_import",
+                "operation" => "read",
+                "expires" => "turn",
+                "policy_patch_id" => "scope_access_read_guest_start"
+              }
+            ]
+        end)
+        |> SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash()
+
+      write_scope_retry_preflight!(workspace, issue.identifier, "head-1", turn_patch_bundle["policy_hash"], turn_patch_bundle)
+      write_scope_retry_correction!(workspace, issue, "head-1", base_bundle["policy_hash"])
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "stored retry fingerprint parks when current preflight cannot be read" do
     workspace_root =
       Path.join(
@@ -14101,23 +14208,22 @@ defmodule SymphonyElixir.CoreTest do
           "denied_scope" => []
         })
 
-      File.write!(
-        Path.join(state_dir, "dispatch-preflight.json"),
-        Jason.encode!(%{
-          "mode" => "review_rework",
-          "issue" => "MT-SCOPE-ACCESS",
-          "branch" => "orocsy/mt-scope-access",
-          "requirements" => %{
-            "ticket_type" => "Implementation",
-            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
-            "validation" => %{
-              "commands" => ["pnpm exec vitest run tests/unit/swipe-experience.test.ts"],
-              "files" => []
-            },
-            "scope_bundle" => scope_bundle
-          }
-        })
-      )
+      base_preflight = %{
+        "mode" => "review_rework",
+        "issue" => "MT-SCOPE-ACCESS",
+        "branch" => "orocsy/mt-scope-access",
+        "requirements" => %{
+          "ticket_type" => "Implementation",
+          "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+          "validation" => %{
+            "commands" => ["pnpm exec vitest run tests/unit/swipe-experience.test.ts"],
+            "files" => []
+          },
+          "scope_bundle" => scope_bundle
+        }
+      }
+
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(base_preflight))
 
       issue = %Issue{
         id: "issue-scope-access",
@@ -14172,17 +14278,35 @@ defmodule SymphonyElixir.CoreTest do
       assert get_in(patch, ["entries", Access.at(0), "source"]) == "scope_access.auto.direct_import"
 
       assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+      active_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert active_patch["status"] == "active"
 
       assert Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
                entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
                  entry["source"] == "scope_access.auto.direct_import"
              end)
 
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
+
       assert :ok =
                AppServer.command_policy_violation_for_test(
                  workspace,
                  ~s(rg -n "GuestPreferenceDraft" src/features/landing/GuestStartScreen.tsx)
                )
+
+      assert :ok = SymphonyElixir.DispatchPreflight.consume_turn_policy_patches(workspace)
+      consumed_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert consumed_patch["status"] == "consumed"
+
+      assert {:ok, expired_preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      refute Enum.any?(get_in(expired_preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
+               entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
+                 entry["source"] == "scope_access.auto.direct_import"
+             end)
+
+      assert {:error, ^command, ^pattern} =
+               AppServer.command_policy_violation_for_test(workspace, command)
     after
       File.rm_rf(test_root)
     end
@@ -15074,10 +15198,11 @@ defmodule SymphonyElixir.CoreTest do
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
       File.mkdir_p!(event_dir)
       File.mkdir_p!(state_dir)
+      validated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
       File.write!(
         Path.join(event_dir, "events.jsonl"),
-        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"2026-07-07T02:41:59Z"}\n)
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"#{validated_at}"}\n)
       )
 
       File.write!(
@@ -15186,10 +15311,11 @@ defmodule SymphonyElixir.CoreTest do
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
       File.mkdir_p!(event_dir)
       File.mkdir_p!(state_dir)
+      validated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
       File.write!(
         Path.join(event_dir, "events.jsonl"),
-        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"2026-07-07T02:41:59Z"}\n)
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"#{validated_at}"}\n)
       )
 
       File.write!(
@@ -15253,6 +15379,87 @@ defmodule SymphonyElixir.CoreTest do
                )
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git push")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "review rework command policy allows revalidation when dirty files changed after evidence" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-stale-dirty-validation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      source_path = Path.join(workspace, "src/features/swipe/SwipeExperience.tsx")
+      test_path = Path.join(workspace, "tests/unit/swipe-experience-request.test.ts")
+      File.mkdir_p!(Path.dirname(source_path))
+      File.mkdir_p!(Path.dirname(test_path))
+      File.write!(source_path, "export const requestCards = false;\n")
+      File.write!(test_path, "test('request cards', () => false);\n")
+
+      {_output, 0} =
+        System.cmd("git", ["add", "src/features/swipe/SwipeExperience.tsx", "tests/unit/swipe-experience-request.test.ts"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["commit", "-m", "Add swipe request files"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        ~s({"event":"validation","status":"passed","command":"pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts","step":"Focused SwipeExperience request validation passed","tool":"vitest","ts":"2026-01-01T00:00:00Z"}\n)
+      )
+
+      File.write!(source_path, "export const requestCards = true;\n")
+      File.write!(test_path, "test('request cards', () => true);\n")
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "branch" => "orocsy/cod-266-review-rework",
+          "first_task" => "Finish dirty validated handoff.",
+          "issue" => "COD-266"
+        })
+      )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff -- src/features/swipe/SwipeExperience.tsx"
+               )
     after
       File.rm_rf(workspace)
     end
@@ -20800,9 +21007,26 @@ defmodule SymphonyElixir.CoreTest do
     }
   end
 
-  defp write_scope_retry_preflight!(workspace, issue_identifier, head_sha, policy_hash) do
+  defp write_scope_retry_preflight!(workspace, issue_identifier, head_sha, policy_hash, scope_bundle \\ nil) do
     state_dir = Path.join(workspace, ".orocsy/delivery/state")
     File.mkdir_p!(state_dir)
+
+    scope_bundle =
+      scope_bundle ||
+        %{
+          "policy_hash" => policy_hash,
+          "write_scope" => [
+            %{
+              "path" => "src/features/swipe/SwipeExperience.tsx",
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        }
 
     File.write!(
       Path.join(state_dir, "dispatch-preflight.json"),
@@ -20818,20 +21042,7 @@ defmodule SymphonyElixir.CoreTest do
         "requirements" => %{
           "ticket_type" => "Implementation",
           "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
-          "scope_bundle" => %{
-            "policy_hash" => policy_hash,
-            "write_scope" => [
-              %{
-                "path" => "src/features/swipe/SwipeExperience.tsx",
-                "source" => "test.write_scope",
-                "operation" => "write",
-                "expires" => "branch"
-              }
-            ],
-            "read_context" => [],
-            "conflict_scope" => [],
-            "denied_scope" => []
-          }
+          "scope_bundle" => scope_bundle
         }
       })
     )

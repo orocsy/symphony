@@ -58,7 +58,11 @@ defmodule SymphonyElixir.DispatchPreflight do
         case File.read(path) do
           {:ok, body} ->
             with {:ok, preflight} <- Jason.decode(body) do
-              {:ok, preflight |> merge_policy_patches(workspace) |> merge_knowledge_ledger(workspace)}
+              {:ok,
+               preflight
+               |> drop_inactive_turn_policy_patch_entries(workspace)
+               |> merge_policy_patches(workspace)
+               |> merge_knowledge_ledger(workspace)}
             end
 
           {:error, reason} ->
@@ -70,6 +74,18 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   def read(_workspace), do: :none
+
+  @spec consume_turn_policy_patches(String.t() | nil) :: :ok
+  def consume_turn_policy_patches(workspace) when is_binary(workspace) do
+    workspace
+    |> policy_patches()
+    |> Enum.each(&consume_turn_policy_patch(workspace, &1))
+
+    prune_persisted_turn_policy_patch_entries(workspace)
+    :ok
+  end
+
+  def consume_turn_policy_patches(_workspace), do: :ok
 
   @spec prompt_context(String.t() | nil) :: String.t()
   def prompt_context(workspace) do
@@ -1436,6 +1452,154 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp active_policy_patch?(%{"status" => status}) when status in ["active", "applied"], do: true
   defp active_policy_patch?(%{"status" => status}) when is_binary(status), do: false
   defp active_policy_patch?(_patch), do: true
+
+  defp drop_inactive_turn_policy_patch_entries(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
+    active_patch_ids = active_policy_patch_ids(workspace)
+
+    pruned =
+      preflight
+      |> prune_preflight_scope_bundle(active_patch_ids)
+      |> prune_policy_patch_summaries(active_patch_ids)
+
+    if pruned == preflight do
+      preflight
+    else
+      refresh_preflight_policy_hash(pruned)
+    end
+  end
+
+  defp drop_inactive_turn_policy_patch_entries(preflight, _workspace), do: preflight
+
+  defp active_policy_patch_ids(workspace) when is_binary(workspace) do
+    workspace
+    |> policy_patches()
+    |> Enum.map(& &1["patch_id"])
+    |> Enum.filter(&is_binary/1)
+    |> MapSet.new()
+  end
+
+  defp prune_preflight_scope_bundle(preflight, active_patch_ids) when is_map(preflight) do
+    preflight
+    |> prune_requirements_scope_bundle(active_patch_ids)
+    |> prune_top_level_scope_bundle(active_patch_ids)
+  end
+
+  defp prune_requirements_scope_bundle(%{"requirements" => requirements} = preflight, active_patch_ids)
+       when is_map(requirements) do
+    Map.put(preflight, "requirements", prune_scope_bundle_in_requirements(requirements, active_patch_ids))
+  end
+
+  defp prune_requirements_scope_bundle(preflight, _active_patch_ids), do: preflight
+
+  defp prune_scope_bundle_in_requirements(%{"scope_bundle" => bundle} = requirements, active_patch_ids)
+       when is_map(bundle) do
+    Map.put(requirements, "scope_bundle", prune_scope_bundle_turn_entries(bundle, active_patch_ids))
+  end
+
+  defp prune_scope_bundle_in_requirements(requirements, _active_patch_ids), do: requirements
+
+  defp prune_top_level_scope_bundle(%{"scope_bundle" => bundle} = preflight, active_patch_ids) when is_map(bundle) do
+    Map.put(preflight, "scope_bundle", prune_scope_bundle_turn_entries(bundle, active_patch_ids))
+  end
+
+  defp prune_top_level_scope_bundle(preflight, _active_patch_ids), do: preflight
+
+  defp prune_scope_bundle_turn_entries(bundle, active_patch_ids) when is_map(bundle) do
+    {pruned, changed?} =
+      Enum.reduce(["read_context", "write_scope", "conflict_scope", "denied_scope"], {bundle, false}, fn key, {acc, changed?} ->
+        case Map.get(acc, key) do
+          entries when is_list(entries) ->
+            kept = Enum.reject(entries, &inactive_turn_policy_patch_entry?(&1, active_patch_ids))
+            {Map.put(acc, key, kept), changed? or kept != entries}
+
+          _ ->
+            {acc, changed?}
+        end
+      end)
+
+    if changed? do
+      IssueRequirements.refresh_scope_bundle_hash(pruned)
+    else
+      bundle
+    end
+  end
+
+  defp inactive_turn_policy_patch_entry?(%{"policy_patch_id" => patch_id, "expires" => "turn"}, active_patch_ids)
+       when is_binary(patch_id) do
+    not MapSet.member?(active_patch_ids, patch_id)
+  end
+
+  defp inactive_turn_policy_patch_entry?(_entry, _active_patch_ids), do: false
+
+  defp prune_policy_patch_summaries(preflight, active_patch_ids) when is_map(preflight) do
+    case Map.get(preflight, "policy_patches", :missing) do
+      :missing ->
+        preflight
+
+      summaries when is_list(summaries) ->
+        Map.put(preflight, "policy_patches", Enum.reject(summaries, &inactive_policy_patch_summary?(&1, active_patch_ids)))
+
+      _other ->
+        preflight
+    end
+  end
+
+  defp inactive_policy_patch_summary?(%{"patch_id" => patch_id}, active_patch_ids) when is_binary(patch_id) do
+    not MapSet.member?(active_patch_ids, patch_id)
+  end
+
+  defp inactive_policy_patch_summary?(_summary, _active_patch_ids), do: false
+
+  defp refresh_preflight_policy_hash(%{"requirements" => requirements} = preflight) when is_map(requirements) do
+    Map.put(preflight, "policy_hash", policy_hash(requirements))
+  end
+
+  defp refresh_preflight_policy_hash(%{"scope_bundle" => %{"policy_hash" => policy_hash}} = preflight) when is_binary(policy_hash) do
+    Map.put(preflight, "policy_hash", policy_hash)
+  end
+
+  defp refresh_preflight_policy_hash(preflight), do: preflight
+
+  defp prune_persisted_turn_policy_patch_entries(workspace) when is_binary(workspace) do
+    path = Path.join(workspace, @preflight_path)
+
+    with true <- File.regular?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{} = preflight} <- Jason.decode(body) do
+      pruned = drop_inactive_turn_policy_patch_entries(preflight, workspace)
+
+      if pruned != preflight do
+        File.write!(path, Jason.encode!(pruned, pretty: true) <> "\n")
+      end
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_turn_policy_patch(workspace, %{"path" => relative_path} = patch) when is_binary(relative_path) do
+    if turn_policy_patch?(patch) do
+      path = Path.join(workspace, relative_path)
+
+      patch
+      |> Map.put("status", "consumed")
+      |> Map.put_new("consumed_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> then(&File.write!(path, Jason.encode!(&1, pretty: true) <> "\n"))
+    end
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_turn_policy_patch(_workspace, _patch), do: :ok
+
+  defp turn_policy_patch?(%{"decision" => "allow_once"}), do: true
+
+  defp turn_policy_patch?(%{"entries" => entries}) when is_list(entries) do
+    Enum.any?(entries, &(&1["expires"] == "turn"))
+  end
+
+  defp turn_policy_patch?(_patch), do: false
 
   defp apply_policy_patches_to_requirements(requirements, patches) when is_map(requirements) do
     Enum.reduce(patches, ensure_scope_bundle(requirements), fn patch, acc ->
