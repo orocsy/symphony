@@ -4,7 +4,15 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, IssueRequirements, PathSafety, PromptBuilder, SSH}
+
+  alias SymphonyElixir.{
+    Config,
+    IssueRequirements,
+    PathSafety,
+    PromptBuilder,
+    SSH,
+    UnblockReport
+  }
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -118,6 +126,27 @@ defmodule SymphonyElixir.Workspace do
     else
       _ -> []
     end
+  end
+
+  @spec open_unblock_reports(Path.t()) :: [map()]
+  def open_unblock_reports(workspace_root) when is_binary(workspace_root) do
+    if File.dir?(workspace_root) do
+      workspace_root
+      |> Path.join("*")
+      |> Path.wildcard()
+      |> Enum.filter(&File.dir?/1)
+      |> Enum.flat_map(&open_unblock_reports_in_workspace/1)
+      |> newest_corrections_first()
+    else
+      []
+    end
+  end
+
+  @spec open_unblock_reports_in_workspace(Path.t()) :: [map()]
+  def open_unblock_reports_in_workspace(workspace) when is_binary(workspace) do
+    workspace
+    |> open_blocking_corrections_in_workspace()
+    |> Enum.flat_map(&unblock_report_entry(&1, workspace))
   end
 
   @spec resolve_blocking_corrections_in_workspace(Path.t(), String.t()) :: :ok | {:error, term()}
@@ -1185,6 +1214,14 @@ defmodule SymphonyElixir.Workspace do
       "resolved_at" => nil,
       "resolution_summary" => ""
     }
+    |> maybe_put_unblock_report()
+  end
+
+  defp maybe_put_unblock_report(%{} = correction) do
+    case UnblockReport.from_correction(correction) do
+      %{} = report -> Map.put(correction, "unblock_report", report)
+      _ -> correction
+    end
   end
 
   defp write_local_correction_files(workspace, correction) do
@@ -1228,20 +1265,24 @@ defmodule SymphonyElixir.Workspace do
         _ -> DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
       end
 
-    write_local_delivery_event!(workspace, issue_context, now, %{
-      "event" => "correction.created",
-      "phase" => "correction",
-      "status" => "open",
-      "run_status" => correction_run_status(correction),
-      "issue" => correction["issue"] || issue_context.issue_identifier,
-      "issue_id" => correction["issue_id"] || issue_context.issue_id,
-      "correction_id" => correction["correction_id"],
-      "source" => correction["source"],
-      "source_status" => correction["source_status"],
-      "summary" => correction["summary"],
-      "next_action" => correction["next_action"],
-      "artifacts" => correction_artifact_paths(correction)
-    })
+    event =
+      %{
+        "event" => "correction.created",
+        "phase" => "correction",
+        "status" => "open",
+        "run_status" => correction_run_status(correction),
+        "issue" => correction["issue"] || issue_context.issue_identifier,
+        "issue_id" => correction["issue_id"] || issue_context.issue_id,
+        "correction_id" => correction["correction_id"],
+        "source" => correction["source"],
+        "source_status" => correction["source_status"],
+        "summary" => correction["summary"],
+        "next_action" => correction["next_action"],
+        "artifacts" => correction_artifact_paths(correction)
+      }
+      |> maybe_put_unblock_report_event(correction)
+
+    write_local_delivery_event!(workspace, issue_context, now, event)
   rescue
     error ->
       Logger.debug("Unable to record local correction event #{issue_log_context(issue_context)} error=#{Exception.message(error)}")
@@ -1315,6 +1356,7 @@ defmodule SymphonyElixir.Workspace do
       |> Map.put("last_event_id", event_id)
       |> maybe_put_event_phase(event)
       |> maybe_put_event_run_status(event)
+      |> maybe_put_event_unblock_report(event)
 
     File.write!(Path.join(state_dir, "current.json"), Jason.encode!(state, pretty: true) <> "\n")
   end
@@ -1328,6 +1370,18 @@ defmodule SymphonyElixir.Workspace do
     do: Map.put(state, "status", status)
 
   defp maybe_put_event_run_status(state, _event), do: state
+
+  defp maybe_put_event_unblock_report(state, %{"unblock_report" => %{} = report}) do
+    Map.put(state, "unblock_report", report)
+  end
+
+  defp maybe_put_event_unblock_report(state, _event), do: state
+
+  defp maybe_put_unblock_report_event(event, %{"unblock_report" => %{} = report}) do
+    Map.put(event, "unblock_report", report)
+  end
+
+  defp maybe_put_unblock_report_event(event, _correction), do: event
 
   defp correction_resolution_run_status(workspace) do
     if blocking_correction_in_workspace?(workspace), do: "blocked", else: "retry-ready"
@@ -1414,6 +1468,7 @@ defmodule SymphonyElixir.Workspace do
       "## Required Corrections",
       "",
       render_markdown_list(required_corrections, "Determine the smallest safe recovery step before continuing."),
+      render_optional_markdown_section("## Unblock Report", UnblockReport.markdown(correction)),
       render_optional_markdown_section("## Classification", classification, classification_summary),
       render_optional_markdown_section("## Resolution", resolution_summary)
     ]
@@ -1424,6 +1479,24 @@ defmodule SymphonyElixir.Workspace do
 
   defp render_markdown_list([], fallback), do: ["- #{fallback}"]
   defp render_markdown_list(items, _fallback), do: Enum.map(items, &"- #{&1}")
+
+  defp unblock_report_entry(%{} = correction, workspace) do
+    case UnblockReport.from_correction(correction) do
+      %{} = report ->
+        [
+          report
+          |> Map.put("issue", correction["issue"])
+          |> Map.put("issue_id", correction["issue_id"])
+          |> Map.put("correction_id", correction["correction_id"])
+          |> Map.put("correction_path", correction["path"])
+          |> Map.put("workspace_path", workspace)
+          |> Map.put("created_at", correction["created_at"])
+        ]
+
+      _ ->
+        []
+    end
+  end
 
   defp render_optional_markdown_section(_heading, ""), do: []
   defp render_optional_markdown_section(_heading, nil), do: []

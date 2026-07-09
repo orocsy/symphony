@@ -7,7 +7,19 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, DispatchPreflight, PromptBuilder, RescueSupervisor, ReviewMonitor, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    DispatchPreflight,
+    PromptBuilder,
+    RescueSupervisor,
+    ReviewMonitor,
+    StatusDashboard,
+    Tracker,
+    UnblockReport,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -406,6 +418,11 @@ defmodule SymphonyElixir.Orchestrator do
     @doc false
     def complete_review_classification_handoff_for_test(%Issue{} = issue) do
       maybe_complete_review_classification_handoff(issue)
+    end
+
+    @doc false
+    def runtime_failure_comment_for_test(%Issue{} = issue, correction, failure) do
+      runtime_failure_comment(issue, correction, failure)
     end
   end
 
@@ -3879,6 +3896,7 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     evidence = runtime_failure_evidence_block(correction)
+    unblock_report = runtime_failure_unblock_report_block(correction)
 
     """
     Symphony runtime parked this issue because a worker hit a configured failure guard.
@@ -3891,10 +3909,29 @@ defmodule SymphonyElixir.Orchestrator do
 
     #{evidence}
 
+    #{unblock_report}
+
     #{failure.summary}
     """
     |> String.trim()
   end
+
+  defp runtime_failure_unblock_report_block(%{} = correction) do
+    case UnblockReport.markdown(correction) do
+      report when is_binary(report) and report != "" ->
+        """
+        Unblock report:
+
+        #{report}
+        """
+        |> String.trim()
+
+      _ ->
+        ""
+    end
+  end
+
+  defp runtime_failure_unblock_report_block(_correction), do: ""
 
   defp runtime_failure_evidence_block(%{"findings" => [finding | _]}) when is_binary(finding) do
     evidence =
@@ -4170,10 +4207,13 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    blocked = blocked_unblock_reports_snapshot()
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
+       blocked: blocked,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -4197,6 +4237,16 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  defp blocked_unblock_reports_snapshot do
+    Config.settings!().workspace.root
+    |> Workspace.open_unblock_reports()
+    |> Enum.take(10)
+  rescue
+    error ->
+      Logger.debug("Unable to load blocked unblock reports for snapshot: #{Exception.message(error)}")
+      []
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do

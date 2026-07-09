@@ -309,12 +309,14 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_payload() do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         total_tokens = Map.get(codex_totals, :total_tokens, 0)
+        blocked = Map.get(snapshot, :blocked, [])
 
         {
           {:ok,
            %{
              running: running,
              retrying: retrying,
+             blocked: blocked,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
@@ -333,6 +335,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+        blocked = Map.get(snapshot, :blocked, [])
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
@@ -344,7 +347,7 @@ defmodule SymphonyElixir.StatusDashboard do
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
-        running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
+        blocked_section = format_blocked_section(blocked, running)
         backoff_rows = format_retry_rows(retrying)
 
         ([
@@ -371,7 +374,7 @@ defmodule SymphonyElixir.StatusDashboard do
            running_table_separator_row(running_event_width)
          ] ++
            running_rows ++
-           running_to_backoff_spacer ++
+           blocked_section ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -560,6 +563,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             blocked: Map.get(snapshot, :blocked, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
@@ -644,6 +648,74 @@ defmodule SymphonyElixir.StatusDashboard do
   @doc false
   @spec tps_graph_for_test([{integer(), integer()}], integer(), integer()) :: String.t()
   def tps_graph_for_test(samples, now_ms, current_tokens), do: tps_graph(samples, now_ms, current_tokens)
+
+  defp format_blocked_section([], running), do: if(running == [], do: [], else: ["│"])
+
+  defp format_blocked_section(blocked, running) do
+    running_to_blocked_spacer = if(running == [], do: [], else: ["│"])
+
+    running_to_blocked_spacer ++
+      [colorize("├─ Blocked", @ansi_bold), "│"] ++
+      format_blocked_rows(blocked) ++
+      ["│"]
+  end
+
+  defp format_blocked_rows(blocked) do
+    blocked
+    |> Enum.sort_by(&blocked_sort_key/1)
+    |> Enum.map(&format_blocked_summary/1)
+  end
+
+  defp format_blocked_summary(blocked_entry) do
+    issue = blocked_value(blocked_entry, "issue") || blocked_value(blocked_entry, "issue_id") || "unknown"
+    blocker_class = blocked_value(blocked_entry, "blocker_class") || "scope_access_blocked"
+    asked_for = blocked_value(blocked_entry, "worker_asked_for") || blocked_worker_asked_for(blocked_entry)
+    next_action = blocked_value(blocked_entry, "next_action") || "inspect correction"
+    policy_hash = blocked_value(blocked_entry, "policy_hash")
+
+    "│  " <>
+      colorize("!", @ansi_red) <>
+      " " <>
+      colorize(issue, @ansi_red) <>
+      " " <>
+      colorize(blocker_class, @ansi_yellow) <>
+      " " <>
+      colorize("asked=#{truncate(asked_for, 72)}", @ansi_cyan) <>
+      blocked_policy_hash(policy_hash) <>
+      " " <>
+      colorize("next=#{truncate(next_action, 84)}", @ansi_dim)
+  end
+
+  defp blocked_sort_key(%{} = blocked_entry), do: blocked_value(blocked_entry, "created_at") || ""
+  defp blocked_sort_key(_blocked_entry), do: ""
+
+  defp blocked_worker_asked_for(blocked_entry) do
+    operation = blocked_value(blocked_entry, "requested_operation") || "unknown"
+    paths = blocked_value(blocked_entry, "requested_paths")
+
+    case paths do
+      values when is_list(values) and values != [] -> "#{operation} #{Enum.join(values, ", ")}"
+      _ -> operation
+    end
+  end
+
+  defp blocked_policy_hash(hash) when is_binary(hash) and hash != "" do
+    " " <> colorize("policy=#{truncate(hash, 32)}", @ansi_magenta)
+  end
+
+  defp blocked_policy_hash(_hash), do: ""
+
+  defp blocked_value(%{} = map, key) when is_binary(key) do
+    Map.get(map, key) || blocked_existing_atom_value(map, key)
+  end
+
+  defp blocked_value(_map, _key), do: nil
+
+  defp blocked_existing_atom_value(map, key) do
+    Map.get(map, String.to_existing_atom(key))
+  rescue
+    ArgumentError -> nil
+  end
 
   defp format_retry_rows(retrying) do
     if retrying == [] do

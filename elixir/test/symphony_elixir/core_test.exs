@@ -14303,6 +14303,164 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "scope blocker report includes requested path operation policy hash and next action" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-unblock-report-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      issue = %Issue{
+        id: "issue-scope-unblock-report",
+        identifier: "MT-SCOPE-REPORT",
+        title: "Scope unblock report",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      path = "src/features/landing/GuestStartScreen.tsx"
+      policy_hash = "sha256:policy-scope-report"
+      head_sha = "f00dbabe"
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(
+                 workspace,
+                 issue,
+                 scope_unblock_correction_attrs(issue,
+                   path: path,
+                   operation: "read",
+                   head_sha: head_sha,
+                   policy_hash: policy_hash,
+                   next_action: "retry"
+                 )
+               )
+
+      assert report = correction["unblock_report"]
+      assert report["blocker_class"] == "scope_policy_stale"
+      assert report["requested_operation"] == "read"
+      assert report["requested_paths"] == [path]
+      assert report["policy_hash"] == policy_hash
+      assert report["head_sha"] == head_sha
+
+      assert report["next_action"] ==
+               "add read_context or update Linear write scope, then redispatch"
+
+      markdown = File.read!(Path.join(workspace, correction["artifacts"]["markdown"]))
+      assert markdown =~ "## Unblock Report"
+      assert markdown =~ "Worker asked for: read #{path}"
+      assert markdown =~ "Policy hash: #{policy_hash}"
+      assert markdown =~ "Next action: add read_context or update Linear write scope, then redispatch"
+
+      current_state =
+        workspace
+        |> Path.join(".orocsy/delivery/state/current.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert get_in(current_state, ["unblock_report", "worker_asked_for"]) == "read #{path}"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dashboard distinguishes safe read request from write scope expansion" do
+    path = "src/features/landing/GuestStartScreen.tsx"
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         blocked: [
+           %{
+             "issue" => "MT-READ",
+             "blocker_class" => "safe_read_context_required",
+             "worker_asked_for" => "read #{path}",
+             "next_action" => "add read_context or update Linear write scope, then redispatch",
+             "policy_hash" => "sha256:read-policy",
+             "created_at" => "2026-07-09T00:00:00Z"
+           },
+           %{
+             "issue" => "MT-WRITE",
+             "blocker_class" => "write_scope_expansion_required",
+             "worker_asked_for" => "write #{path}",
+             "next_action" => "update Linear write scope or narrow the worker command, then redispatch",
+             "policy_hash" => "sha256:write-policy",
+             "created_at" => "2026-07-09T00:00:01Z"
+           }
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+
+    assert rendered =~ "Blocked"
+    assert rendered =~ "MT-READ"
+    assert rendered =~ "safe_read_context_required"
+    assert rendered =~ "asked=read #{path}"
+    assert rendered =~ "MT-WRITE"
+    assert rendered =~ "write_scope_expansion_required"
+    assert rendered =~ "asked=write #{path}"
+  end
+
+  test "Linear correction comment explains why retry is parked until policy changes" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-unblock-comment-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      issue = %Issue{
+        id: "issue-scope-unblock-comment",
+        identifier: "MT-SCOPE-COMMENT",
+        title: "Scope unblock comment",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      path = "src/features/landing/GuestStartScreen.tsx"
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(
+                 workspace,
+                 issue,
+                 scope_unblock_correction_attrs(issue,
+                   path: path,
+                   operation: "read",
+                   next_action: "retry",
+                   policy_hash: "sha256:unchanged-scope-policy"
+                 )
+               )
+
+      body =
+        Orchestrator.runtime_failure_comment_for_test(issue, correction, %{
+          kind: "scope_access",
+          source_status: "blocked",
+          next_action: "retry",
+          summary: "Scope access retry is parked until policy changes."
+        })
+
+      assert body =~ "Unblock report:"
+      assert body =~ "Blocked: scope_policy_stale"
+      assert body =~ "Worker asked for: read #{path}"
+      assert body =~ "Why no retry: same head and same policy hash"
+      assert body =~ "Next action: add read_context or update Linear write scope, then redispatch"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "unsafe write expansion creates correction and does not retry" do
     test_root =
       Path.join(
@@ -14390,6 +14548,11 @@ defmodule SymphonyElixir.CoreTest do
       assert correction["guard"]["retry_fingerprint"]["operation"] == "write"
       assert correction["guard"]["retry_fingerprint"]["paths"] == ["src/features/landing/GuestStartScreen.tsx"]
       assert correction["guard"]["retry_fingerprint"]["policy_hash"] =~ "sha256:"
+      assert correction["unblock_report"]["blocker_class"] == "write_scope_expansion_required"
+
+      assert correction["unblock_report"]["next_action"] ==
+               "update Linear write scope or narrow the worker command, then redispatch"
+
       assert Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json")) == []
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
@@ -20717,6 +20880,47 @@ defmodule SymphonyElixir.CoreTest do
         "resolution_summary" => ""
       })
     )
+  end
+
+  defp scope_unblock_correction_attrs(issue, opts) do
+    path = Keyword.fetch!(opts, :path)
+    operation = Keyword.get(opts, :operation, "read")
+    head_sha = Keyword.get(opts, :head_sha, "abc123")
+    policy_hash = Keyword.get(opts, :policy_hash, "sha256:scope-policy")
+    next_action = Keyword.get(opts, :next_action, "retry")
+    reason_class = Keyword.get(opts, :reason_class, "read_context_controller_not_enabled")
+
+    %{
+      source: "symphony.runtime.scope-access",
+      source_status: "retryable",
+      summary: "Scope policy stale for #{path}",
+      findings: [
+        "Worker requested #{operation} #{path} under unchanged policy #{policy_hash}."
+      ],
+      required_corrections: [
+        "Update issue scope, add read context, or narrow the worker command before redispatch."
+      ],
+      next_action: next_action,
+      guard: %{
+        "scope_access" => %{
+          "operation" => operation,
+          "paths" => [path],
+          "command_fingerprint" => "scope-access-#{operation}"
+        },
+        "decision" => "block",
+        "reason_class" => reason_class,
+        "retry_fingerprint" => %{
+          "issue" => issue.identifier,
+          "issue_id" => issue.id,
+          "source" => "symphony.runtime.scope-access",
+          "head_sha" => head_sha,
+          "policy_hash" => policy_hash,
+          "operation" => operation,
+          "paths" => [path],
+          "command_fingerprint" => "scope-access-#{operation}"
+        }
+      }
+    }
   end
 
   defp write_knowledge_preflight!(workspace, issue_identifier, parent_identifier \\ nil, write_paths \\ []) do
