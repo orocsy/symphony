@@ -972,6 +972,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
 
+      expected_description_hash =
+        :crypto.hash(:sha256, issue.description)
+        |> Base.encode16(case: :lower)
+
+      assert requirements["source_description_sha256"] == expected_description_hash
       assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
       assert requirements["shared_files"] == ["package.json read-only context"]
       assert requirements["read_context"] == ["src/features/landing/GuestStartScreen.tsx"]
@@ -1009,6 +1014,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "operation" => "read",
                "expires" => "branch"
              } in bundle["denied_scope"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pushed handoff requires the cached structured issue contract to match Linear" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-handoff-contract-hash-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      requirements_dir = Path.join(workspace, ".orocsy/delivery")
+      File.mkdir_p!(requirements_dir)
+
+      issue = %Issue{identifier: "COD-266", description: "## Write Scope\n- src/app/api/cards/handler.ts"}
+      requirements_path = Path.join(requirements_dir, "issue-requirements.json")
+
+      File.write!(requirements_path, Jason.encode!(%{"source_description_sha256" => "stale"}))
+
+      refute SymphonyElixir.Orchestrator.handoff_issue_contract_current_for_test(issue, workspace)
+
+      current_hash =
+        :crypto.hash(:sha256, issue.description)
+        |> Base.encode16(case: :lower)
+
+      File.write!(requirements_path, Jason.encode!(%{"source_description_sha256" => current_hash}))
+
+      assert SymphonyElixir.Orchestrator.handoff_issue_contract_current_for_test(issue, workspace)
+
+      File.rm!(requirements_path)
+      assert SymphonyElixir.Orchestrator.handoff_issue_contract_current_for_test(issue, workspace)
     after
       File.rm_rf(workspace)
     end

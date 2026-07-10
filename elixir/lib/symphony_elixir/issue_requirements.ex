@@ -23,6 +23,7 @@ defmodule SymphonyElixir.IssueRequirements do
 
       requirements = %{
         "identifier" => string(issue.identifier),
+        "source_description_sha256" => description_sha256(base_description),
         "title" => string(issue.title),
         "state" => string(issue.state),
         "branch" => string(issue.branch_name),
@@ -82,6 +83,11 @@ defmodule SymphonyElixir.IssueRequirements do
 
   defp issue_description(%Issue{description: description}) when is_binary(description), do: description
   defp issue_description(_issue), do: ""
+
+  defp description_sha256(description) when is_binary(description) do
+    :crypto.hash(:sha256, description)
+    |> Base.encode16(case: :lower)
+  end
 
   defp maybe_append_issue_brief(description, brief) when is_binary(description) and is_binary(brief) do
     [description, brief]

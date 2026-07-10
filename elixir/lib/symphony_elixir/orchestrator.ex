@@ -2198,6 +2198,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp pushed_review_handoff_candidate(%Issue{} = issue) do
     with {:ok, workspace} <- Workspace.path_for_issue(issue),
          true <- File.dir?(workspace),
+         true <- handoff_issue_contract_current?(issue, workspace),
          checkpoint when is_binary(checkpoint) and checkpoint != "" <- PromptBuilder.workspace_recovery_checkpoint(workspace),
          true <- String.starts_with?(checkpoint, "Pushed validated handoff checkpoint:"),
          {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
@@ -2220,6 +2221,38 @@ defmodule SymphonyElixir.Orchestrator do
     end
   rescue
     error -> {:error, {:pushed_handoff_candidate_failed, Exception.message(error)}}
+  end
+
+  defp handoff_issue_contract_current?(%Issue{} = issue, workspace) when is_binary(workspace) do
+    requirements_path = Path.join(workspace, ".orocsy/delivery/issue-requirements.json")
+
+    case File.read(requirements_path) do
+      {:ok, body} ->
+        with {:ok, requirements} <- Jason.decode(body),
+             cached when is_binary(cached) <- requirements["source_description_sha256"] do
+          cached == issue_description_sha256(issue.description)
+        else
+          _ -> false
+        end
+
+      {:error, :enoent} ->
+        true
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  defp handoff_issue_contract_current?(_issue, _workspace), do: false
+
+  defp issue_description_sha256(description) do
+    :crypto.hash(:sha256, to_string(description || ""))
+    |> Base.encode16(case: :lower)
+  end
+
+  @doc false
+  def handoff_issue_contract_current_for_test(issue, workspace) do
+    handoff_issue_contract_current?(issue, workspace)
   end
 
   defp inspect_pushed_review_handoff(%Issue{} = issue, %{branch: branch, workspace: workspace} = candidate) do
