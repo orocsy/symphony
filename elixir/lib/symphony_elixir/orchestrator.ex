@@ -2305,7 +2305,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp inspect_pushed_review_handoff(%Issue{} = issue, %{branch: branch, workspace: workspace} = candidate) do
     monitor = handoff_review_monitor(workspace)
-    issue = %{issue | branch_name: first_present(issue.branch_name, branch)}
+    issue = %{issue | branch_name: branch}
 
     case ReviewMonitor.inspect_issue(issue, monitor) do
       {:ok, %{pr: nil}} ->

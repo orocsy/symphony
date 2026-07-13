@@ -16186,10 +16186,14 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       issue_runtime_handoff_certificate!(workspace, issue)
+      issue = %{issue | branch_name: "orocsy/stale-linear-branch"}
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
           String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            query = endpoint |> String.split("?", parts: 2) |> List.last() |> URI.decode_query()
+            send(self(), {:direct_handoff_pull_lookup, query["head"]})
+
             {:ok,
              [
                %{
@@ -16293,6 +16297,7 @@ defmodule SymphonyElixir.CoreTest do
                Orchestrator.complete_pushed_handoff_for_test(issue)
 
       assert_receive {:memory_tracker_state_update, "issue-direct-handoff", "Done"}
+      assert_receive {:direct_handoff_pull_lookup, "acme:orocsy/mt-205"}
       assert_receive {:memory_tracker_comment, "issue-direct-handoff", body}
       assert body =~ "automatic exact-head merge"
       assert body =~ "https://github.com/acme/nutribuddy/pull/3"
@@ -21349,12 +21354,46 @@ defmodule SymphonyElixir.CoreTest do
 
   defp issue_runtime_handoff_certificate!(workspace, %Issue{} = issue) do
     {:ok, compiled} = SymphonyElixir.RuntimeContract.compile(issue.description)
+    push_workspace_head_to_test_origin!(workspace)
 
     assert {:ok, _certificate} =
              SymphonyElixir.HandoffCertificate.issue(issue, workspace,
                completed_mius: compiled.miu_ids,
                validation_event_ids: ["test-validation"]
              )
+
+    :ok
+  end
+
+  defp push_workspace_head_to_test_origin!(workspace) do
+    remote = Path.join(workspace, ".git/orocsy-test-origin.git")
+    {_output, 0} = System.cmd("git", ["init", "--bare", remote], cd: workspace, stderr_to_stdout: true)
+
+    remote_args =
+      case System.cmd("git", ["remote", "get-url", "origin"], cd: workspace, stderr_to_stdout: true) do
+        {_url, 0} -> ["remote", "set-url", "origin", remote]
+        {_output, _status} -> ["remote", "add", "origin", remote]
+      end
+
+    {_output, 0} = System.cmd("git", remote_args, cd: workspace, stderr_to_stdout: true)
+    {_output, 0} = System.cmd("git", ["push", "--force", "--set-upstream", "origin", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+    previous_runner = Application.get_env(:symphony_elixir, :handoff_remote_head_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_remote_head_runner, fn branch ->
+      case System.cmd("git", ["--git-dir", remote, "rev-parse", "refs/heads/#{branch}"], stderr_to_stdout: true) do
+        {head_sha, 0} -> {:ok, %{"repo" => "test/symphony", "head_sha" => String.trim(head_sha)}}
+        {output, status} -> {:error, {:remote_ref_failed, status, String.trim(output)}}
+      end
+    end)
+
+    on_exit(fn ->
+      if is_nil(previous_runner) do
+        Application.delete_env(:symphony_elixir, :handoff_remote_head_runner)
+      else
+        Application.put_env(:symphony_elixir, :handoff_remote_head_runner, previous_runner)
+      end
+    end)
 
     :ok
   end

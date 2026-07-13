@@ -154,6 +154,23 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
+  @spec remote_branch_head(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def remote_branch_head(repo, branch) when is_binary(repo) and is_binary(branch) do
+    normalized_branch = clean_branch_name(branch)
+
+    with {:ok, repo} <- normalize_repo(repo),
+         true <- (normalized_branch == branch and branch != "") || {:error, :invalid_remote_branch},
+         {:ok, %{"commit" => %{"sha" => head_sha}}} when is_binary(head_sha) and head_sha != "" <-
+           github_api("repos/#{repo}/branches/#{URI.encode_www_form(branch)}") do
+      {:ok, head_sha}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :remote_branch_head_unavailable}
+    end
+  end
+
+  def remote_branch_head(_repo, _branch), do: {:error, :invalid_remote_branch_lookup}
+
   @spec current_feedback(String.t(), map() | nil) :: {:ok, list()} | {:error, term()}
   def current_feedback(repo, pr), do: current_feedback(repo, pr, [])
 

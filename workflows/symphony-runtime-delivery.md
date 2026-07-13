@@ -113,6 +113,10 @@ paths, prose-shaped scope entries, undeclared validation commands, and invalid
 branch contracts. It MUST preserve source and validation errors for the
 operator instead of silently falling back.
 
+Scope entries support literal path segments plus `*` and `**` wildcards.
+Other glob metacharacters are rejected until the runtime matcher implements
+their semantics.
+
 Legacy prose-only tickets MAY run through a bounded worker for compatibility,
 but MUST NOT receive automatic `handoff.ready` certification. They require a
 contract upgrade or an explicit operator-controlled handoff.
@@ -196,6 +200,10 @@ MIU checkpoint remains an ancestor of the final head. It MUST rerun the
 contract's final validations against that exact final head. Rebase, amend, or
 squash operations that remove a certified checkpoint invalidate its old
 certificate and require recertification for the resulting code identity.
+
+Final handoff certification MUST verify the canonical branch head against the
+configured GitHub repository. Workspace tracking refs and workspace Git remote
+configuration are transport hints, not authoritative push evidence.
 
 ### Command policy is based on parsed intent
 

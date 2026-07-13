@@ -1169,6 +1169,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_write_scope:COD-901-MIU-1:this is explanatory prose" in errors
   end
 
+  test "runtime contract rejects glob metacharacters the scope matcher does not implement" do
+    issue = %Issue{
+      id: "issue-unsupported-scope-glob",
+      identifier: "COD-902",
+      title: "Unsupported scope glob",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-902
+      dependencies: []
+      mius:
+        - id: COD-902-MIU-1
+          write_scope:
+            - src/file?.ts
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_write_scope:COD-902-MIU-1:src/file?.ts" in errors
+  end
+
   test "runtime contract rejects unbounded validation and invalid automatic merge policy" do
     issue = %Issue{
       id: "issue-invalid-runtime-bounds",

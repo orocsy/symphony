@@ -220,9 +220,11 @@ defmodule SymphonyElixir.MergeControllerTest do
     git!(workspace, ["add", "README.md"])
     git!(workspace, ["commit", "-m", "Implement MIU"])
     File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
-    git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
-    git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
-    git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-700"])
+    remote = Path.join(workspace, ".git/test-origin.git")
+    git!(workspace, ["init", "--bare", remote])
+    git!(workspace, ["remote", "add", "origin", remote])
+    git!(workspace, ["push", "--set-upstream", "origin", "orocsy/cod-700"])
+    install_remote_head_runner!(remote)
     head_sha = git_output!(workspace, ["rev-parse", "HEAD"])
 
     issue = issue(automatic_merge?, Keyword.get(opts, :require_ci_checks?, true))
@@ -408,6 +410,21 @@ defmodule SymphonyElixir.MergeControllerTest do
       {output, 0} -> String.trim(output)
       {output, status} -> flunk("git #{Enum.join(args, " ")} failed (#{status}): #{output}")
     end
+  end
+
+  defp install_remote_head_runner!(remote) do
+    previous_runner = Application.get_env(:symphony_elixir, :handoff_remote_head_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_remote_head_runner, fn branch ->
+      head_sha =
+        System.cmd("git", ["--git-dir", remote, "rev-parse", "refs/heads/#{branch}"], stderr_to_stdout: true)
+        |> elem(0)
+        |> String.trim()
+
+      {:ok, %{"repo" => "test/symphony", "head_sha" => head_sha}}
+    end)
+
+    on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

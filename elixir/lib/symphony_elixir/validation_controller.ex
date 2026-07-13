@@ -12,6 +12,8 @@ defmodule SymphonyElixir.ValidationController do
   @validation_logs_dir ".orocsy/delivery/validation"
   @max_log_bytes 20_000
   @max_capture_bytes 1_000_000
+  @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
+  @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -281,23 +283,39 @@ defmodule SymphonyElixir.ValidationController do
     Enum.reduce_while(miu["validations"], {:ok, []}, fn command, {:ok, events} ->
       fingerprint = validation_fingerprint(issue, workspace, compiled, miu["id"], head_sha, command)
       prior_product_failures = product_failure_count(workspace, issue, compiled, miu["id"], command)
+      prior_infrastructure_failures = infrastructure_failure_count(workspace, issue, compiled, miu["id"], command)
 
-      if failed_fingerprint?(workspace, fingerprint) do
-        {:halt, {:blocked, {:unchanged_failed_validation, fingerprint}}}
-      else
-        result = execute_validation(issue, workspace, compiled, miu["id"], head_sha, command, fingerprint)
-        :ok = append_attempt(workspace, result)
-        :ok = append_event(workspace, result)
+      cond do
+        failed_attempt = failed_fingerprint(workspace, fingerprint) ->
+          reason =
+            if infrastructure_failure?(failed_attempt) do
+              {:unchanged_infrastructure_validation, fingerprint}
+            else
+              {:unchanged_failed_validation, fingerprint}
+            end
 
-        if result["status"] == "passed" do
-          {:cont, {:ok, events ++ [result]}}
-        else
-          if prior_product_failures >= 2 do
-            {:halt, {:blocked, {:product_fix_budget_exhausted, miu["id"]}}}
+          {:halt, {:blocked, reason}}
+
+        infrastructure_failure_in_current_environment?(workspace, issue, compiled, miu["id"], command) ->
+          {:halt, {:blocked, {:unchanged_infrastructure_environment, miu["id"]}}}
+
+        prior_infrastructure_failures >= 2 ->
+          {:halt, {:blocked, {:infrastructure_retry_budget_exhausted, miu["id"]}}}
+
+        true ->
+          result = execute_validation(issue, workspace, compiled, miu["id"], head_sha, command, fingerprint)
+          :ok = append_attempt(workspace, result)
+          :ok = append_event(workspace, result)
+
+          if result["status"] == "passed" do
+            {:cont, {:ok, events ++ [result]}}
           else
-            {:halt, {:error, {:validation_failed, result}}}
+            if product_failure?(result) and prior_product_failures >= 2 do
+              {:halt, {:blocked, {:product_fix_budget_exhausted, miu["id"]}}}
+            else
+              {:halt, {:error, {:validation_failed, result}}}
+            end
           end
-        end
       end
     end)
   end
@@ -305,10 +323,10 @@ defmodule SymphonyElixir.ValidationController do
   defp execute_validation(issue, workspace, compiled, miu_id, head_sha, command, fingerprint) do
     started = System.monotonic_time(:millisecond)
     timeout_ms = compiled.contract["validation_timeout_ms"]
-    {output, exit_code, timed_out?} = run_command(workspace, command, timeout_ms)
+    {output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
     tests = test_counts(command, output)
-    {status, reason_class} = validation_status(command, exit_code, tests, timed_out?)
+    {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
     event_id = "validation-" <> String.slice(fingerprint, -16, 16)
     bounded_output = truncate(output, @max_log_bytes)
     log_path = write_validation_log(workspace, event_id, bounded_output)
@@ -345,13 +363,17 @@ defmodule SymphonyElixir.ValidationController do
         {env, [executable | args]} = split_env_assignments(parts)
         executable = resolve_executable(executable, workspace)
         port = open_command_port(executable, args, workspace, env)
-        collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "")
+
+        {output, exit_code, timed_out?} =
+          collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "")
+
+        {output, exit_code, timed_out?, false}
 
       [] ->
-        {"empty validation command", 127, false}
+        {"empty validation command", 127, false, true}
     end
   rescue
-    error -> {Exception.message(error), 127, false}
+    error -> {Exception.message(error), 127, false, true}
   end
 
   defp split_env_assignments(parts) do
@@ -361,12 +383,15 @@ defmodule SymphonyElixir.ValidationController do
   defp env_assignment?(part) when is_binary(part), do: Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=.*/, part)
   defp env_assignment?(_part), do: false
 
-  defp validation_status(_command, _exit_code, _tests, true), do: {"failed", "command_timed_out"}
+  defp validation_status(_command, _exit_code, _tests, _timed_out?, true),
+    do: {"failed", "command_launch_failed"}
 
-  defp validation_status(_command, exit_code, _tests, false) when exit_code != 0,
+  defp validation_status(_command, _exit_code, _tests, true, false), do: {"failed", "command_timed_out"}
+
+  defp validation_status(_command, exit_code, _tests, false, false) when exit_code != 0,
     do: {"failed", "command_failed"}
 
-  defp validation_status(command, 0, tests, false) do
+  defp validation_status(command, 0, tests, false, false) do
     cond do
       not test_command?(command) -> {"passed", "passed"}
       tests == nil -> {"failed", "test_count_unavailable"}
@@ -437,11 +462,11 @@ defmodule SymphonyElixir.ValidationController do
     |> then(&("sha256:" <> &1))
   end
 
-  defp failed_fingerprint?(workspace, fingerprint) do
+  defp failed_fingerprint(workspace, fingerprint) do
     workspace
     |> Path.join(@attempts_path)
     |> decoded_lines()
-    |> Enum.any?(&(&1["validation_fingerprint"] == fingerprint and &1["status"] == "failed"))
+    |> Enum.find(&(&1["validation_fingerprint"] == fingerprint and &1["status"] == "failed"))
   end
 
   defp product_failure_count(workspace, issue, compiled, miu_id, command) do
@@ -451,13 +476,56 @@ defmodule SymphonyElixir.ValidationController do
     |> Path.join(@attempts_path)
     |> decoded_lines()
     |> Enum.count(fn attempt ->
-      attempt["status"] == "failed" and
+      product_failure?(attempt) and
         attempt["issue"] == issue.identifier and
         attempt["contract_hash"] == compiled.contract_hash and
         attempt["miu_id"] == miu_id and
         attempt["command_hash"] == command_hash
     end)
   end
+
+  defp product_failure?(%{"status" => "failed", "reason_class" => reason_class}) do
+    reason_class in @product_failure_classes
+  end
+
+  defp product_failure?(_attempt), do: false
+
+  defp infrastructure_failure_count(workspace, issue, compiled, miu_id, command) do
+    command_hash = "sha256:" <> sha256(command)
+
+    workspace
+    |> Path.join(@attempts_path)
+    |> decoded_lines()
+    |> Enum.count(fn attempt ->
+      infrastructure_failure?(attempt) and
+        attempt["issue"] == issue.identifier and
+        attempt["contract_hash"] == compiled.contract_hash and
+        attempt["miu_id"] == miu_id and
+        attempt["command_hash"] == command_hash
+    end)
+  end
+
+  defp infrastructure_failure_in_current_environment?(workspace, issue, compiled, miu_id, command) do
+    command_hash = "sha256:" <> sha256(command)
+    current_environment = environment_fingerprint(workspace)
+
+    workspace
+    |> Path.join(@attempts_path)
+    |> decoded_lines()
+    |> Enum.any?(fn attempt ->
+      infrastructure_failure?(attempt) and
+        attempt["issue"] == issue.identifier and
+        attempt["contract_hash"] == compiled.contract_hash and
+        attempt["miu_id"] == miu_id and
+        attempt["command_hash"] == command_hash and
+        attempt["environment_fingerprint"] == current_environment
+    end)
+  end
+
+  defp infrastructure_failure?(%{"status" => "failed", "reason_class" => reason_class}),
+    do: reason_class in @infrastructure_failure_classes
+
+  defp infrastructure_failure?(_attempt), do: false
 
   defp record_request_result(workspace, request, result) do
     {status, attributes} =

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.HandoffCertificateTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{HandoffCertificate, Linear.Issue}
+  alias SymphonyElixir.{HandoffCertificate, Linear.Issue, ReviewMonitor}
 
   setup do
     workspace =
@@ -18,15 +18,17 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     File.write!(Path.join(workspace, "README.md"), "# Test\n")
     git!(workspace, ["add", "README.md"])
     git!(workspace, ["commit", "-m", "Initial"])
-    git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
-    git!(workspace, ["update-ref", "refs/remotes/origin/main", "HEAD"])
+    remote = Path.join(workspace, ".git/test-origin.git")
+    git!(workspace, ["init", "--bare", remote])
+    git!(workspace, ["remote", "add", "origin", remote])
+    git!(workspace, ["push", "origin", "main"])
     git!(workspace, ["switch", "-c", "orocsy/cod-266"])
     File.write!(Path.join(workspace, "README.md"), "# Test\n\nImplementation.\n")
     git!(workspace, ["add", "README.md"])
     git!(workspace, ["commit", "-m", "Implement MIU"])
-    git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-266", "HEAD"])
-    git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-266"])
+    git!(workspace, ["push", "--set-upstream", "origin", "orocsy/cod-266"])
     File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+    install_remote_head_runner!(remote)
 
     issue = issue()
 
@@ -59,7 +61,26 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     assert certificate["event"] == "handoff.ready"
     assert certificate["authority"] == "symphony.runtime.handoff-controller"
     assert certificate["branch"] == "orocsy/cod-266"
+    assert certificate["remote_repo"] == "test/symphony"
+    assert certificate["remote_branch"] == "orocsy/cod-266"
+    assert certificate["remote_head_sha"] == certificate["head_sha"]
     assert {:ok, ^certificate} = HandoffCertificate.current(issue, workspace)
+  end
+
+  test "trusted GitHub branch lookup uses the configured repository path" do
+    previous_runner = Application.get_env(:symphony_elixir, :github_api_runner)
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      send(self(), {:github_branch_endpoint, endpoint})
+      {:ok, %{"commit" => %{"sha" => "remote-head"}}}
+    end)
+
+    on_exit(fn -> restore_env(:github_api_runner, previous_runner) end)
+
+    assert {:ok, "remote-head"} =
+             ReviewMonitor.remote_branch_head("orocsy/symphony", "codex/runtime-branch")
+
+    assert_receive {:github_branch_endpoint, "repos/orocsy/symphony/branches/codex%2Fruntime-branch"}
   end
 
   test "runtime evidence files do not dirty an otherwise clean handoff certificate", %{
@@ -108,6 +129,22 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     assert {:stale, :invalid_controller_signature} = HandoffCertificate.current(issue, workspace)
   end
 
+  test "rejects a forged local tracking ref when the remote branch is behind", %{
+    workspace: workspace,
+    issue: issue
+  } do
+    File.write!(Path.join(workspace, "README.md"), "# Test\n\nNot pushed.\n")
+    git!(workspace, ["add", "README.md"])
+    git!(workspace, ["commit", "-m", "Unpushed handoff"])
+    git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-266", "HEAD"])
+
+    assert {:error, :unpushed_head} =
+             HandoffCertificate.issue(issue, workspace,
+               completed_mius: ["COD-266-MIU-1"],
+               validation_event_ids: ["validation-1"]
+             )
+  end
+
   defp issue do
     %Issue{
       id: "issue-cod-266",
@@ -146,4 +183,20 @@ defmodule SymphonyElixir.HandoffCertificateTest do
       {output, status} -> flunk("git #{Enum.join(args, " ")} failed (#{status}): #{output}")
     end
   end
+
+  defp install_remote_head_runner!(remote) do
+    previous_runner = Application.get_env(:symphony_elixir, :handoff_remote_head_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_remote_head_runner, fn branch ->
+      case System.cmd("git", ["--git-dir", remote, "rev-parse", "refs/heads/#{branch}"], stderr_to_stdout: true) do
+        {head_sha, 0} -> {:ok, %{"repo" => "test/symphony", "head_sha" => String.trim(head_sha)}}
+        {output, status} -> {:error, {:remote_ref_failed, status, String.trim(output)}}
+      end
+    end)
+
+    on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

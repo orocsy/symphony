@@ -231,9 +231,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert {:ok, miu_certificate} = ValidationController.process_requests(issue, workspace)
       assert miu_certificate["miu_id"] == "COD-700-MIU-1"
 
-      git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
-      git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
-      git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-700"])
+      push_to_local_origin!(workspace)
 
       append_event!(workspace, %{"event" => "handoff.requested", "status" => "requested"})
 
@@ -261,6 +259,83 @@ defmodule SymphonyElixir.ValidationControllerTest do
       commit_readme!(workspace, "Second repair")
 
       assert {:blocked, {:product_fix_budget_exhausted, "COD-700-MIU-1"}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "infrastructure failures do not consume or trigger the product fix budget" do
+    {workspace, issue} = workspace_and_issue("0 tests, 0 failures", timeout_ms: 1_000)
+    issue = %{issue | description: String.replace(issue.description, "- README.md", "- \"**\"")}
+
+    try do
+      assert {:error, {:validation_failed, _first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      commit_readme!(workspace, "First repair")
+
+      assert {:error, {:validation_failed, _second}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      File.write!(Path.join(workspace, "fake-test"), "#!/bin/sh\nsleep 2\necho '3 tests, 0 failures'\n")
+      git!(workspace, ["add", "fake-test"])
+      git!(workspace, ["commit", "-m", "Simulate validation infrastructure timeout"])
+
+      assert {:error, {:validation_failed, timeout}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert timeout["reason_class"] == "command_timed_out"
+
+      File.write!(Path.join(workspace, "fake-test"), "#!/bin/sh\necho '0 tests, 0 failures'\n")
+      File.write!(Path.join(workspace, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+      git!(workspace, ["add", "fake-test", "pnpm-lock.yaml"])
+      git!(workspace, ["commit", "-m", "Restore product validation failure"])
+
+      assert {:blocked, {:product_fix_budget_exhausted, "COD-700-MIU-1"}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "classifies an unavailable validation executable as infrastructure" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- README.md", "- \"**\"")
+          |> String.replace("- ./fake-test", "- ./missing-validation-executable")
+    }
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_launch_failed"
+
+      commit_readme!(workspace, "Product change cannot retry unchanged infrastructure")
+
+      assert {:blocked, {:unchanged_infrastructure_environment, "COD-700-MIU-1"}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      File.write!(Path.join(workspace, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+      git!(workspace, ["add", "pnpm-lock.yaml"])
+      git!(workspace, ["commit", "-m", "Refresh validation environment"])
+
+      assert {:error, {:validation_failed, second}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert second["reason_class"] == "command_launch_failed"
+      refute second["environment_fingerprint"] == first["environment_fingerprint"]
+
+      File.write!(Path.join(workspace, "pnpm-lock.yaml"), "lockfileVersion: '9.1'\n")
+      git!(workspace, ["add", "pnpm-lock.yaml"])
+      git!(workspace, ["commit", "-m", "Refresh validation environment again"])
+
+      assert {:blocked, {:infrastructure_retry_budget_exhausted, "COD-700-MIU-1"}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
       File.rm_rf(workspace)
@@ -566,6 +641,26 @@ defmodule SymphonyElixir.ValidationControllerTest do
     git!(workspace, ["add", "README.md"])
     git!(workspace, ["commit", "-m", label])
   end
+
+  defp push_to_local_origin!(workspace) do
+    remote = Path.join(workspace, ".git/test-origin.git")
+    git!(workspace, ["init", "--bare", remote])
+    git!(workspace, ["remote", "add", "origin", remote])
+    git!(workspace, ["push", "--set-upstream", "origin", "HEAD"])
+    previous_runner = Application.get_env(:symphony_elixir, :handoff_remote_head_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_remote_head_runner, fn branch ->
+      case System.cmd("git", ["--git-dir", remote, "rev-parse", "refs/heads/#{branch}"], stderr_to_stdout: true) do
+        {head_sha, 0} -> {:ok, %{"repo" => "test/symphony", "head_sha" => String.trim(head_sha)}}
+        {output, status} -> {:error, {:remote_ref_failed, status, String.trim(output)}}
+      end
+    end)
+
+    on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp add_second_miu(%Issue{} = issue) do
     second_miu = """

@@ -7,10 +7,12 @@ defmodule SymphonyElixir.HandoffCertificate do
   head.
   """
 
-  alias SymphonyElixir.{ControllerEvidence, Linear.Issue, RuntimeContract}
+  alias SymphonyElixir.{Config, ControllerEvidence, Linear.Issue, ReviewMonitor, RuntimeContract}
 
   @certificate_path ".orocsy/delivery/state/handoff-ready.json"
   @authority "symphony.runtime.handoff-controller"
+  @schema_version 2
+  @remote_lookup_timeout_ms 30_000
 
   @spec issue(Issue.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def issue(%Issue{} = issue, workspace, opts) when is_binary(workspace) and is_list(opts) do
@@ -18,8 +20,8 @@ defmodule SymphonyElixir.HandoffCertificate do
          {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
          true <- branch == compiled.contract["integration_branch"] || {:error, :canonical_branch_mismatch},
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
-         {:ok, upstream_sha} <- git(workspace, ["rev-parse", "@{upstream}"]),
-         true <- head_sha == upstream_sha || {:error, :unpushed_head},
+         {:ok, remote_head} <- remote_branch_head(branch),
+         true <- head_sha == remote_head["head_sha"] || {:error, :unpushed_head},
          true <- clean_worktree?(workspace) || {:error, :dirty_worktree},
          completed_mius when is_list(completed_mius) <- Keyword.get(opts, :completed_mius),
          true <- same_values?(completed_mius, compiled.miu_ids) || {:error, :incomplete_mius},
@@ -27,7 +29,7 @@ defmodule SymphonyElixir.HandoffCertificate do
            Keyword.get(opts, :validation_event_ids) do
       certificate =
         ControllerEvidence.sign(%{
-          "schema_version" => 1,
+          "schema_version" => @schema_version,
           "event" => "handoff.ready",
           "authority" => @authority,
           "issue_id" => issue.id,
@@ -37,6 +39,9 @@ defmodule SymphonyElixir.HandoffCertificate do
           "base_branch" => compiled.contract["base_branch"],
           "branch" => branch,
           "head_sha" => head_sha,
+          "remote_repo" => remote_head["repo"],
+          "remote_branch" => remote_head["branch"],
+          "remote_head_sha" => remote_head["head_sha"],
           "completed_mius" => completed_mius,
           "validation_event_ids" => validation_event_ids,
           "issued_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -68,8 +73,9 @@ defmodule SymphonyElixir.HandoffCertificate do
            {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
            :ok <- equal_or_stale(head_sha, certificate["head_sha"], :head_mismatch),
            true <- clean_worktree?(workspace) || {:stale, :dirty_worktree},
-           {:ok, upstream_sha} <- git(workspace, ["rev-parse", "@{upstream}"]),
-           :ok <- equal_or_stale(head_sha, upstream_sha, :unpushed_head) do
+           {:ok, remote_head} <- remote_branch_head(branch),
+           :ok <- equal_or_stale(head_sha, remote_head["head_sha"], :unpushed_head),
+           :ok <- equal_or_stale(certificate["remote_repo"], remote_head["repo"], :remote_repo_mismatch) do
         {:ok, certificate}
       else
         :none -> {:stale, :legacy_or_missing_runtime_contract}
@@ -100,7 +106,7 @@ defmodule SymphonyElixir.HandoffCertificate do
     expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
 
     cond do
-      certificate["schema_version"] != 1 -> {:stale, :schema_version_mismatch}
+      certificate["schema_version"] != @schema_version -> {:stale, :schema_version_mismatch}
       not ControllerEvidence.valid?(certificate) -> {:stale, :invalid_controller_signature}
       certificate["event"] != "handoff.ready" -> {:stale, :event_mismatch}
       certificate["authority"] != @authority -> {:stale, :authority_mismatch}
@@ -109,6 +115,9 @@ defmodule SymphonyElixir.HandoffCertificate do
       certificate["contract_hash"] != compiled.contract_hash -> {:stale, :contract_hash_mismatch}
       certificate["issue_revision"] != expected_revision -> {:stale, :issue_revision_mismatch}
       certificate["branch"] != compiled.contract["integration_branch"] -> {:stale, :canonical_branch_mismatch}
+      certificate["remote_branch"] != certificate["branch"] -> {:stale, :remote_branch_mismatch}
+      certificate["remote_head_sha"] != certificate["head_sha"] -> {:stale, :remote_head_mismatch}
+      not is_binary(certificate["remote_repo"]) or certificate["remote_repo"] == "" -> {:stale, :remote_repo_missing}
       not same_values?(certificate["completed_mius"], compiled.miu_ids) -> {:stale, :incomplete_mius}
       not valid_validation_evidence?(certificate["validation_event_ids"]) -> {:stale, :missing_validation_evidence}
       true -> :ok
@@ -158,6 +167,53 @@ defmodule SymphonyElixir.HandoffCertificate do
       _ -> false
     end
   end
+
+  defp remote_branch_head(branch) do
+    task =
+      Task.async(fn ->
+        try do
+          do_remote_branch_head(branch)
+        rescue
+          error -> {:error, {:remote_head_exception, Exception.message(error)}}
+        catch
+          kind, reason -> {:error, {:remote_head_exception, kind, inspect(reason)}}
+        end
+      end)
+
+    case Task.yield(task, @remote_lookup_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:error, {:remote_head_exception, inspect(reason)}}
+      nil -> {:error, {:remote_head_lookup_timed_out, @remote_lookup_timeout_ms}}
+    end
+  rescue
+    error -> {:error, {:remote_head_exception, Exception.message(error)}}
+  end
+
+  defp do_remote_branch_head(branch) do
+    case Application.get_env(:symphony_elixir, :handoff_remote_head_runner) do
+      runner when is_function(runner, 1) ->
+        normalize_remote_head_result(runner.(branch), branch)
+
+      _ ->
+        with {:ok, settings} <- Config.settings(),
+             repo when is_binary(repo) and repo != "" <- settings.review_monitor.repo,
+             {:ok, head_sha} <- ReviewMonitor.remote_branch_head(repo, branch) do
+          {:ok, %{"repo" => repo, "branch" => branch, "head_sha" => head_sha}}
+        else
+          nil -> {:error, :missing_trusted_github_repo}
+          {:error, _reason} = error -> error
+          _ -> {:error, :remote_branch_head_unavailable}
+        end
+    end
+  end
+
+  defp normalize_remote_head_result({:ok, %{"repo" => repo, "head_sha" => head_sha}}, branch)
+       when is_binary(repo) and repo != "" and is_binary(head_sha) and head_sha != "" do
+    {:ok, %{"repo" => repo, "branch" => branch, "head_sha" => head_sha}}
+  end
+
+  defp normalize_remote_head_result({:error, _reason} = error, _branch), do: error
+  defp normalize_remote_head_result(_result, _branch), do: {:error, :invalid_remote_head_result}
 
   defp git(workspace, args) do
     case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
