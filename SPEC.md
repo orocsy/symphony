@@ -41,6 +41,13 @@ Important boundary:
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
 
+Implementation-defined delivery controllers MAY add a stricter structured issue
+contract. The Elixir implementation supports runtime-owned MIU and handoff
+certificates, bounded validation, and opt-in automatic PR merge. These
+controller decisions must be based on durable issue/workspace/GitHub evidence;
+telemetry and dashboard projections remain observation-only and cannot by
+themselves authorize a retry, handoff, or merge.
+
 ## 2. Goals and Non-Goals
 
 ### 2.1 Goals

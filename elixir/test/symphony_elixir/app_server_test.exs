@@ -1048,6 +1048,24 @@ defmodule SymphonyElixir.AppServerTest do
       assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
                AppServer.command_policy_violation_for_test(workspace, "git diff main")
 
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --no-renames origin/main...HEAD"
+               )
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --patch origin/main...HEAD"
+               )
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --no-renames origin/other...HEAD"
+               )
+
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git diff -- src/main/Button.tsx")
       assert :ok = AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "foo|bar" README.md))
     after

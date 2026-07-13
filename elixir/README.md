@@ -30,6 +30,39 @@ as `rg`, `grep`, `find`, `git ls-files`, and `gh api`. Fresh implementation mode
 one small MIU with an explicit issue brief; review rework mode is intended for already-collected PR
 feedback.
 
+### Structured Runtime Contracts
+
+Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
+contract is the sole authority for branch, write scope, MIUs, validation, and
+review behavior. The runtime certifies one clean micro-commit at a time,
+executes declared validation itself, and issues `handoff.ready` only after all
+MIU certificates and final validations match the current issue revision and
+pushed head. Worker-authored generic gate events cannot imply completion.
+Authority-bearing MIU, handoff, processed-request, and merge evidence is HMAC
+signed with a runtime key stored outside the issue workspace. Override its
+location with `SYMPHONY_CONTROLLER_EVIDENCE_KEY_PATH`; keep that file unreadable
+from worker sandboxes.
+
+Validation commands have a bounded `validation_timeout_ms` (default 15
+minutes, maximum 30 minutes). A failed validation fingerprint runs once;
+changed code may receive at most two product-fix cycles before operator
+escalation.
+
+Schema-v1 contracts retain manual review handoff unless they explicitly set:
+
+```yaml
+merge:
+  automatic: true
+  method: squash
+  require_ci_checks: true
+  completed_state: Done
+```
+
+Before an automatic merge, the merge controller independently rechecks the
+current runtime certificate, PR head/base/branch, raw unresolved review
+threads, CI checks, clean current-head GitHub Codex review, open corrections,
+and GitHub mergeability. Any unavailable or stale input fails closed.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 

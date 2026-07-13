@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   alias SymphonyElixir.{
     Codex.DynamicTool,
+    CommandIntent,
     Config,
     DispatchPreflight,
     PathSafety,
@@ -2031,6 +2032,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
+          match == @review_rework_git_diff_base_pattern and
+              scope_audit_allowed?(command_for_patterns, workspace) ->
+            :ok
+
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -2911,7 +2916,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp fresh_implementation_checkpoint_ready?(workspace) when is_binary(workspace) do
-    technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"requirements" => %{"runtime_contract_status" => "structured"}}} ->
+        false
+
+      _ ->
+        technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
+    end
   rescue
     _error -> false
   end
@@ -3141,6 +3152,41 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp git_diff_base_branch_without_path_scope?(_command), do: false
+
+  defp scope_audit_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    case CommandIntent.classify(command, allowed_base_refs: scope_audit_base_refs(workspace)) do
+      {:ok, %{kind: :scope_audit}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scope_audit_allowed?(_command, _workspace), do: false
+
+  defp scope_audit_base_refs(workspace) do
+    configured =
+      case DispatchPreflight.read(workspace) do
+        {:ok, preflight} when is_map(preflight) ->
+          [
+            preflight["base_branch"],
+            get_in(preflight, ["requirements", "base_branch"]),
+            get_in(preflight, ["review", "base_ref"])
+          ]
+
+        _ ->
+          []
+      end
+
+    (["main", "master"] ++ configured)
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.flat_map(&base_ref_variants/1)
+    |> Enum.uniq()
+  end
+
+  defp base_ref_variants("origin/" <> _branch = ref), do: [ref]
+  defp base_ref_variants(ref), do: [ref, "origin/#{ref}"]
 
   defp command_text(%{} = payload) do
     payload

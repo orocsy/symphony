@@ -1,0 +1,136 @@
+defmodule SymphonyElixir.HandoffController do
+  @moduledoc """
+  Converts an explicit worker handoff request into a runtime-owned certificate.
+  """
+
+  alias SymphonyElixir.{HandoffCertificate, Linear.Issue, RuntimeContract, RuntimeRequest, ValidationController}
+
+  @spec process_requests(Issue.t(), String.t()) ::
+          :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
+  def process_requests(%Issue{} = issue, workspace) when is_binary(workspace) do
+    case HandoffCertificate.current(issue, workspace) do
+      {:ok, certificate} ->
+        {:ok, certificate}
+
+      _ ->
+        case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested") do
+          {:ok, request} ->
+            result = certify_handoff(issue, workspace)
+            :ok = record_request_result(workspace, request, result)
+            result
+
+          {:stale, request, reason} ->
+            :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})
+            :none
+
+          :none ->
+            :none
+        end
+    end
+  end
+
+  def process_requests(_issue, _workspace), do: :none
+
+  defp certify_handoff(issue, workspace) do
+    with {:ok, compiled} <- structured_contract(issue),
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         certificates <- ValidationController.certificates(workspace),
+         :ok <- verify_miu_certificates(issue, workspace, compiled, head_sha, certificates),
+         {:ok, final_events} <- ValidationController.validate_final(issue, workspace) do
+      validation_event_ids =
+        (Enum.flat_map(certificates, &Map.get(&1, "validation_event_ids", [])) ++
+           Enum.map(final_events, & &1["event_id"]))
+        |> Enum.uniq()
+
+      HandoffCertificate.issue(issue, workspace,
+        completed_mius: compiled.miu_ids,
+        validation_event_ids: validation_event_ids
+      )
+    else
+      {:error, _reason} = error -> error
+      {:blocked, _reason} = blocked -> blocked
+      _ -> {:error, :handoff_certification_failed}
+    end
+  end
+
+  defp verify_miu_certificates(issue, workspace, compiled, head_sha, certificates) do
+    expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
+    by_id = Map.new(certificates, &{&1["miu_id"], &1})
+
+    Enum.reduce_while(compiled.miu_ids, :ok, fn miu_id, :ok ->
+      case by_id[miu_id] do
+        %{} = certificate ->
+          cond do
+            certificate["event"] != "miu.completed" ->
+              {:halt, {:error, {:invalid_miu_certificate_event, miu_id}}}
+
+            certificate["authority"] != "symphony.runtime.validation-controller" ->
+              {:halt, {:error, {:invalid_miu_certificate_authority, miu_id}}}
+
+            certificate["issue_id"] != issue.id or certificate["issue"] != issue.identifier ->
+              {:halt, {:error, {:miu_certificate_issue_mismatch, miu_id}}}
+
+            certificate["branch"] != compiled.contract["integration_branch"] ->
+              {:halt, {:error, {:miu_certificate_branch_mismatch, miu_id}}}
+
+            certificate["contract_hash"] != compiled.contract_hash ->
+              {:halt, {:error, {:stale_miu_contract, miu_id}}}
+
+            certificate["issue_revision"] != expected_revision ->
+              {:halt, {:error, {:stale_miu_issue_revision, miu_id}}}
+
+            not git_ancestor?(workspace, certificate["head_sha"], head_sha) ->
+              {:halt, {:error, {:miu_checkpoint_not_ancestor, miu_id}}}
+
+            true ->
+              {:cont, :ok}
+          end
+
+        _ ->
+          {:halt, {:error, {:missing_miu_certificate, miu_id}}}
+      end
+    end)
+  end
+
+  defp record_request_result(workspace, request, result) do
+    {status, attributes} =
+      case result do
+        {:ok, certificate} -> {"completed", %{"certificate_head_sha" => certificate["head_sha"]}}
+        {:blocked, reason} -> {"blocked", %{"reason" => inspect(reason)}}
+        {:error, reason} -> {"failed", %{"reason" => inspect(reason)}}
+      end
+
+    RuntimeRequest.mark_processed(workspace, request, status, attributes)
+  end
+
+  defp structured_contract(%Issue{} = issue) do
+    case RuntimeContract.compile(issue.description) do
+      {:ok, compiled} -> {:ok, compiled}
+      :none -> {:error, :legacy_or_missing_runtime_contract}
+      {:error, errors} -> {:error, {:invalid_runtime_contract, errors}}
+    end
+  end
+
+  defp git_ancestor?(workspace, ancestor, head) when is_binary(ancestor) and is_binary(head) do
+    case System.cmd("git", ["merge-base", "--is-ancestor", ancestor, head],
+           cd: workspace,
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_ancestor?(_workspace, _ancestor, _head), do: false
+
+  defp git(workspace, args) do
+    case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> {:ok, String.trim(output)}
+      {output, status} -> {:error, {:git_failed, args, status, String.trim(output)}}
+    end
+  rescue
+    error -> {:error, {:git_exception, Exception.message(error)}}
+  end
+end

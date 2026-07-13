@@ -1019,37 +1019,235 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "pushed handoff requires the cached structured issue contract to match Linear" do
+  test "structured runtime contract is the only authority-bearing scope" do
     workspace =
       Path.join(
         System.tmp_dir!(),
-        "symphony-elixir-handoff-contract-hash-#{System.unique_integer([:positive])}"
+        "symphony-elixir-structured-runtime-contract-#{System.unique_integer([:positive])}"
       )
 
     try do
-      requirements_dir = Path.join(workspace, ".orocsy/delivery")
-      File.mkdir_p!(requirements_dir)
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
 
-      issue = %Issue{identifier: "COD-266", description: "## Write Scope\n- src/app/api/cards/handler.ts"}
-      requirements_path = Path.join(requirements_dir, "issue-requirements.json")
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+        """
+        ## Write Scope
+        - src/should-not-be-authority.ts
 
-      File.write!(requirements_path, Jason.encode!(%{"source_description_sha256" => "stale"}))
+        ## Shared Files
+        - this explanatory sentence is not a path
+        """
+      )
 
-      refute SymphonyElixir.Orchestrator.handoff_issue_contract_current_for_test(issue, workspace)
+      issue = %Issue{
+        id: "issue-runtime-contract",
+        identifier: "COD-266",
+        title: "Structured runtime contract",
+        state: "Rework",
+        branch_name: "orocsy/generated-child-branch",
+        description: """
+        ## Runtime Contract
 
-      current_hash =
-        :crypto.hash(:sha256, issue.description)
-        |> Base.encode16(case: :lower)
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-246-preference-miu-guest-setup-controls
+        dependencies:
+          - COD-265
+        mius:
+          - id: COD-266-MIU-1
+            write_scope:
+              - tests/integration/cards-route.test.ts
+            validations:
+              - pnpm exec vitest run --configLoader runner tests/integration/cards-route.test.ts
+          - id: COD-266-MIU-2
+            write_scope:
+              - src/app/api/cards/handler.ts
+            validations:
+              - pnpm exec vitest run --configLoader runner tests/integration/cards-route.test.ts
+        final_validations:
+          - pnpm typecheck
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
 
-      File.write!(requirements_path, Jason.encode!(%{"source_description_sha256" => current_hash}))
+        ## Write Scope
+        - src/prose-must-not-expand-authority.ts
 
-      assert SymphonyElixir.Orchestrator.handoff_issue_contract_current_for_test(issue, workspace)
+        ### MIU prose
+        Detailed implementation rationale remains normal Markdown.
+        """
+      }
 
-      File.rm!(requirements_path)
-      assert SymphonyElixir.Orchestrator.handoff_issue_contract_current_for_test(issue, workspace)
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["runtime_contract_status"] == "structured"
+      assert requirements["automatic_handoff_certifiable"]
+      assert requirements["contract_hash"] =~ "sha256:"
+      assert requirements["ticket_type"] == "implementation"
+      assert requirements["base_branch"] == "main"
+      assert requirements["integration_branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert requirements["dependencies"] == ["COD-265"]
+      assert requirements["mius"] == ["COD-266-MIU-1", "COD-266-MIU-2"]
+      assert requirements["runtime_contract"]["validation_timeout_ms"] == 900_000
+
+      assert requirements["runtime_contract"]["merge"] == %{
+               "automatic" => false,
+               "completed_state" => "Done",
+               "method" => "squash",
+               "require_ci_checks" => true
+             }
+
+      assert requirements["write_scope"] == [
+               "tests/integration/cards-route.test.ts",
+               "src/app/api/cards/handler.ts"
+             ]
+
+      assert requirements["validation"]["commands"] == [
+               "pnpm exec vitest run --configLoader runner tests/integration/cards-route.test.ts",
+               "pnpm typecheck"
+             ]
+
+      refute Enum.any?(requirements["scope_bundle"]["write_scope"], fn entry ->
+               entry["path"] in ["src/should-not-be-authority.ts", "src/prose-must-not-expand-authority.ts"]
+             end)
+
+      refute Enum.any?(requirements["scope_bundle"]["read_context"], fn entry ->
+               entry["path"] == "this explanatory sentence is not a path"
+             end)
     after
       File.rm_rf(workspace)
     end
+  end
+
+  test "runtime contract rejects prose shaped scope and duplicate MIU ids" do
+    issue = %Issue{
+      id: "issue-invalid-runtime-contract",
+      identifier: "COD-901",
+      title: "Invalid runtime contract",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-901
+      dependencies: []
+      denied_scope:
+        - this is not a path
+      mius:
+        - id: COD-901-MIU-1
+          write_scope:
+            - this is explanatory prose
+          validations:
+            - pnpm typecheck
+        - id: COD-901-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "duplicate_miu_id:COD-901-MIU-1" in errors
+    assert "invalid_denied_scope:this is not a path" in errors
+    assert "invalid_write_scope:COD-901-MIU-1:this is explanatory prose" in errors
+  end
+
+  test "runtime contract rejects unbounded validation and invalid automatic merge policy" do
+    issue = %Issue{
+      id: "issue-invalid-runtime-bounds",
+      identifier: "COD-903",
+      title: "Invalid runtime bounds",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-903
+      dependencies: []
+      mius:
+        - id: COD-903-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      validation_timeout_ms: 3600000
+      review:
+        authority: github_codex
+        require_current_head: true
+      merge:
+        automatic: enabled
+        method: force
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_validation_timeout_ms:3600000" in errors
+    assert "invalid_merge_automatic" in errors
+  end
+
+  test "issue revision changes with description but not unrelated Linear metadata timestamps" do
+    description = "## Runtime Contract\n\nStable contract text."
+    first_update = ~U[2026-07-12 10:00:00Z]
+    later_update = ~U[2026-07-12 11:00:00Z]
+
+    assert SymphonyElixir.RuntimeContract.issue_revision(description, first_update) ==
+             SymphonyElixir.RuntimeContract.issue_revision(description, later_update)
+
+    refute SymphonyElixir.RuntimeContract.issue_revision(description, first_update) ==
+             SymphonyElixir.RuntimeContract.issue_revision(description <> "\nChanged.", later_update)
+  end
+
+  test "legacy markdown requirements remain runnable but cannot auto certify" do
+    issue = %Issue{
+      id: "issue-legacy-contract",
+      identifier: "COD-902",
+      title: "Legacy issue",
+      state: "In Progress",
+      description: """
+      ## Ticket Type
+      implementation
+
+      ## Write Scope
+      - src/app/page.tsx
+
+      ### MIU 1 - Legacy behavior
+
+      ## Validation
+      ```bash
+      pnpm typecheck
+      ```
+      """
+    }
+
+    assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue)
+    assert requirements["runtime_contract_status"] == "legacy"
+    refute requirements["automatic_handoff_certifiable"]
+    assert is_nil(requirements["contract_hash"])
+    assert requirements["write_scope"] == ["src/app/page.tsx"]
   end
 
   test "workspace hydration parses scope and validation commands template headings" do

@@ -1365,6 +1365,18 @@ defmodule SymphonyElixir.CoreTest do
         }) <> "\n"
       )
 
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: issue_id,
+          identifier: "COD-152",
+          title: "Certified handoff stop",
+          description: "Review handoff is ready.",
+          state: "Rework",
+          branch_name: branch
+        })
+
+      issue_runtime_handoff_certificate!(workspace, issue)
+
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
@@ -1384,7 +1396,7 @@ defmodule SymphonyElixir.CoreTest do
         pid: self(),
         ref: ref,
         identifier: "COD-152",
-        issue: %Issue{id: issue_id, identifier: "COD-152", state: "Rework"},
+        issue: issue,
         started_at: DateTime.utc_now(),
         workspace_path: workspace
       }
@@ -1470,6 +1482,18 @@ defmodule SymphonyElixir.CoreTest do
         }) <> "\n"
       )
 
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: issue_id,
+          identifier: "COD-199",
+          title: "Certified abnormal handoff stop",
+          description: "Review handoff is ready.",
+          state: "Rework",
+          branch_name: branch
+        })
+
+      issue_runtime_handoff_certificate!(workspace, issue)
+
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
@@ -1489,7 +1513,7 @@ defmodule SymphonyElixir.CoreTest do
         pid: self(),
         ref: ref,
         identifier: "COD-199",
-        issue: %Issue{id: issue_id, identifier: "COD-199", state: "Rework"},
+        issue: issue,
         started_at: DateTime.utc_now(),
         workspace_path: workspace
       }
@@ -1575,7 +1599,19 @@ defmodule SymphonyElixir.CoreTest do
         }) <> "\n"
       )
 
-      assert AgentRunner.pushed_handoff_stop_for_test(workspace)
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: issue_id,
+          identifier: "COD-205",
+          title: "Certified recovery handoff stop",
+          description: "Recovery handoff is ready.",
+          state: "Rework",
+          branch_name: branch
+        })
+
+      issue_runtime_handoff_certificate!(workspace, issue)
+
+      assert AgentRunner.pushed_handoff_stop_for_test(workspace, issue)
 
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -1596,7 +1632,7 @@ defmodule SymphonyElixir.CoreTest do
         pid: self(),
         ref: ref,
         identifier: "COD-205",
-        issue: %Issue{id: issue_id, identifier: "COD-205", state: "Rework"},
+        issue: issue,
         started_at: DateTime.utc_now(),
         workspace_path: workspace
       }
@@ -11297,7 +11333,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "quiet high-token worker at pushed review gate stops without handoff correction" do
+  test "quiet high-token worker cannot use an uncertified pushed review gate as completion" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -11434,8 +11470,10 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
-      assert MapSet.member?(state.completed, issue_id)
-      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+      refute MapSet.member?(state.completed, issue_id)
+
+      assert [_correction] =
+               Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
     end
@@ -11813,9 +11851,9 @@ defmodule SymphonyElixir.CoreTest do
 
       open_corrections = Workspace.open_blocking_corrections_in_workspace(workspace)
       assert [correction] = open_corrections
-      assert correction["source"] == "symphony.runtime.no-durable-progress"
+      assert correction["source"] == "symphony.runtime.no-durable-progress-repeat"
       assert correction["source_status"] == "blocked"
-      assert correction["next_action"] == "block"
+      assert correction["next_action"] == "escalate"
       refute correction["summary"] =~ "handoff progress"
     after
       File.rm_rf(test_root)
@@ -15562,7 +15600,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "prompt builder prepends pushed validated handoff checkpoint for clean tracked branches" do
+  test "prompt builder ignores generic gates on clean tracked branches without a handoff certificate" do
     workflow_prompt = """
     You must read AGENTS.md, load every project doc, and inspect historical delivery logs.
     Ticket {{ issue.identifier }}
@@ -15662,19 +15700,11 @@ defmodule SymphonyElixir.CoreTest do
 
       prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
 
-      assert String.starts_with?(prompt, "Pushed validated handoff checkpoint:")
-      assert prompt =~ "Minimal review handoff mode:"
-      assert prompt =~ "handoff-ready validation passed"
-
-      assert prompt =~
-               "current ticket, current workspace branch/code, and the current GitHub/Codex PR review only"
-
-      assert prompt =~
-               "Do not read AGENTS.md, skills, broad project docs, historical delivery logs, unrelated tickets"
-
-      assert prompt =~ "Active issue: `MT-204`"
-      refute prompt =~ "You must read AGENTS.md"
-      refute prompt =~ "Ticket MT-204"
+      refute String.starts_with?(prompt, "Pushed validated handoff checkpoint:")
+      refute prompt =~ "Minimal review handoff mode:"
+      refute prompt =~ "handoff-ready validation passed"
+      assert prompt =~ "You must read AGENTS.md"
+      assert prompt =~ "Ticket MT-204"
     after
       File.rm_rf(workspace)
     end
@@ -16042,7 +16072,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "orchestrator completes clean pushed review handoff without starting a Codex worker" do
+  test "orchestrator automatically merges an opted-in clean exact-head handoff" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -16062,16 +16092,20 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-handoff",
-        identifier: "MT-205",
-        title: "Finish pushed handoff",
-        description: "Only PR review handoff remains.",
-        state: "Rework",
-        url: "https://linear.example/MT-205",
-        branch_name: "orocsy/mt-205",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(
+          %Issue{
+            id: "issue-direct-handoff",
+            identifier: "MT-205",
+            title: "Finish pushed handoff",
+            description: "Only PR review handoff remains.",
+            state: "Rework",
+            url: "https://linear.example/MT-205",
+            branch_name: "orocsy/mt-205",
+            labels: []
+          },
+          automatic_merge: true
+        )
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -16151,6 +16185,8 @@ defmodule SymphonyElixir.CoreTest do
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-12T05:00:49Z"}\n)
       )
 
+      issue_runtime_handoff_certificate!(workspace, issue)
+
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
           String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
@@ -16162,6 +16198,19 @@ defmodule SymphonyElixir.CoreTest do
                  "head" => %{"sha" => handoff_sha, "ref" => "orocsy/mt-205"}
                }
              ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/3" ->
+            {:ok,
+             %{
+               "number" => 3,
+               "state" => "open",
+               "html_url" => "https://github.com/acme/nutribuddy/pull/3",
+               "head" => %{"sha" => handoff_sha, "ref" => "orocsy/mt-205"},
+               "base" => %{"ref" => "main"},
+               "mergeable" => true,
+               "mergeable_state" => "clean",
+               "head_committed_at" => "2026-05-12T05:00:50Z"
+             }}
 
           endpoint == "repos/acme/nutribuddy/pulls/3/comments" ->
             {:ok, []}
@@ -16183,6 +16232,14 @@ defmodule SymphonyElixir.CoreTest do
                  "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment-clean-review"
                }
              ]}
+
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/commits/#{handoff_sha}/check-runs?") ->
+            {:ok,
+             %{
+               "check_runs" => [
+                 %{"name" => "test", "status" => "completed", "conclusion" => "success"}
+               ]
+             }}
 
           true ->
             {:error, {:unexpected_endpoint, endpoint}}
@@ -16221,22 +16278,28 @@ defmodule SymphonyElixir.CoreTest do
          }}
       end)
 
+      Application.put_env(:symphony_elixir, :github_merge_runner, fn endpoint, fields ->
+        send(self(), {:github_merge, endpoint, fields})
+        {:ok, %{"merged" => true, "sha" => "merged-mt-205"}}
+      end)
+
       on_exit(fn ->
         Application.delete_env(:symphony_elixir, :github_api_runner)
         Application.delete_env(:symphony_elixir, :github_graphql_runner)
+        Application.delete_env(:symphony_elixir, :github_merge_runner)
       end)
 
-      assert {:completed, %{target_state: "Human Review", pr_number: 3}} =
+      assert {:completed, %{target_state: "Done", pr_number: 3, merge_sha: "merged-mt-205"}} =
                Orchestrator.complete_pushed_handoff_for_test(issue)
 
-      assert_receive {:memory_tracker_state_update, "issue-direct-handoff", "Human Review"}
+      assert_receive {:memory_tracker_state_update, "issue-direct-handoff", "Done"}
       assert_receive {:memory_tracker_comment, "issue-direct-handoff", body}
-      assert body =~ "without starting a new Codex worker"
+      assert body =~ "automatic exact-head merge"
       assert body =~ "https://github.com/acme/nutribuddy/pull/3"
 
       events = File.read!(Path.join(event_dir, "events.jsonl"))
-      assert events =~ ~s("event":"handoff.completed")
-      assert events =~ "direct-pushed-review-handoff"
+      assert events =~ ~s("event":"merge.completed")
+      assert events =~ "merged-mt-205"
     after
       File.rm_rf(test_root)
     end
@@ -16262,15 +16325,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-handoff-stale-head",
-        identifier: "MT-208",
-        title: "Do not complete stale pushed handoff",
-        description: "The PR branch advanced after local validation.",
-        state: "Rework",
-        branch_name: "orocsy/mt-208",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-handoff-stale-head",
+          identifier: "MT-208",
+          title: "Do not complete stale pushed handoff",
+          description: "The PR branch advanced after local validation.",
+          state: "Rework",
+          branch_name: "orocsy/mt-208",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -16350,6 +16414,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-12T05:00:49Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -16433,15 +16499,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-handoff-feedback",
-        identifier: "MT-206",
-        title: "Resolve feedback",
-        description: "Review feedback remains.",
-        state: "Rework",
-        branch_name: "orocsy/mt-206",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-handoff-feedback",
+          identifier: "MT-206",
+          title: "Resolve feedback",
+          description: "Review feedback remains.",
+          state: "Rework",
+          branch_name: "orocsy/mt-206",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -16520,6 +16587,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-12T05:00:49Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -16622,15 +16691,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-handoff-request-review",
-        identifier: "MT-206",
-        title: "Request review after pushed fix",
-        description: "Review feedback was fixed by the pushed handoff commit.",
-        state: "Rework",
-        branch_name: "orocsy/mt-206",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-handoff-request-review",
+          identifier: "MT-206",
+          title: "Request review after pushed fix",
+          description: "Review feedback was fixed by the pushed handoff commit.",
+          state: "Rework",
+          branch_name: "orocsy/mt-206",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -16715,6 +16785,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-15T09:29:00Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -17848,15 +17920,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-handoff-local-review-request",
-        identifier: "MT-254",
-        title: "Await locally requested review",
-        description: "The worker already pushed and requested a fresh review.",
-        state: "Rework",
-        branch_name: "orocsy/mt-254",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-handoff-local-review-request",
+          identifier: "MT-254",
+          title: "Await locally requested review",
+          description: "The worker already pushed and requested a fresh review.",
+          state: "Rework",
+          branch_name: "orocsy/mt-254",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -17935,6 +18008,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "tool.finished", "status": "passed", "tool": "github-pr-created-and-codex-review-requested", "ts": "2026-05-18T11:22:00Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -18037,15 +18112,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-handoff-review-pending",
-        identifier: "MT-207",
-        title: "Await fresh review",
-        description: "Fresh Codex review was requested after the pushed fix.",
-        state: "Rework",
-        branch_name: "orocsy/mt-207",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-handoff-review-pending",
+          identifier: "MT-207",
+          title: "Await fresh review",
+          description: "Fresh Codex review was requested after the pushed fix.",
+          state: "Rework",
+          branch_name: "orocsy/mt-207",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -18124,6 +18200,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-15T09:23:00Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -18436,15 +18514,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-clean-handoff-review-missing",
-        identifier: "MT-252",
-        title: "Require clean review",
-        description: "No Codex review request or clean result exists yet.",
-        state: "Rework",
-        branch_name: "orocsy/mt-252",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-clean-handoff-review-missing",
+          identifier: "MT-252",
+          title: "Require clean review",
+          description: "No Codex review request or clean result exists yet.",
+          state: "Rework",
+          branch_name: "orocsy/mt-252",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -18523,6 +18602,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-17T23:08:00Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -18623,15 +18704,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-clean-handoff-review-lookup-fails",
-        identifier: "MT-253",
-        title: "Block on review lookup error",
-        description: "GitHub comments lookup fails while checking clean review.",
-        state: "Rework",
-        branch_name: "orocsy/mt-253",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-clean-handoff-review-lookup-fails",
+          identifier: "MT-253",
+          title: "Block on review lookup error",
+          description: "GitHub comments lookup fails while checking clean review.",
+          state: "Rework",
+          branch_name: "orocsy/mt-253",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -18711,6 +18793,8 @@ defmodule SymphonyElixir.CoreTest do
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-17T23:15:00Z"}\n)
       )
 
+      issue_runtime_handoff_certificate!(workspace, issue)
+
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
           String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
@@ -18789,15 +18873,16 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      issue = %Issue{
-        id: "issue-direct-clean-handoff-review-pending",
-        identifier: "MT-251",
-        title: "Await clean review",
-        description: "Fresh Codex review has no feedback yet.",
-        state: "Rework",
-        branch_name: "orocsy/mt-251",
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-direct-clean-handoff-review-pending",
+          identifier: "MT-251",
+          title: "Await clean review",
+          description: "Fresh Codex review has no feedback yet.",
+          state: "Rework",
+          branch_name: "orocsy/mt-251",
+          labels: []
+        })
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
@@ -18876,6 +18961,8 @@ defmodule SymphonyElixir.CoreTest do
         Path.join(event_dir, "events.jsonl"),
         ~s({"event": "gate.post-miu", "status": "passed", "step": "focused validation passed", "ts": "2026-05-17T22:52:00Z"}\n)
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -19908,7 +19995,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner stops after review-rework pushed handoff while issue remains active" do
+  test "agent runner does not stop review rework for an uncertified generic gate" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -20067,7 +20154,7 @@ defmodule SymphonyElixir.CoreTest do
       parent = self()
 
       state_fetcher = fn [_issue_id] ->
-        send(parent, {:issue_state_fetch, :unexpected})
+        send(parent, :issue_state_fetch)
 
         {:ok,
          [
@@ -20094,14 +20181,13 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
-      refute_receive {:issue_state_fetch, :unexpected}, 100
+      assert_receive :issue_state_fetch
 
       trace = File.read!(trace_file)
-      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 3
       assert trace =~ "Runtime dispatch preflight:"
       assert trace =~ "Review rework execution contract:"
       assert trace =~ "Fix current review feedback."
-      refute trace =~ "Pushed validated handoff checkpoint:"
       refute trace =~ "Minimal review handoff mode:"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
@@ -21180,6 +21266,58 @@ defmodule SymphonyElixir.CoreTest do
         "requirements" => requirements
       })
     )
+  end
+
+  defp runtime_handoff_issue(%Issue{} = issue, opts \\ []) do
+    miu_id = "#{issue.identifier}-MIU-1"
+    branch = issue.branch_name
+    automatic_merge? = Keyword.get(opts, :automatic_merge, false)
+
+    description = """
+    ## Runtime Contract
+
+    ```yaml
+    schema_version: 1
+    ticket_type: implementation
+    base_branch: main
+    integration_branch: #{branch}
+    dependencies: []
+    mius:
+      - id: #{miu_id}
+        write_scope:
+          - README.md
+        validations:
+          - git diff --check
+    final_validations:
+      - git diff --check
+    review:
+      authority: github_codex
+      require_current_head: true
+    merge:
+      automatic: #{automatic_merge?}
+      method: squash
+      require_ci_checks: true
+      completed_state: Done
+    ```
+
+    ## Technical Brief
+
+    #{issue.description}
+    """
+
+    %{issue | description: description}
+  end
+
+  defp issue_runtime_handoff_certificate!(workspace, %Issue{} = issue) do
+    {:ok, compiled} = SymphonyElixir.RuntimeContract.compile(issue.description)
+
+    assert {:ok, _certificate} =
+             SymphonyElixir.HandoffCertificate.issue(issue, workspace,
+               completed_mius: compiled.miu_ids,
+               validation_event_ids: ["test-validation"]
+             )
+
+    :ok
   end
 
   defp empty_orchestrator_state do

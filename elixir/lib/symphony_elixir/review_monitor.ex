@@ -307,6 +307,50 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   def clean_codex_review_after_latest_request?(_repo, _pr), do: {:ok, false}
 
+  @spec unresolved_review_thread_count(String.t() | nil, map() | nil) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def unresolved_review_thread_count(repo, pr) when is_binary(repo) and is_map(pr) do
+    with {:ok, threads} <- fetch_pull_review_threads(repo, pr) do
+      {:ok, Enum.count(threads, &active_review_thread?/1)}
+    end
+  end
+
+  def unresolved_review_thread_count(_repo, _pr), do: {:error, :invalid_review_thread_request}
+
+  @spec check_runs_state(String.t() | nil, String.t() | nil) ::
+          {:ok, :passed | :pending | :failed | :none} | {:error, term()}
+  def check_runs_state(repo, head_sha)
+      when is_binary(repo) and repo != "" and is_binary(head_sha) and head_sha != "" do
+    endpoint =
+      "repos/#{repo}/commits/#{head_sha}/check-runs?" <>
+        URI.encode_query(%{filter: "latest", per_page: 100})
+
+    case github_api(endpoint) do
+      {:ok, %{"check_runs" => runs}} when is_list(runs) -> {:ok, classify_check_runs(runs)}
+      {:ok, _payload} -> {:error, :unexpected_check_runs_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def check_runs_state(_repo, _head_sha), do: {:error, :invalid_check_runs_request}
+
+  @spec refresh_pull_request(String.t() | nil, map() | nil) :: {:ok, map()} | {:error, term()}
+  def refresh_pull_request(repo, pr) when is_binary(repo) and is_map(pr) do
+    case pr_number(pr) do
+      nil ->
+        {:error, :missing_pull_request_number}
+
+      number ->
+        case github_api("repos/#{repo}/pulls/#{number}") do
+          {:ok, live_pr} when is_map(live_pr) -> {:ok, hydrate_pull_request_head_commit(repo, live_pr)}
+          {:ok, payload} -> {:error, {:unexpected_pull_request_payload, payload}}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  def refresh_pull_request(_repo, _pr), do: {:error, :invalid_pull_request_refresh}
+
   @spec request_codex_review(String.t() | nil, map() | nil, String.t()) ::
           {:ok, map()} | {:error, term()}
   def request_codex_review(repo, pr, body) when is_binary(repo) and is_map(pr) and is_binary(body) do
@@ -718,6 +762,19 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp failed_check_run?(_run), do: false
+
+  defp classify_check_runs([]), do: :none
+
+  defp classify_check_runs(runs) do
+    cond do
+      Enum.any?(runs, &failed_check_run?/1) -> :failed
+      Enum.any?(runs, &(normalize_check_value(&1["status"]) != "completed")) -> :pending
+      Enum.all?(runs, &(normalize_check_value(&1["conclusion"]) in ["success", "neutral", "skipped"])) -> :passed
+      true -> :failed
+    end
+  end
+
+  defp normalize_check_value(value), do: value |> to_string() |> String.downcase()
 
   defp fetch_rest_current_feedback(repo, pr, comments, reviews) do
     repo

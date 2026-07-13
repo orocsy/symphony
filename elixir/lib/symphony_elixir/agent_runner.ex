@@ -9,11 +9,14 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.{
     Config,
     DispatchPreflight,
+    HandoffCertificate,
+    HandoffController,
     Linear.Issue,
     PromptBuilder,
     ReviewMonitor,
     ScopeAccess,
     Tracker,
+    ValidationController,
     Workspace
   }
 
@@ -91,7 +94,7 @@ defmodule SymphonyElixir.AgentRunner do
   if Mix.env() == :test do
     def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
     def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
-    def pushed_handoff_stop_for_test(workspace), do: pushed_handoff_stop?(workspace)
+    def pushed_handoff_stop_for_test(workspace, issue), do: pushed_handoff_stop?(workspace, issue)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
     def policy_violation_recovery_budget_for_test(workspace), do: policy_violation_recovery_budget(workspace)
 
@@ -467,6 +470,8 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
+      process_runtime_transition_requests(workspace, issue)
+
       if fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) do
         Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
         :ok
@@ -518,7 +523,7 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Stopping agent run for #{issue_context(issue)} after open Orocsy blocking correction; returning control to orchestrator")
         {:done, issue}
 
-      pushed_handoff_stop?(workspace) ->
+      pushed_handoff_stop?(workspace, issue) ->
         Logger.info("Stopping agent run for #{issue_context(issue)} after pushed validated handoff; returning control to orchestrator")
         {:done, issue}
 
@@ -531,17 +536,17 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp pushed_handoff_stop?(workspace) do
+  defp pushed_handoff_stop?(workspace, %Issue{} = issue) do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
-        workspace
-        |> PromptBuilder.workspace_recovery_checkpoint()
-        |> String.starts_with?("Pushed validated handoff checkpoint:")
+        match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace))
 
       _ ->
         false
     end
   end
+
+  defp pushed_handoff_stop?(_workspace, _issue), do: false
 
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"}} <- DispatchPreflight.read(workspace),
@@ -659,7 +664,8 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp fresh_implementation_checkpoint_present?(workspace) when is_binary(workspace) do
-    with {:ok, %{"mode" => "fresh_implementation"}} <- DispatchPreflight.read(workspace) do
+    with {:ok, %{"mode" => "fresh_implementation"} = preflight} <- DispatchPreflight.read(workspace),
+         false <- structured_runtime_contract?(preflight) do
       technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
     else
       _ -> false
@@ -669,6 +675,48 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp fresh_implementation_checkpoint_present?(_workspace), do: false
+
+  defp structured_runtime_contract?(preflight) when is_map(preflight) do
+    get_in(preflight, ["requirements", "runtime_contract_status"]) == "structured"
+  end
+
+  defp structured_runtime_contract?(_preflight), do: false
+
+  defp process_runtime_transition_requests(workspace, %Issue{} = issue) do
+    validation_result = ValidationController.process_requests(issue, workspace)
+    handoff_result = HandoffController.process_requests(issue, workspace)
+
+    maybe_record_controller_block(workspace, issue, "validation", validation_result)
+    maybe_record_controller_block(workspace, issue, "handoff", handoff_result)
+
+    Logger.info("Processed runtime transition requests for #{issue_context(issue)} validation=#{inspect(validation_result)} handoff=#{inspect(handoff_result)}")
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("Failed to process runtime transition requests for #{issue_context(issue)} error=#{Exception.message(error)}")
+
+      :ok
+  end
+
+  defp maybe_record_controller_block(workspace, issue, controller, {:blocked, reason}) do
+    _ =
+      Workspace.create_correction_in_workspace(workspace, issue, %{
+        source: "symphony.runtime.#{controller}-controller",
+        source_status: "blocked",
+        summary: "#{String.capitalize(controller)} controller requires operator action",
+        findings: [inspect(reason)],
+        required_corrections: [
+          "Inspect the persisted controller evidence and choose a contract revision, explicit operator reset, or cancellation."
+        ],
+        next_action: "escalate",
+        guard: %{"controller" => controller, "reason" => inspect(reason)}
+      })
+
+    :ok
+  end
+
+  defp maybe_record_controller_block(_workspace, _issue, _controller, _result), do: :ok
 
   defp technical_miu_trace_event?(workspace) when is_binary(workspace) do
     workspace
