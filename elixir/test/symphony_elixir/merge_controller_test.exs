@@ -62,6 +62,22 @@ defmodule SymphonyElixir.MergeControllerTest do
     end
   end
 
+  test "CI opt-out skips check-run feedback during automatic merge" do
+    {workspace, issue, head_sha} = certified_workspace(true, require_ci_checks?: false)
+    install_review_observations(head_sha, checks: :failed, unresolved_threads: 0)
+
+    Application.put_env(:symphony_elixir, :github_merge_runner, fn _endpoint, _fields ->
+      {:ok, %{"merged" => true, "sha" => "merge-sha-700"}}
+    end)
+
+    try do
+      assert {:merged, evidence} = MergeController.converge(issue, workspace, inspection(head_sha))
+      assert evidence["merge_sha"] == "merge-sha-700"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "fresh PR detail blocks merge when the live base changed after the caller snapshot" do
     {workspace, issue, head_sha} = certified_workspace(true)
     test_pid = self()
@@ -100,6 +116,35 @@ defmodule SymphonyElixir.MergeControllerTest do
     after
       File.rm_rf(workspace)
     end
+  end
+
+  test "fresh PR detail fails closed when head commit time is unavailable" do
+    {_workspace, _issue, head_sha} = certified_workspace(true)
+
+    Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+      cond do
+        endpoint == "repos/orocsy/symphony/pulls/53" ->
+          {:ok,
+           %{
+             "number" => 53,
+             "state" => "open",
+             "html_url" => "https://github.com/orocsy/symphony/pull/53",
+             "head" => %{"ref" => "orocsy/cod-700", "sha" => head_sha},
+             "base" => %{"ref" => "main"},
+             "mergeable" => true,
+             "mergeable_state" => "clean"
+           }}
+
+        endpoint == "repos/orocsy/symphony/commits/#{head_sha}" ->
+          {:error, :not_found}
+
+        true ->
+          {:error, {:unexpected_endpoint, endpoint}}
+      end
+    end)
+
+    assert {:error, :head_commit_unavailable} =
+             SymphonyElixir.ReviewMonitor.refresh_pull_request("orocsy/symphony", inspection(head_sha).pr)
   end
 
   test "resolved review threads do not block merge after a clean Codex comment" do
@@ -155,13 +200,14 @@ defmodule SymphonyElixir.MergeControllerTest do
     end
   end
 
-  defp certified_workspace(automatic_merge?) do
+  defp certified_workspace(automatic_merge?, opts \\ []) do
     workspace =
       Path.join(
         System.tmp_dir!(),
         "symphony-elixir-merge-controller-#{System.unique_integer([:positive])}"
       )
 
+    File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     git!(workspace, ["init", "-b", "main"])
     git!(workspace, ["config", "user.email", "symphony@example.test"])
@@ -179,7 +225,7 @@ defmodule SymphonyElixir.MergeControllerTest do
     git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-700"])
     head_sha = git_output!(workspace, ["rev-parse", "HEAD"])
 
-    issue = issue(automatic_merge?)
+    issue = issue(automatic_merge?, Keyword.get(opts, :require_ci_checks?, true))
 
     assert {:ok, _certificate} =
              HandoffCertificate.issue(issue, workspace,
@@ -190,7 +236,7 @@ defmodule SymphonyElixir.MergeControllerTest do
     {workspace, issue, head_sha}
   end
 
-  defp issue(automatic_merge?) do
+  defp issue(automatic_merge?, require_ci_checks?) do
     %Issue{
       id: "issue-cod-700",
       identifier: "COD-700",
@@ -220,7 +266,7 @@ defmodule SymphonyElixir.MergeControllerTest do
       merge:
         automatic: #{automatic_merge?}
         method: squash
-        require_ci_checks: true
+        require_ci_checks: #{require_ci_checks?}
         completed_state: Done
       ```
       """
@@ -291,7 +337,14 @@ defmodule SymphonyElixir.MergeControllerTest do
 
         String.contains?(endpoint, "/check-runs?") ->
           status = if checks == :pending, do: "in_progress", else: "completed"
-          conclusion = if checks == :pending, do: nil, else: "success"
+
+          conclusion =
+            case checks do
+              :pending -> nil
+              :failed -> "failure"
+              _ -> "success"
+            end
+
           {:ok, %{"check_runs" => [%{"name" => "test", "status" => status, "conclusion" => conclusion}]}}
 
         true ->

@@ -155,12 +155,15 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   @spec current_feedback(String.t(), map() | nil) :: {:ok, list()} | {:error, term()}
-  def current_feedback(repo, pr) when is_binary(repo) and is_map(pr) do
+  def current_feedback(repo, pr), do: current_feedback(repo, pr, [])
+
+  @spec current_feedback(String.t(), map() | nil, keyword()) :: {:ok, list()} | {:error, term()}
+  def current_feedback(repo, pr, opts) when is_binary(repo) and is_map(pr) and is_list(opts) do
     with {:ok, hydrated_pr} <- hydrate_pull_request_detail(repo, pr),
          {:ok, comments} <- fetch_pull_comments(repo, hydrated_pr),
          {:ok, reviews} <- fetch_pull_reviews(repo, hydrated_pr),
          {:ok, threads} <- fetch_pull_review_threads(repo, hydrated_pr),
-         {:ok, check_feedback} <- fetch_current_check_feedback(repo, hydrated_pr) do
+         {:ok, check_feedback} <- maybe_fetch_current_check_feedback(repo, hydrated_pr, opts) do
       {:ok,
        active_review_thread_feedback(threads) ++
          current_head_comments(hydrated_pr, comments) ++
@@ -168,8 +171,8 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
-  def current_feedback(_repo, nil), do: {:ok, []}
-  def current_feedback(_repo, _pr), do: {:error, :invalid_pull_request}
+  def current_feedback(_repo, nil, _opts), do: {:ok, []}
+  def current_feedback(_repo, _pr, _opts), do: {:error, :invalid_pull_request}
 
   defp inspect_issue_branches(repo, branches) do
     branches
@@ -359,7 +362,7 @@ defmodule SymphonyElixir.ReviewMonitor do
 
       number ->
         case github_api("repos/#{repo}/pulls/#{number}") do
-          {:ok, live_pr} when is_map(live_pr) -> {:ok, hydrate_pull_request_head_commit(repo, live_pr)}
+          {:ok, live_pr} when is_map(live_pr) -> hydrate_pull_request_head_commit_required(repo, live_pr)
           {:ok, payload} -> {:error, {:unexpected_pull_request_payload, payload}}
           {:error, reason} -> {:error, reason}
         end
@@ -483,6 +486,17 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp hydrate_pull_request_head_commit(_repo, pr), do: pr
+
+  defp hydrate_pull_request_head_commit_required(repo, pr) when is_binary(repo) and is_map(pr) do
+    hydrated = hydrate_pull_request_head_commit(repo, pr)
+
+    case head_committed_at(hydrated) do
+      %DateTime{} -> {:ok, hydrated}
+      _ -> {:error, :head_commit_unavailable}
+    end
+  end
+
+  defp hydrate_pull_request_head_commit_required(_repo, _pr), do: {:error, :invalid_pull_request}
 
   defp commit_payload_committed_at(commit) when is_map(commit) do
     get_in(commit, ["commit", "committer", "date"]) ||
@@ -753,6 +767,14 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   defp fetch_current_check_feedback(_repo, _pr), do: {:ok, []}
+
+  defp maybe_fetch_current_check_feedback(repo, pr, opts) do
+    if Keyword.get(opts, :include_checks?, true) do
+      fetch_current_check_feedback(repo, pr)
+    else
+      {:ok, []}
+    end
+  end
 
   defp failed_check_run_feedback(runs) when is_list(runs) do
     runs

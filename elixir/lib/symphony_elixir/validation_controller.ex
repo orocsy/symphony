@@ -57,7 +57,8 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, changed_paths} <- changed_paths(workspace),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
-         {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha) do
+         {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha),
+         true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
       certificate =
         ControllerEvidence.sign(%{
           "schema_version" => 1,
@@ -276,9 +277,10 @@ defmodule SymphonyElixir.ValidationController do
 
   defp run_command(workspace, command, timeout_ms) do
     case OptionParser.split(command) do
-      [executable | args] ->
+      parts when parts != [] ->
+        {env, [executable | args]} = split_env_assignments(parts)
         executable = resolve_executable(executable, workspace)
-        port = open_command_port(executable, args, workspace)
+        port = open_command_port(executable, args, workspace, env)
         collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "")
 
       [] ->
@@ -287,6 +289,13 @@ defmodule SymphonyElixir.ValidationController do
   rescue
     error -> {Exception.message(error), 127, false}
   end
+
+  defp split_env_assignments(parts) do
+    Enum.split_while(parts, &env_assignment?/1)
+  end
+
+  defp env_assignment?(part) when is_binary(part), do: Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=.*/, part)
+  defp env_assignment?(_part), do: false
 
   defp validation_status(_command, _exit_code, _tests, true), do: {"failed", "command_timed_out"}
 
@@ -405,11 +414,27 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp open_command_port(executable, args, workspace) do
+  defp open_command_port(executable, args, workspace, env) do
+    port_opts =
+      [:binary, :exit_status, :stderr_to_stdout, {:args, args}, {:cd, String.to_charlist(workspace)}]
+      |> maybe_put_env(env)
+
     Port.open(
       {:spawn_executable, executable},
-      [:binary, :exit_status, :stderr_to_stdout, {:args, args}, {:cd, String.to_charlist(workspace)}]
+      port_opts
     )
+  end
+
+  defp maybe_put_env(port_opts, []), do: port_opts
+
+  defp maybe_put_env(port_opts, env) do
+    env =
+      Enum.map(env, fn assignment ->
+        [key, value] = String.split(assignment, "=", parts: 2)
+        {String.to_charlist(key), String.to_charlist(value)}
+      end)
+
+    port_opts ++ [{:env, env}]
   end
 
   defp collect_command(port, timeout_ms, started_ms, output) do

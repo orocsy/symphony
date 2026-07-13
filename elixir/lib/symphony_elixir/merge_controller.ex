@@ -26,7 +26,7 @@ defmodule SymphonyElixir.MergeController do
          {:ok, live_pr} <- ReviewMonitor.refresh_pull_request(repo, pr),
          live_inspection <- live_inspection(inspection, live_pr),
          :ok <- verify_pull_request_contract(compiled.contract, certificate, live_inspection, live_pr),
-         :ok <- verify_live_feedback_empty(repo, live_pr),
+         :ok <- verify_live_feedback_empty(repo, live_pr, merge),
          {:ok, true} <- ReviewMonitor.clean_codex_review_after_latest_request?(repo, live_pr),
          {:ok, 0} <- ReviewMonitor.unresolved_review_thread_count(repo, live_pr),
          :ok <- verify_checks(repo, certificate["head_sha"], merge),
@@ -105,8 +105,10 @@ defmodule SymphonyElixir.MergeController do
     |> Map.put(:pr_url, live_pr["html_url"])
   end
 
-  defp verify_live_feedback_empty(repo, pr) do
-    case ReviewMonitor.current_feedback(repo, pr) do
+  defp verify_live_feedback_empty(repo, pr, merge) do
+    include_checks? = merge["require_ci_checks"] != false
+
+    case ReviewMonitor.current_feedback(repo, pr, include_checks?: include_checks?) do
       {:ok, feedback} -> verify_feedback_empty(feedback)
       {:error, reason} -> {:blocked, {:review_feedback_unavailable, reason}}
     end

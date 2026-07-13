@@ -19377,6 +19377,45 @@ defmodule SymphonyElixir.CoreTest do
     assert AgentRunner.selected_worker_host_for_test(issue, "worker-a") == nil
   end
 
+  test "agent runner routes structured runtime contracts to local controller-capable worker" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "~/.symphony-remote-workspaces",
+      worker_ssh_hosts: ["worker-a"]
+    )
+
+    issue = %Issue{
+      id: "issue-structured-local-controller",
+      identifier: "MT-STRUCTURED-LOCAL",
+      title: "Structured local controller",
+      state: "In Progress",
+      branch_name: "orocsy/generated-child",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/structured-integration
+      dependencies: []
+      mius:
+        - id: MT-STRUCTURED-LOCAL-MIU-1
+          write_scope:
+            - README.md
+          validations:
+            - mix test
+      final_validations:
+        - mix test
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert AgentRunner.selected_worker_host_for_test(issue, "worker-a") == nil
+  end
+
   test "agent runner degrades remote review inspection failures to no feedback" do
     write_workflow_file!(Workflow.workflow_file_path(),
       review_monitor_enabled: true,

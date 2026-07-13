@@ -153,8 +153,8 @@ defmodule SymphonyElixir.HandoffCertificate do
   end
 
   defp clean_worktree?(workspace) do
-    case git(workspace, ["status", "--porcelain=v1"]) do
-      {:ok, ""} -> true
+    case git(workspace, ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).orocsy/"]) do
+      {:ok, status} -> String.trim(status) == ""
       _ -> false
     end
   end

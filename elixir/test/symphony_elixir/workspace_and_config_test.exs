@@ -1088,6 +1088,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert requirements["automatic_handoff_certifiable"]
       assert requirements["contract_hash"] =~ "sha256:"
       assert requirements["ticket_type"] == "implementation"
+      assert requirements["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
       assert requirements["base_branch"] == "main"
       assert requirements["integration_branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
       assert requirements["dependencies"] == ["COD-265"]

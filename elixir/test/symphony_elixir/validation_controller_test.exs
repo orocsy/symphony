@@ -60,6 +60,41 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "runs validation commands with leading environment assignments" do
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$NB_SENTINEL\" = ok ] || exit 9\necho '3 tests, 0 failures'\n"
+      )
+
+    issue = %{
+      issue
+      | description: String.replace(issue.description, "- ./fake-test", "- NB_SENTINEL=ok ./fake-test")
+    }
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not sign a MIU when validation leaves the worktree dirty" do
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho dirty > DIRTY.md\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, :validation_left_dirty_worktree} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "zero-test output fails once and unchanged fingerprint does not rerun" do
     {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
 
@@ -270,6 +305,27 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "handoff rejects commits after the last certified MIU" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nImplemented.\n\nUncertified.\n")
+      git!(workspace, ["add", "README.md"])
+      git!(workspace, ["commit", "-m", "Uncertified follow-up"])
+      git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
+      git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
+      git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-700"])
+      append_event!(workspace, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, {:uncertified_commits_after_last_miu, _certified_head, _head_sha}} =
+               HandoffController.process_requests(issue, workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   defp workspace_and_issue(test_output, opts \\ []) do
     workspace =
       Path.join(
@@ -292,10 +348,10 @@ defmodule SymphonyElixir.ValidationControllerTest do
     delay_seconds = Keyword.get(opts, :delay_seconds, 0)
     timeout_ms = Keyword.get(opts, :timeout_ms, 900_000)
 
-    File.write!(
-      Path.join(workspace, "fake-test"),
-      "#!/bin/sh\nsleep #{delay_seconds}\necho '#{test_output}'\n"
-    )
+    script_body =
+      Keyword.get(opts, :script_body, "#!/bin/sh\nsleep #{delay_seconds}\necho '#{test_output}'\n")
+
+    File.write!(Path.join(workspace, "fake-test"), script_body)
 
     File.chmod!(Path.join(workspace, "fake-test"), 0o755)
     git!(workspace, ["add", "."])

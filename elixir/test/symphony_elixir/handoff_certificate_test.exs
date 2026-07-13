@@ -62,6 +62,22 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     assert {:ok, ^certificate} = HandoffCertificate.current(issue, workspace)
   end
 
+  test "runtime evidence files do not dirty an otherwise clean handoff certificate", %{
+    workspace: workspace,
+    issue: issue
+  } do
+    File.write!(Path.join(workspace, ".git/info/exclude"), "")
+
+    assert {:ok, certificate} =
+             HandoffCertificate.issue(issue, workspace,
+               completed_mius: ["COD-266-MIU-1"],
+               validation_event_ids: ["validation-1"]
+             )
+
+    assert File.regular?(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
+    assert {:ok, ^certificate} = HandoffCertificate.current(issue, workspace)
+  end
+
   test "contract or head changes invalidate an existing certificate", %{workspace: workspace, issue: issue} do
     assert {:ok, _certificate} =
              HandoffCertificate.issue(issue, workspace,

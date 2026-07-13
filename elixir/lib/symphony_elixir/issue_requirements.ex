@@ -84,7 +84,7 @@ defmodule SymphonyElixir.IssueRequirements do
       "runtime_contract" => contract,
       "title" => string(issue.title),
       "state" => string(issue.state),
-      "branch" => string(issue.branch_name),
+      "branch" => contract["integration_branch"],
       "base_branch" => contract["base_branch"],
       "integration_branch" => contract["integration_branch"],
       "feature_group" => "",

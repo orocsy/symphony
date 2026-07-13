@@ -14,6 +14,7 @@ defmodule SymphonyElixir.AgentRunner do
     Linear.Issue,
     PromptBuilder,
     ReviewMonitor,
+    RuntimeContract,
     ScopeAccess,
     Tracker,
     ValidationController,
@@ -893,13 +894,25 @@ defmodule SymphonyElixir.AgentRunner do
   defp selected_worker_host_for_issue(issue, preferred_host, configured_hosts) do
     worker_host = selected_worker_host(preferred_host, configured_hosts)
 
-    if is_binary(worker_host) and review_feedback_requires_local_worker?(issue) do
-      Logger.info("Routing #{issue_context(issue)} to local worker because current review feedback requires dispatch preflight")
-      nil
-    else
-      worker_host
+    cond do
+      is_binary(worker_host) and structured_runtime_contract_issue?(issue) ->
+        Logger.info("Routing #{issue_context(issue)} to local worker because structured runtime contracts require local controller certification")
+        nil
+
+      is_binary(worker_host) and review_feedback_requires_local_worker?(issue) ->
+        Logger.info("Routing #{issue_context(issue)} to local worker because current review feedback requires dispatch preflight")
+        nil
+
+      true ->
+        worker_host
     end
   end
+
+  defp structured_runtime_contract_issue?(%Issue{description: description}) when is_binary(description) do
+    match?({:ok, _compiled}, RuntimeContract.compile(description))
+  end
+
+  defp structured_runtime_contract_issue?(_issue), do: false
 
   defp review_feedback_requires_local_worker?(issue) do
     case remote_worker_review_feedback?(issue) do

@@ -36,6 +36,7 @@ defmodule SymphonyElixir.HandoffController do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          certificates <- ValidationController.certificates(workspace),
          :ok <- verify_miu_certificates(issue, workspace, compiled, head_sha, certificates),
+         :ok <- verify_final_head_certified(compiled, head_sha, certificates),
          {:ok, final_events} <- ValidationController.validate_final(issue, workspace) do
       validation_event_ids =
         (Enum.flat_map(certificates, &Map.get(&1, "validation_event_ids", [])) ++
@@ -90,6 +91,16 @@ defmodule SymphonyElixir.HandoffController do
           {:halt, {:error, {:missing_miu_certificate, miu_id}}}
       end
     end)
+  end
+
+  defp verify_final_head_certified(compiled, head_sha, certificates) do
+    last_miu_id = List.last(compiled.miu_ids)
+
+    case Enum.find(certificates, &(&1["miu_id"] == last_miu_id)) do
+      %{"head_sha" => ^head_sha} -> :ok
+      %{"head_sha" => certified_head} -> {:error, {:uncertified_commits_after_last_miu, certified_head, head_sha}}
+      _ -> {:error, {:missing_miu_certificate, last_miu_id}}
+    end
   end
 
   defp record_request_result(workspace, request, result) do
