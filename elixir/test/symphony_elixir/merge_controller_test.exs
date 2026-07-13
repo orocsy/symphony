@@ -82,7 +82,7 @@ defmodule SymphonyElixir.MergeControllerTest do
     end
   end
 
-  test "an unresolved raw review thread blocks merge even after a clean Codex comment" do
+  test "fresh current feedback blocks merge even when caller snapshot was clean" do
     {workspace, issue, head_sha} = certified_workspace(true)
     test_pid = self()
     install_review_observations(head_sha, checks: :passed, unresolved_threads: 1)
@@ -93,10 +93,26 @@ defmodule SymphonyElixir.MergeControllerTest do
     end)
 
     try do
-      assert {:blocked, {:unresolved_review_threads, 1}} =
+      assert {:blocked, {:current_head_feedback, 1}} =
                MergeController.converge(issue, workspace, inspection(head_sha))
 
       refute_received :unexpected_merge
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "resolved review threads do not block merge after a clean Codex comment" do
+    {workspace, issue, head_sha} = certified_workspace(true)
+    install_review_observations(head_sha, checks: :passed, unresolved_threads: 1, feedback_cleared: true)
+
+    Application.put_env(:symphony_elixir, :github_merge_runner, fn _endpoint, _fields ->
+      {:ok, %{"merged" => true, "sha" => "merge-sha-700"}}
+    end)
+
+    try do
+      assert {:merged, evidence} = MergeController.converge(issue, workspace, inspection(head_sha))
+      assert evidence["merge_sha"] == "merge-sha-700"
     after
       File.rm_rf(workspace)
     end
@@ -235,6 +251,7 @@ defmodule SymphonyElixir.MergeControllerTest do
     checks = Keyword.fetch!(opts, :checks)
     unresolved_threads = Keyword.fetch!(opts, :unresolved_threads)
     live_base = Keyword.get(opts, :live_base, "main")
+    feedback_cleared? = Keyword.get(opts, :feedback_cleared, false)
 
     Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
       cond do
@@ -251,13 +268,24 @@ defmodule SymphonyElixir.MergeControllerTest do
              "head_committed_at" => "2026-07-12T10:00:00Z"
            }}
 
-        String.contains?(endpoint, "/issues/53/comments") ->
+        String.contains?(endpoint, "/issues/53/comments") or String.contains?(endpoint, "/pulls/53/comments") ->
           {:ok,
            [
              %{"body" => "@codex review", "created_at" => "2026-07-12T10:01:00Z"},
              %{
                "body" => "Codex Review: Didn't find any major issues",
                "created_at" => "2026-07-12T10:02:00Z"
+             }
+           ]}
+
+        String.contains?(endpoint, "/pulls/53/reviews") ->
+          {:ok,
+           [
+             %{
+               "body" => "Codex Review: Didn't find any major issues",
+               "submitted_at" => "2026-07-12T10:02:00Z",
+               "commit_id" => head_sha,
+               "state" => "COMMENTED"
              }
            ]}
 
@@ -278,9 +306,22 @@ defmodule SymphonyElixir.MergeControllerTest do
         else
           [
             %{
-              "isResolved" => false,
+              "isResolved" => feedback_cleared?,
               "isOutdated" => false,
-              "comments" => %{"nodes" => []}
+              "comments" => %{
+                "nodes" => [
+                  %{
+                    "author" => %{"login" => "chatgpt-codex-connector"},
+                    "body" => "Fix the current code.",
+                    "path" => "lib/example.ex",
+                    "line" => 12,
+                    "originalLine" => 12,
+                    "createdAt" => "2026-07-12T10:02:00Z",
+                    "outdated" => false,
+                    "url" => "https://github.com/orocsy/symphony/pull/53#discussion"
+                  }
+                ]
+              }
             }
           ]
         end

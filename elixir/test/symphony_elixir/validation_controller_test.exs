@@ -19,6 +19,47 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "ignores untracked runtime ledger files during cleanliness checks" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures", exclude_orocsy?: false)
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+      File.write!(Path.join(workspace, ".orocsy/delivery/runtime.json"), "{}\n")
+
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert certificate["changed_paths"] == ["README.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "matches wildcard write scope against deleted paths" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures", implementation: :delete_doc)
+
+    issue = %{
+      issue
+      | description: String.replace(issue.description, "- README.md", "- docs/**")
+    }
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert certificate["changed_paths"] == ["docs/old.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "parses pytest normal success summary" do
+    {workspace, issue} = workspace_and_issue("3 passed in 0.12s")
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert length(certificate["validation_event_ids"]) == 1
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "zero-test output fails once and unchanged fingerprint does not rerun" do
     {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
 
@@ -241,6 +282,13 @@ defmodule SymphonyElixir.ValidationControllerTest do
     git!(workspace, ["config", "user.email", "symphony@example.test"])
     git!(workspace, ["config", "user.name", "Symphony Test"])
     File.write!(Path.join(workspace, "README.md"), "# Test\n")
+    implementation = Keyword.get(opts, :implementation, :readme)
+
+    if implementation == :delete_doc do
+      File.mkdir_p!(Path.join(workspace, "docs"))
+      File.write!(Path.join(workspace, "docs/old.md"), "# Old\n")
+    end
+
     delay_seconds = Keyword.get(opts, :delay_seconds, 0)
     timeout_ms = Keyword.get(opts, :timeout_ms, 900_000)
 
@@ -250,13 +298,25 @@ defmodule SymphonyElixir.ValidationControllerTest do
     )
 
     File.chmod!(Path.join(workspace, "fake-test"), 0o755)
-    git!(workspace, ["add", "README.md", "fake-test"])
+    git!(workspace, ["add", "."])
     git!(workspace, ["commit", "-m", "Initial"])
     git!(workspace, ["switch", "-c", "orocsy/cod-700"])
-    File.write!(Path.join(workspace, "README.md"), "# Test\n\nImplemented.\n")
-    git!(workspace, ["add", "README.md"])
+
+    case implementation do
+      :delete_doc ->
+        File.rm!(Path.join(workspace, "docs/old.md"))
+        git!(workspace, ["rm", "docs/old.md"])
+
+      _ ->
+        File.write!(Path.join(workspace, "README.md"), "# Test\n\nImplemented.\n")
+        git!(workspace, ["add", "README.md"])
+    end
+
     git!(workspace, ["commit", "-m", "Implement micro MIU"])
-    File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+    if Keyword.get(opts, :exclude_orocsy?, true) do
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+    end
 
     issue = %Issue{
       id: "issue-cod-700",

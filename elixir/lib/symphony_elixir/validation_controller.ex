@@ -56,7 +56,7 @@ defmodule SymphonyElixir.ValidationController do
          :ok <- ensure_next_miu(issue, workspace, compiled, head_sha, miu_id),
          {:ok, changed_paths} <- changed_paths(workspace),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
-         true <- paths_allowed?(workspace, changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
+         true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
          {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha) do
       certificate =
         ControllerEvidence.sign(%{
@@ -192,23 +192,24 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp paths_allowed?(workspace, changed_paths, allowed_scope) do
-    allowed_paths =
-      allowed_scope
-      |> Enum.flat_map(fn pattern ->
-        exact = [pattern]
+  defp paths_allowed?(changed_paths, allowed_scope) do
+    Enum.all?(changed_paths, fn path ->
+      Enum.any?(allowed_scope, &path_matches_scope?(path, &1))
+    end)
+  end
 
-        wildcard =
-          workspace
-          |> Path.join(pattern)
-          |> Path.wildcard(match_dot: true)
-          |> Enum.map(&Path.relative_to(&1, workspace))
+  defp path_matches_scope?(path, scope) when is_binary(path) and is_binary(scope) do
+    path == scope or Regex.match?(glob_regex(scope), path)
+  end
 
-        exact ++ wildcard
-      end)
-      |> MapSet.new()
+  defp path_matches_scope?(_path, _scope), do: false
 
-    Enum.all?(changed_paths, &MapSet.member?(allowed_paths, &1))
+  defp glob_regex(scope) do
+    scope
+    |> Regex.escape()
+    |> String.replace("\\*\\*", ".*")
+    |> String.replace("\\*", "[^/]*")
+    |> then(&Regex.compile!("^" <> &1 <> "$"))
   end
 
   defp run_validations(issue, workspace, compiled, miu, head_sha) do
@@ -311,6 +312,17 @@ defmodule SymphonyElixir.ValidationController do
 
         match = Regex.run(~r/Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(\d+)\s+passed/i, output, capture: :all_but_first) ->
           [failed, passed] = Enum.map(match, fn value -> if value == "", do: 0, else: String.to_integer(value) end)
+          %{"collected" => passed + failed, "passed" => passed, "failed" => failed}
+
+        match = Regex.run(~r/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?\s+in\s+[\d.]+s/i, output, capture: :all_but_first) ->
+          [passed, failed] =
+            match
+            |> then(fn
+              [passed] -> [passed, "0"]
+              [passed, failed] -> [passed, failed]
+            end)
+            |> Enum.map(&String.to_integer/1)
+
           %{"collected" => passed + failed, "passed" => passed, "failed" => failed}
 
         true ->
@@ -483,7 +495,10 @@ defmodule SymphonyElixir.ValidationController do
   defp truncate(value, max_bytes), do: binary_part(value, 0, max_bytes) <> "\n...[truncated]\n"
 
   defp clean_worktree?(workspace) do
-    match?({:ok, ""}, git(workspace, ["status", "--porcelain=v1"]))
+    case git(workspace, ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).orocsy/"]) do
+      {:ok, status} -> String.trim(status) == ""
+      _ -> false
+    end
   end
 
   defp git_ancestor?(workspace, ancestor, head) when is_binary(ancestor) and is_binary(head) do

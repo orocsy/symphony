@@ -154,6 +154,23 @@ defmodule SymphonyElixir.ReviewMonitor do
     end
   end
 
+  @spec current_feedback(String.t(), map() | nil) :: {:ok, list()} | {:error, term()}
+  def current_feedback(repo, pr) when is_binary(repo) and is_map(pr) do
+    with {:ok, hydrated_pr} <- hydrate_pull_request_detail(repo, pr),
+         {:ok, comments} <- fetch_pull_comments(repo, hydrated_pr),
+         {:ok, reviews} <- fetch_pull_reviews(repo, hydrated_pr),
+         {:ok, threads} <- fetch_pull_review_threads(repo, hydrated_pr),
+         {:ok, check_feedback} <- fetch_current_check_feedback(repo, hydrated_pr) do
+      {:ok,
+       active_review_thread_feedback(threads) ++
+         current_head_comments(hydrated_pr, comments) ++
+         current_head_reviews(hydrated_pr, reviews) ++ check_feedback}
+    end
+  end
+
+  def current_feedback(_repo, nil), do: {:ok, []}
+  def current_feedback(_repo, _pr), do: {:error, :invalid_pull_request}
+
   defp inspect_issue_branches(repo, branches) do
     branches
     |> Enum.reduce_while({:ok, no_pr_inspection(repo)}, fn branch, {:ok, fallback} ->

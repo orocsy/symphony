@@ -470,41 +470,47 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      process_runtime_transition_requests(workspace, issue)
+      transition_result = process_runtime_transition_requests(workspace, issue)
 
-      if fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) do
-        Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
-        :ok
-      else
-        next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
+      cond do
+        runtime_transition_stop?(transition_result) ->
+          Logger.info("Stopping agent run for #{issue_context(issue)} after runtime transition certification; returning control to orchestrator")
+          :ok
 
-        case next_action do
-          {:continue, refreshed_issue} when turn_number < max_turns ->
-            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+        fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) ->
+          Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
+          :ok
 
-            do_run_codex_turns(
-              app_session,
-              workspace,
-              refreshed_issue,
-              codex_update_recipient,
-              opts,
-              issue_state_fetcher,
-              turn_number + 1,
-              max_turns,
-              worker_host
-            )
+        true ->
+          next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
 
-          {:continue, refreshed_issue} ->
-            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+          case next_action do
+            {:continue, refreshed_issue} when turn_number < max_turns ->
+              Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-            :ok
+              do_run_codex_turns(
+                app_session,
+                workspace,
+                refreshed_issue,
+                codex_update_recipient,
+                opts,
+                issue_state_fetcher,
+                turn_number + 1,
+                max_turns,
+                worker_host
+              )
 
-          {:done, _refreshed_issue} ->
-            :ok
+            {:continue, refreshed_issue} ->
+              Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
-          {:error, reason} ->
-            {:error, reason}
-        end
+              :ok
+
+            {:done, _refreshed_issue} ->
+              :ok
+
+            {:error, reason} ->
+              {:error, reason}
+          end
       end
     end
   end
@@ -691,13 +697,17 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Processed runtime transition requests for #{issue_context(issue)} validation=#{inspect(validation_result)} handoff=#{inspect(handoff_result)}")
 
-    :ok
+    {validation_result, handoff_result}
   rescue
     error ->
       Logger.warning("Failed to process runtime transition requests for #{issue_context(issue)} error=#{Exception.message(error)}")
 
-      :ok
+      {:error, {:runtime_transition_failed, Exception.message(error)}}
   end
+
+  defp runtime_transition_stop?({{:ok, certificate}, _handoff_result}) when is_map(certificate), do: true
+  defp runtime_transition_stop?({_validation_result, {:ok, certificate}}) when is_map(certificate), do: true
+  defp runtime_transition_stop?(_result), do: false
 
   defp maybe_record_controller_block(workspace, issue, controller, {:blocked, reason}) do
     _ =
