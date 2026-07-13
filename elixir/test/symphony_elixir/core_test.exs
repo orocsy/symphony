@@ -16072,7 +16072,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "orchestrator automatically merges an opted-in clean exact-head handoff" do
+  test "orchestrator automatically merges a certified In Progress exact-head handoff" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -16099,7 +16099,7 @@ defmodule SymphonyElixir.CoreTest do
             identifier: "MT-205",
             title: "Finish pushed handoff",
             description: "Only PR review handoff remains.",
-            state: "Rework",
+            state: "In Progress",
             url: "https://linear.example/MT-205",
             branch_name: "orocsy/mt-205",
             labels: []

@@ -129,7 +129,7 @@ defmodule SymphonyElixir.RuntimeContract do
     case Map.get(contract, key, []) do
       paths when is_list(paths) ->
         Enum.reduce(paths, errors, fn path, acc ->
-          if valid_scope_path?(path), do: acc, else: ["invalid_#{key}:#{path}" | acc]
+          if valid_scope_path?(path), do: acc, else: ["invalid_#{key}:#{error_value(path)}" | acc]
         end)
 
       _ ->
@@ -139,10 +139,10 @@ defmodule SymphonyElixir.RuntimeContract do
 
   defp validate_mius(errors, %{"mius" => mius}) when is_list(mius) and mius != [] do
     normalized = Enum.map(mius, &stringify_keys/1)
+    miu_ids = Enum.map(normalized, fn miu -> if is_map(miu), do: Map.get(miu, "id") end)
 
     errors =
-      normalized
-      |> Enum.map(&Map.get(&1, "id"))
+      miu_ids
       |> Enum.reject(&(is_binary(&1) and String.trim(&1) != ""))
       |> case do
         [] -> errors
@@ -150,8 +150,7 @@ defmodule SymphonyElixir.RuntimeContract do
       end
 
     errors =
-      normalized
-      |> Enum.map(&Map.get(&1, "id"))
+      miu_ids
       |> Enum.filter(&is_binary/1)
       |> Enum.frequencies()
       |> Enum.reduce(errors, fn
@@ -179,11 +178,13 @@ defmodule SymphonyElixir.RuntimeContract do
     case map[key] do
       paths when is_list(paths) and paths != [] ->
         Enum.reduce(paths, errors, fn path, acc ->
-          if valid_scope_path?(path), do: acc, else: ["invalid_#{key}:#{id}:#{path}" | acc]
+          if valid_scope_path?(path),
+            do: acc,
+            else: ["invalid_#{key}:#{error_value(id)}:#{error_value(path)}" | acc]
         end)
 
       _ ->
-        ["invalid_#{key}:#{id}" | errors]
+        ["invalid_#{key}:#{error_value(id)}" | errors]
     end
   end
 
@@ -191,11 +192,13 @@ defmodule SymphonyElixir.RuntimeContract do
     case Map.get(map, key, []) do
       paths when is_list(paths) ->
         Enum.reduce(paths, errors, fn path, acc ->
-          if valid_scope_path?(path), do: acc, else: ["invalid_#{key}:#{id}:#{path}" | acc]
+          if valid_scope_path?(path),
+            do: acc,
+            else: ["invalid_#{key}:#{error_value(id)}:#{error_value(path)}" | acc]
         end)
 
       _ ->
-        ["invalid_#{key}:#{id}" | errors]
+        ["invalid_#{key}:#{error_value(id)}" | errors]
     end
   end
 
@@ -216,7 +219,10 @@ defmodule SymphonyElixir.RuntimeContract do
   end
 
   defp validation_error(key, nil, value), do: "invalid_#{key}:#{inspect(value)}"
-  defp validation_error(key, id, value), do: "invalid_#{key}:#{id}:#{inspect(value)}"
+  defp validation_error(key, id, value), do: "invalid_#{key}:#{error_value(id)}:#{inspect(value)}"
+
+  defp error_value(value) when is_binary(value), do: value
+  defp error_value(value), do: inspect(value)
 
   defp validate_review(errors, %{"review" => review}) when is_map(review) do
     review = stringify_keys(review)

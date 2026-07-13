@@ -58,7 +58,8 @@ defmodule SymphonyElixir.HandoffController do
     expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
     by_id = Map.new(certificates, &{&1["miu_id"], &1})
 
-    Enum.reduce_while(compiled.miu_ids, :ok, fn miu_id, :ok ->
+    compiled.miu_ids
+    |> Enum.reduce_while(nil, fn miu_id, previous_head_sha ->
       case by_id[miu_id] do
         %{} = certificate ->
           cond do
@@ -80,17 +81,39 @@ defmodule SymphonyElixir.HandoffController do
             certificate["issue_revision"] != expected_revision ->
               {:halt, {:error, {:stale_miu_issue_revision, miu_id}}}
 
+            not valid_miu_certificate_range?(workspace, certificate) ->
+              {:halt, {:error, {:invalid_miu_certificate_range, miu_id}}}
+
+            is_binary(previous_head_sha) and certificate["base_head_sha"] != previous_head_sha ->
+              {:halt, {:error, {:noncontiguous_miu_certificate_range, miu_id}}}
+
             not git_ancestor?(workspace, certificate["head_sha"], head_sha) ->
               {:halt, {:error, {:miu_checkpoint_not_ancestor, miu_id}}}
 
             true ->
-              {:cont, :ok}
+              {:cont, certificate["head_sha"]}
           end
 
         _ ->
           {:halt, {:error, {:missing_miu_certificate, miu_id}}}
       end
     end)
+    |> case do
+      {:error, _reason} = error -> error
+      _last_head_sha -> :ok
+    end
+  end
+
+  defp valid_miu_certificate_range?(workspace, certificate) do
+    base_head_sha = certificate["base_head_sha"]
+    certificate_head_sha = certificate["head_sha"]
+    changed_paths = certificate["changed_paths"]
+
+    is_binary(base_head_sha) and base_head_sha != "" and
+      is_binary(certificate_head_sha) and certificate_head_sha != "" and
+      base_head_sha != certificate_head_sha and
+      is_list(changed_paths) and changed_paths != [] and
+      git_ancestor?(workspace, base_head_sha, certificate_head_sha)
   end
 
   defp verify_final_head_certified(compiled, head_sha, certificates) do

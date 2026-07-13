@@ -74,6 +74,39 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             state = json.loads((repo / ".orocsy/delivery/state/current.json").read_text(encoding="utf-8"))
             self.assertEqual(state["last_event_id"], json.loads(events[-1])["event_id"])
 
+    def test_transition_event_append_binds_the_current_git_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            (repo / "README.md").write_text("# Test\n", encoding="utf-8")
+            self.commit_all(repo)
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+
+            code, _output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "event",
+                    "append",
+                    "--type",
+                    "miu.completion_requested",
+                    "--status",
+                    "requested",
+                    "--step",
+                    "COD-700-MIU-1",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(json.loads(events[-1])["head_sha"], head_sha)
+
     def test_run_start_backfills_missing_ids_in_existing_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

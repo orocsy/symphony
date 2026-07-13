@@ -29,6 +29,7 @@ LEGACY_MUTABLE_DELIVERY_PREFIX = ".codex/delivery"
 MUTABLE_DELIVERY_PREFIX = ".orocsy/delivery"
 TOKEN_TELEMETRY_ROOT = DELIVERY_ROOT / "token-telemetry"
 SCHEMA_VERSION = 1
+HEAD_BOUND_TRANSITION_EVENTS = {"miu.completion_requested", "handoff.requested"}
 
 DEFAULT_FORBIDDEN_TERMS: tuple[str, ...] = ()
 
@@ -601,6 +602,8 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
     event.setdefault("ts", now)
     event.setdefault("run_id", state.get("run_id"))
     event.setdefault("goal_id", state.get("goal_id"))
+    if event.get("event") in HEAD_BOUND_TRANSITION_EVENTS:
+        event["head_sha"] = current_git_head(repo)
 
     with events_path(repo).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
@@ -613,6 +616,15 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
         state["status"] = event["run_status"]
     write_json(current_state_path(repo), state)
     return event
+
+
+def current_git_head(repo: Path) -> str:
+    result = run_git(repo, ["rev-parse", "HEAD"])
+    head_sha = result.stdout.strip()
+    if result.returncode != 0 or not head_sha:
+        detail = result.stderr.strip() or "HEAD is unavailable"
+        raise SystemExit(f"cannot append a head-bound transition event: {detail}")
+    return head_sha
 
 
 def render_correction_markdown(correction: dict[str, Any]) -> str:

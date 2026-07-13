@@ -10,6 +10,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
       assert certificate["event"] == "miu.completed"
       assert certificate["authority"] == "symphony.runtime.validation-controller"
+      assert is_binary(certificate["base_head_sha"])
       assert certificate["changed_paths"] == ["README.md"]
       assert length(certificate["validation_event_ids"]) == 1
 
@@ -94,6 +95,71 @@ defmodule SymphonyElixir.ValidationControllerTest do
     try do
       assert {:error, {:denied_scope_write, ["README.md"]}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "rejects a denied path when the audited range also contains allowed paths" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- README.md", "- \"**\"")
+          |> String.replace("dependencies: []", "dependencies: []\ndenied_scope:\n  - README.md")
+    }
+
+    try do
+      File.write!(Path.join(workspace, "ALLOWED.md"), "# Allowed\n")
+      git!(workspace, ["add", "ALLOWED.md"])
+      git!(workspace, ["commit", "-m", "Add allowed companion file"])
+
+      assert {:error, {:denied_scope_write, changed_paths}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert Enum.sort(changed_paths) == ["ALLOWED.md", "README.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "audits all uncertified commits instead of only the current head commit" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      File.write!(Path.join(workspace, "OUTSIDE.md"), "# Outside\n")
+      git!(workspace, ["add", "OUTSIDE.md"])
+      git!(workspace, ["commit", "-m", "Add out-of-scope checkpoint"])
+      commit_readme!(workspace, "Final allowed checkpoint")
+
+      assert {:error, {:undeclared_write, changed_paths}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert Enum.sort(changed_paths) == ["OUTSIDE.md", "README.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "certifies each MIU against the prior signed checkpoint" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+    issue = add_second_miu(issue)
+
+    try do
+      assert {:ok, first_certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      File.write!(Path.join(workspace, "SECOND.md"), "# Second MIU\n")
+      git!(workspace, ["add", "SECOND.md"])
+      git!(workspace, ["commit", "-m", "Implement second MIU"])
+
+      assert {:ok, second_certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-2")
+
+      assert second_certificate["base_head_sha"] == first_certificate["head_sha"]
+      assert second_certificate["changed_paths"] == ["SECOND.md"]
     after
       File.rm_rf(workspace)
     end
@@ -499,6 +565,19 @@ defmodule SymphonyElixir.ValidationControllerTest do
     File.write!(Path.join(workspace, "README.md"), "# Test\n\n#{label}.\n")
     git!(workspace, ["add", "README.md"])
     git!(workspace, ["commit", "-m", label])
+  end
+
+  defp add_second_miu(%Issue{} = issue) do
+    second_miu = """
+      - id: COD-700-MIU-2
+        write_scope:
+          - SECOND.md
+        validations:
+          - ./fake-test
+    final_validations:
+    """
+
+    %{issue | description: String.replace(issue.description, "final_validations:\n", second_miu)}
   end
 
   defp append_event!(workspace, event) do

@@ -1962,14 +1962,10 @@ defmodule SymphonyElixir.Orchestrator do
         completed
 
       :not_ready ->
-        if in_progress_implementation_issue?(issue) do
-          :not_ready
-        else
-          case pushed_review_handoff_candidate(issue) do
-            {:ok, candidate} -> complete_pushed_review_handoff(issue, candidate)
-            :not_ready -> :not_ready
-            {:error, reason} -> {:blocked, reason}
-          end
+        case pushed_review_handoff_candidate(issue) do
+          {:ok, candidate} -> complete_pushed_review_handoff(issue, candidate)
+          :not_ready -> :not_ready
+          {:error, reason} -> {:blocked, reason}
         end
 
       {:blocked, _reason} = blocked ->
@@ -2090,34 +2086,6 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         park_pushed_handoff_blocker(issue, candidate, reason)
         {:blocked, reason}
-    end
-  end
-
-  defp in_progress_implementation_issue?(%Issue{} = issue) do
-    issue_state(issue) == "in progress" and
-      issue_ticket_type(issue) == "implementation" and
-      not integration_check_issue?(issue)
-  end
-
-  defp in_progress_implementation_issue?(_issue), do: false
-
-  defp issue_state(%Issue{state: state}) do
-    state
-    |> to_string()
-    |> String.trim()
-    |> String.downcase()
-  end
-
-  defp issue_ticket_type(%Issue{} = issue) do
-    text =
-      issue.description
-      |> to_string()
-      |> String.downcase()
-
-    cond do
-      Regex.match?(~r/ticket\s+type\s*\n+\s*implementation/, text) -> "implementation"
-      String.contains?(text, "ticket_type") and String.contains?(text, "implementation") -> "implementation"
-      true -> ""
     end
   end
 

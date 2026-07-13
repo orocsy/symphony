@@ -54,10 +54,11 @@ defmodule SymphonyElixir.ValidationController do
          true <- clean_worktree?(workspace) || {:error, :dirty_worktree},
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          :ok <- ensure_next_miu(issue, workspace, compiled, head_sha, miu_id),
-         {:ok, changed_paths} <- changed_paths(workspace),
+         {:ok, base_head_sha} <- certification_base_sha(issue, workspace, compiled, head_sha, miu_id),
+         {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
-         true <- paths_allowed?(changed_paths, compiled.denied_scope) == false || {:error, {:denied_scope_write, changed_paths}},
+         true <- not paths_denied?(changed_paths, compiled.denied_scope) || {:error, {:denied_scope_write, changed_paths}},
          {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha),
          true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
       certificate =
@@ -71,6 +72,7 @@ defmodule SymphonyElixir.ValidationController do
           "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
           "miu_id" => miu_id,
           "branch" => branch,
+          "base_head_sha" => base_head_sha,
           "head_sha" => head_sha,
           "changed_paths" => changed_paths,
           "validation_event_ids" => Enum.map(validation_events, & &1["event_id"]),
@@ -168,6 +170,13 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp valid_certified_miu_ids(issue, workspace, compiled, head_sha) do
+    issue
+    |> valid_miu_certificates(workspace, compiled, head_sha)
+    |> Enum.map(& &1["miu_id"])
+    |> Enum.uniq()
+  end
+
+  defp valid_miu_certificates(issue, workspace, compiled, head_sha) do
     expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
 
     workspace
@@ -180,15 +189,63 @@ defmodule SymphonyElixir.ValidationController do
         certificate["contract_hash"] == compiled.contract_hash and
         certificate["issue_revision"] == expected_revision and
         certificate["branch"] == compiled.contract["integration_branch"] and
+        valid_certificate_range?(workspace, certificate) and
         git_ancestor?(workspace, certificate["head_sha"], head_sha)
     end)
-    |> Enum.map(& &1["miu_id"])
-    |> Enum.filter(&(&1 in compiled.miu_ids))
-    |> Enum.uniq()
+    |> Enum.filter(&(&1["miu_id"] in compiled.miu_ids))
   end
 
-  defp changed_paths(workspace) do
-    case git(workspace, ["diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "HEAD"]) do
+  defp certification_base_sha(issue, workspace, compiled, head_sha, miu_id) do
+    miu_index = Enum.find_index(compiled.miu_ids, &(&1 == miu_id))
+
+    case miu_index do
+      0 ->
+        initial_certification_base_sha(workspace, compiled, head_sha)
+
+      index when is_integer(index) and index > 0 ->
+        previous_miu_id = Enum.at(compiled.miu_ids, index - 1)
+
+        issue
+        |> valid_miu_certificates(workspace, compiled, head_sha)
+        |> Enum.find(&(&1["miu_id"] == previous_miu_id))
+        |> case do
+          %{"head_sha" => previous_head_sha} when is_binary(previous_head_sha) -> {:ok, previous_head_sha}
+          _ -> {:error, {:missing_prior_miu_certificate, previous_miu_id}}
+        end
+
+      _ ->
+        {:error, {:unknown_miu, miu_id}}
+    end
+  end
+
+  defp initial_certification_base_sha(workspace, compiled, head_sha) do
+    integration_ref = "refs/remotes/origin/#{compiled.contract["integration_branch"]}"
+
+    case git(workspace, ["rev-parse", "--verify", integration_ref]) do
+      {:ok, integration_sha} ->
+        if git_ancestor?(workspace, integration_sha, head_sha) do
+          {:ok, integration_sha}
+        else
+          base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
+        end
+
+      {:error, _reason} ->
+        base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
+    end
+  end
+
+  defp base_branch_merge_base(workspace, base_branch, head_sha) do
+    ["refs/remotes/origin/#{base_branch}", "refs/heads/#{base_branch}"]
+    |> Enum.reduce_while({:error, {:base_branch_unavailable, base_branch}}, fn ref, _error ->
+      case git(workspace, ["merge-base", ref, head_sha]) do
+        {:ok, base_sha} -> {:halt, {:ok, base_sha}}
+        {:error, _reason} = error -> {:cont, error}
+      end
+    end)
+  end
+
+  defp changed_paths(workspace, base_head_sha, head_sha) do
+    case git(workspace, ["diff", "--name-only", "--no-renames", "#{base_head_sha}..#{head_sha}", "--"]) do
       {:ok, output} -> {:ok, String.split(output, "\n", trim: true)}
       error -> error
     end
@@ -197,6 +254,12 @@ defmodule SymphonyElixir.ValidationController do
   defp paths_allowed?(changed_paths, allowed_scope) do
     Enum.all?(changed_paths, fn path ->
       Enum.any?(allowed_scope, &path_matches_scope?(path, &1))
+    end)
+  end
+
+  defp paths_denied?(changed_paths, denied_scope) do
+    Enum.any?(changed_paths, fn path ->
+      Enum.any?(denied_scope, &path_matches_scope?(path, &1))
     end)
   end
 
@@ -473,6 +536,7 @@ defmodule SymphonyElixir.ValidationController do
          true <- certificate["contract_hash"] == compiled.contract_hash,
          true <- certificate["issue_revision"] == RuntimeContract.issue_revision(issue.description, issue.updated_at),
          true <- certificate["branch"] == compiled.contract["integration_branch"],
+         true <- valid_certificate_range?(workspace, certificate),
          true <- certificate["head_sha"] == head_sha do
       {:ok, certificate}
     else
@@ -531,6 +595,20 @@ defmodule SymphonyElixir.ValidationController do
       _ -> false
     end
   end
+
+  defp valid_certificate_range?(workspace, certificate) when is_map(certificate) do
+    base_head_sha = certificate["base_head_sha"]
+    head_sha = certificate["head_sha"]
+    changed_paths = certificate["changed_paths"]
+
+    is_binary(base_head_sha) and base_head_sha != "" and
+      is_binary(head_sha) and head_sha != "" and
+      base_head_sha != head_sha and
+      is_list(changed_paths) and changed_paths != [] and
+      git_ancestor?(workspace, base_head_sha, head_sha)
+  end
+
+  defp valid_certificate_range?(_workspace, _certificate), do: false
 
   defp git_ancestor?(workspace, ancestor, head) when is_binary(ancestor) and is_binary(head) do
     match?({_, 0}, System.cmd("git", ["merge-base", "--is-ancestor", ancestor, head], cd: workspace, stderr_to_stdout: true))

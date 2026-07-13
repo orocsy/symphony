@@ -184,6 +184,13 @@ Symphony validates the exact checkpoint `HEAD` and records that SHA in
 superseded by a corrective checkpoint. They MUST NOT be pushed merely because a
 completion request was made.
 
+Scope certification audits the complete uncertified range. For the first MIU,
+the range begins at the pre-existing remote integration head when present, or
+at the merge base with the declared base branch. Later MIUs begin at the prior
+valid MIU certificate. This preserves shared integration history while
+preventing an earlier out-of-scope commit from hiding behind an allowed final
+checkpoint.
+
 Before final certification, Symphony MUST verify that every required certified
 MIU checkpoint remains an ancestor of the final head. It MUST rerun the
 contract's final validations against that exact final head. Rebase, amend, or
@@ -462,6 +469,7 @@ Secrets and raw environment values MUST NOT be persisted.
   "issue_revision": "...",
   "miu_id": "COD-266-MIU-2",
   "branch": "...",
+  "base_head_sha": "prior-certified-or-integration-head",
   "head_sha": "...",
   "changed_paths": ["src/app/api/cards/handler.ts"],
   "validation_event_ids": ["..."],

@@ -1283,6 +1283,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "automatic_merge_requires_github_codex_review" in errors
   end
 
+  test "runtime contract returns errors for malformed MIU and scope entries" do
+    issue = %Issue{
+      id: "issue-malformed-miu-runtime",
+      identifier: "COD-906",
+      title: "Malformed MIU",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-906
+      dependencies: []
+      denied_scope:
+        - nested: value
+      mius:
+        - bad
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_miu" in errors
+    assert "invalid_miu_id" in errors
+    assert Enum.any?(errors, &String.starts_with?(&1, "invalid_denied_scope:"))
+  end
+
   test "issue revision changes with description but not unrelated Linear metadata timestamps" do
     description = "## Runtime Contract\n\nStable contract text."
     first_update = ~U[2026-07-12 10:00:00Z]
