@@ -1210,6 +1210,79 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_merge_automatic" in errors
   end
 
+  test "runtime contract rejects human review authority until routed" do
+    issue = %Issue{
+      id: "issue-human-review-runtime",
+      identifier: "COD-904",
+      title: "Human review unsupported",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-904
+      dependencies: []
+      mius:
+        - id: COD-904-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: human
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_review_authority" in errors
+  end
+
+  test "runtime contract returns errors for malformed review blocks" do
+    issue = %Issue{
+      id: "issue-malformed-review-runtime",
+      identifier: "COD-905",
+      title: "Malformed review",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-905
+      dependencies: []
+      mius:
+        - id: COD-905-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review: github_codex
+      merge:
+        automatic: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_review" in errors
+    assert "automatic_merge_requires_github_codex_review" in errors
+  end
+
   test "issue revision changes with description but not unrelated Linear metadata timestamps" do
     description = "## Runtime Contract\n\nStable contract text."
     first_update = ~U[2026-07-12 10:00:00Z]

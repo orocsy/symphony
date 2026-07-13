@@ -1663,6 +1663,8 @@ defmodule SymphonyElixir.DispatchPreflight do
       "integration_branch",
       "feature_group",
       "ticket_type",
+      "runtime_contract_status",
+      "contract_hash",
       "expected_test_state",
       "test_activation",
       "write_scope",

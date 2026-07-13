@@ -2050,7 +2050,10 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       {:blocked, reason} ->
-        park_pushed_handoff_blocker(issue, candidate, {:automatic_merge_blocked, reason})
+        unless automatic_merge_wait_only_blocker?(reason) do
+          park_pushed_handoff_blocker(issue, candidate, {:automatic_merge_blocked, reason})
+        end
+
         {:blocked, reason}
 
       {:error, reason} ->
@@ -2058,6 +2061,11 @@ defmodule SymphonyElixir.Orchestrator do
         {:blocked, reason}
     end
   end
+
+  defp automatic_merge_wait_only_blocker?({:ci_checks_not_passed, state}) when state in [:pending, "pending"],
+    do: true
+
+  defp automatic_merge_wait_only_blocker?(_reason), do: false
 
   defp finish_manual_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
     with {:ok, target_state} <- handoff_review_state(),
@@ -3784,8 +3792,7 @@ defmodule SymphonyElixir.Orchestrator do
       head_sha: git_value(workspace, ["rev-parse", "HEAD"]),
       tree_sha: git_value(workspace, ["rev-parse", "HEAD^{tree}"]),
       dirty_paths: meaningful_git_dirty_paths(workspace),
-      blocker_class: "no-durable-progress",
-      command_fingerprint: Map.get(running_entry, :last_codex_event)
+      blocker_class: "no-durable-progress"
     })
   end
 

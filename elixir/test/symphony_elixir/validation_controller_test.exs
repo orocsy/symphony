@@ -60,6 +60,45 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "treats colon-suffixed test scripts as test commands" do
+    {workspace, issue} = workspace_and_issue("setup complete")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- ./fake-test", "- TEST_LABEL=test:unit ./fake-test")
+    }
+
+    try do
+      assert {:error, {:validation_failed, result}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert result["reason_class"] == "test_count_unavailable"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "rejects writes covered by denied scope even when broad write scope allows them" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- README.md", "- \"**\"")
+          |> String.replace("dependencies: []", "dependencies: []\ndenied_scope:\n  - README.md")
+    }
+
+    try do
+      assert {:error, {:denied_scope_write, ["README.md"]}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "runs validation commands with leading environment assignments" do
     {workspace, issue} =
       workspace_and_issue("3 tests, 0 failures",
@@ -207,7 +246,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
-  test "marks an unprocessed request stale when it predates the current head" do
+  test "marks an unprocessed request stale when it targets an older head" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
@@ -224,6 +263,31 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert Enum.any?(events(workspace), fn event ->
                event["event"] == "runtime.request.processed" and event["status"] == "stale"
+             end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not trust future request timestamps after the head changes" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      append_event!(workspace, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "step" => "COD-700-MIU-1",
+        "ts" => DateTime.utc_now() |> DateTime.add(86_400, :second) |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      })
+
+      commit_readme!(workspace, "Later checkpoint")
+
+      assert :none = ValidationController.process_requests(issue, workspace)
+
+      assert Enum.any?(events(workspace), fn event ->
+               event["event"] == "runtime.request.processed" and
+                 event["status"] == "stale" and
+                 event["reason"] =~ "request_head_mismatch"
              end)
     after
       File.rm_rf(workspace)
@@ -254,6 +318,23 @@ defmodule SymphonyElixir.ValidationControllerTest do
       File.write!(path, Jason.encode!(Map.put(certificate, "head_sha", "forged-head")))
 
       assert ValidationController.certificates(workspace) == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not reuse a signed MIU certificate from another issue as current cache" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      forged = %{certificate | "issue_id" => "other-issue", "issue" => "COD-701"}
+      path = Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json")
+      File.write!(path, Jason.encode!(SymphonyElixir.ControllerEvidence.sign(forged)))
+
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert certificate["issue_id"] == issue.id
+      assert certificate["issue"] == issue.identifier
     after
       File.rm_rf(workspace)
     end
@@ -428,9 +509,20 @@ defmodule SymphonyElixir.ValidationControllerTest do
       event
       |> Map.put_new("event_id", "test-event-#{System.unique_integer([:positive])}")
       |> Map.put_new("ts", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> maybe_put_head_sha(workspace)
 
     File.write!(path, Jason.encode!(event) <> "\n", [:append])
   end
+
+  defp maybe_put_head_sha(%{"event" => event_type} = event, workspace)
+       when event_type in ["miu.completion_requested", "handoff.requested"] do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true) do
+      {head_sha, 0} -> Map.put_new(event, "head_sha", String.trim(head_sha))
+      _ -> event
+    end
+  end
+
+  defp maybe_put_head_sha(event, _workspace), do: event
 
   defp events(workspace) do
     workspace

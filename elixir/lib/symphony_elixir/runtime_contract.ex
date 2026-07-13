@@ -10,7 +10,7 @@ defmodule SymphonyElixir.RuntimeContract do
   @default_validation_timeout_ms 900_000
   @max_validation_timeout_ms 1_800_000
   @allowed_ticket_types ~w(implementation test-spec integration-check contract design)
-  @allowed_review_authorities ~w(github_codex human)
+  @allowed_review_authorities ~w(github_codex)
   @allowed_merge_methods ~w(squash merge rebase)
 
   @type compiled :: %{
@@ -239,7 +239,7 @@ defmodule SymphonyElixir.RuntimeContract do
       Map.get(merge, "automatic", false) not in [true, false] ->
         ["invalid_merge_automatic" | errors]
 
-      Map.get(merge, "automatic", false) == true and get_in(contract, ["review", "authority"]) != "github_codex" ->
+      Map.get(merge, "automatic", false) == true and review_authority(contract) != "github_codex" ->
         ["automatic_merge_requires_github_codex_review" | errors]
 
       Map.get(merge, "method", "squash") not in @allowed_merge_methods ->
@@ -255,6 +255,9 @@ defmodule SymphonyElixir.RuntimeContract do
         errors
     end
   end
+
+  defp review_authority(%{"review" => review}) when is_map(review), do: stringify_keys(review)["authority"]
+  defp review_authority(_contract), do: nil
 
   defp validate_validation_timeout(errors, contract) do
     case Map.get(contract, "validation_timeout_ms", @default_validation_timeout_ms) do

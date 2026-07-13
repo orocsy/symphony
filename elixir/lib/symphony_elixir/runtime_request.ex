@@ -61,33 +61,15 @@ defmodule SymphonyElixir.RuntimeRequest do
 
   defp classify_for_current_head(request, workspace) do
     with {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
-         {:ok, committed_at} <- head_committed_at(workspace),
-         {:ok, requested_at} <- parse_timestamp(request["ts"]),
-         true <- DateTime.compare(requested_at, committed_at) in [:eq, :gt] do
+         true <- request["head_sha"] == head_sha do
       {:ok, Map.put(request, "controller_head_sha", head_sha)}
     else
       reason -> {:stale, request, stale_reason(reason)}
     end
   end
 
-  defp stale_reason(false), do: :request_predates_current_head
+  defp stale_reason(false), do: :request_head_mismatch
   defp stale_reason({:error, reason}), do: reason
-
-  defp head_committed_at(workspace) do
-    case git(workspace, ["show", "-s", "--format=%cI", "HEAD"]) do
-      {:ok, value} -> parse_timestamp(value)
-      error -> error
-    end
-  end
-
-  defp parse_timestamp(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, timestamp, _offset} -> {:ok, timestamp}
-      _ -> {:error, :invalid_request_timestamp}
-    end
-  end
-
-  defp parse_timestamp(_value), do: {:error, :missing_request_timestamp}
 
   defp processed_request_ids(events) do
     events

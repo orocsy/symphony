@@ -101,7 +101,7 @@ defmodule SymphonyElixir.MergeControllerTest do
   test "fresh current feedback blocks merge even when caller snapshot was clean" do
     {workspace, issue, head_sha} = certified_workspace(true)
     test_pid = self()
-    install_review_observations(head_sha, checks: :passed, unresolved_threads: 1)
+    install_review_observations(head_sha, checks: :passed, unresolved_threads: 1, feedback_created_at: "2026-07-12T10:03:00Z")
 
     Application.put_env(:symphony_elixir, :github_merge_runner, fn _endpoint, _fields ->
       send(test_pid, :unexpected_merge)
@@ -298,6 +298,7 @@ defmodule SymphonyElixir.MergeControllerTest do
     unresolved_threads = Keyword.fetch!(opts, :unresolved_threads)
     live_base = Keyword.get(opts, :live_base, "main")
     feedback_cleared? = Keyword.get(opts, :feedback_cleared, false)
+    feedback_created_at = Keyword.get(opts, :feedback_created_at, "2026-07-12T10:02:00Z")
 
     Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
       cond do
@@ -369,7 +370,7 @@ defmodule SymphonyElixir.MergeControllerTest do
                     "path" => "lib/example.ex",
                     "line" => 12,
                     "originalLine" => 12,
-                    "createdAt" => "2026-07-12T10:02:00Z",
+                    "createdAt" => feedback_created_at,
                     "outdated" => false,
                     "url" => "https://github.com/orocsy/symphony/pull/53#discussion"
                   }

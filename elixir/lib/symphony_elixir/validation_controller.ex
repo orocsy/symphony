@@ -57,6 +57,7 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, changed_paths} <- changed_paths(workspace),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
+         true <- paths_allowed?(changed_paths, compiled.denied_scope) == false || {:error, {:denied_scope_write, changed_paths}},
          {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha),
          true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
       certificate =
@@ -341,7 +342,7 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp test_command?(command) do
-    Regex.match?(~r/(^|[\s\/.\-])(test|tests|vitest|pytest)([\s\/.\-]|$)/i, command)
+    Regex.match?(~r/(^|[\s\/.\-])(test|tests|vitest|pytest)([\s\/.\-:]|$)/i, command)
   end
 
   defp validation_fingerprint(issue, workspace, compiled, miu_id, head_sha, command) do
@@ -465,8 +466,13 @@ defmodule SymphonyElixir.ValidationController do
            Enum.find(certificates(workspace), &(&1["miu_id"] == miu_id)),
          {:ok, compiled} <- structured_contract(issue),
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         true <- certificate["event"] == "miu.completed",
+         true <- certificate["authority"] == @authority,
+         true <- certificate["issue_id"] == issue.id,
+         true <- certificate["issue"] == issue.identifier,
          true <- certificate["contract_hash"] == compiled.contract_hash,
          true <- certificate["issue_revision"] == RuntimeContract.issue_revision(issue.description, issue.updated_at),
+         true <- certificate["branch"] == compiled.contract["integration_branch"],
          true <- certificate["head_sha"] == head_sha do
       {:ok, certificate}
     else

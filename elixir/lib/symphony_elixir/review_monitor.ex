@@ -164,10 +164,14 @@ defmodule SymphonyElixir.ReviewMonitor do
          {:ok, reviews} <- fetch_pull_reviews(repo, hydrated_pr),
          {:ok, threads} <- fetch_pull_review_threads(repo, hydrated_pr),
          {:ok, check_feedback} <- maybe_fetch_current_check_feedback(repo, hydrated_pr, opts) do
-      {:ok,
-       active_review_thread_feedback(threads) ++
-         current_head_comments(hydrated_pr, comments) ++
-         current_head_reviews(hydrated_pr, reviews) ++ check_feedback}
+      feedback =
+        active_review_thread_feedback(threads) ++
+          current_head_comments(hydrated_pr, comments) ++
+          current_head_reviews(hydrated_pr, reviews)
+
+      with {:ok, filtered_feedback, _source} <- feedback_not_cleared_by_codex_clean_review(repo, hydrated_pr, feedback, :current_feedback) do
+        {:ok, filtered_feedback ++ check_feedback}
+      end
     end
   end
 
