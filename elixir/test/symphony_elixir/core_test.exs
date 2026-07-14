@@ -19421,6 +19421,50 @@ defmodule SymphonyElixir.CoreTest do
     assert AgentRunner.selected_worker_host_for_test(issue, "worker-a") == nil
   end
 
+  test "agent runner refreshes Linear before processing a pending runtime transition" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-transition-refresh-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "miu.completion_requested",
+        "event_id" => "request-current-contract",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    stale_issue = %Issue{
+      id: "issue-runtime-transition-refresh",
+      identifier: "MT-STRUCTURED-REFRESH",
+      title: "Refresh runtime transition",
+      state: "In Progress",
+      description: "old contract"
+    }
+
+    current_issue = %{stale_issue | description: "current contract"}
+    test_pid = self()
+
+    fetcher = fn ["issue-runtime-transition-refresh"] ->
+      send(test_pid, :runtime_transition_issue_refreshed)
+      {:ok, [current_issue]}
+    end
+
+    try do
+      assert {:ok, ^current_issue} =
+               AgentRunner.current_issue_for_runtime_transition_for_test(workspace, stale_issue, fetcher)
+
+      assert_receive :runtime_transition_issue_refreshed
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "agent runner degrades remote review inspection failures to no feedback" do
     write_workflow_file!(Workflow.workflow_file_path(),
       review_monitor_enabled: true,

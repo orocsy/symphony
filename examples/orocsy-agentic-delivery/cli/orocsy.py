@@ -430,9 +430,13 @@ def load_issue_requirements(path: Path) -> dict[str, Any]:
 
     return {
         "identifier": str(raw.get("identifier") or raw.get("issue") or raw.get("id") or "").strip(),
+        "issue_revision": str(raw.get("issue_revision") or "").strip(),
+        "contract_hash": str(raw.get("contract_hash") or "").strip(),
+        "runtime_contract_status": str(raw.get("runtime_contract_status") or "").strip(),
         "title": str(raw.get("title") or "").strip(),
         "state": str(raw.get("state") or raw.get("status") or "").strip(),
         "branch": str(raw.get("branch") or raw.get("branch_name") or raw.get("branchName") or "").strip(),
+        "integration_branch": str(raw.get("integration_branch") or "").strip(),
         "project": str(raw.get("project") or raw.get("project_slug") or "").strip(),
         "write_scope": normalize_mutable_delivery_paths(string_list(raw.get("write_scope") or raw.get("writeScope"))),
         "shared_files": normalize_mutable_delivery_paths(string_list(raw.get("shared_files") or raw.get("sharedFiles"))),
@@ -604,6 +608,12 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
     event.setdefault("goal_id", state.get("goal_id"))
     if event.get("event") in HEAD_BOUND_TRANSITION_EVENTS:
         event["head_sha"] = current_git_head(repo)
+        requirements = state.get("issue_requirements") or {}
+        if isinstance(requirements, dict):
+            for key in ("contract_hash", "issue_revision"):
+                value = str(requirements.get(key) or "").strip()
+                if value:
+                    event[key] = value
 
     with events_path(repo).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
@@ -1687,6 +1697,8 @@ def command_event_append(args: argparse.Namespace) -> int:
         event["phase"] = args.phase
     if args.step:
         event["step"] = args.step
+        if args.type == "miu.completion_requested":
+            event["miu_id"] = args.step
     if args.tool:
         event["tool"] = args.tool
     if args.command:

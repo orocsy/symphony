@@ -13,23 +13,53 @@ defmodule SymphonyElixir.HandoffController do
         {:ok, certificate}
 
       _ ->
-        case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested") do
-          {:ok, request} ->
-            result = certify_handoff(issue, workspace)
-            :ok = record_request_result(workspace, request, result)
-            result
+        case structured_contract(issue) do
+          {:ok, compiled} ->
+            contract_identity = %{
+              "contract_hash" => compiled.contract_hash,
+              "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
+            }
 
-          {:stale, request, reason} ->
-            :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})
-            :none
+            process_handoff_request(issue, workspace, contract_identity)
 
-          :none ->
-            :none
+          {:error, reason} = error ->
+            process_invalid_contract_request(workspace, reason, error)
         end
     end
   end
 
   def process_requests(_issue, _workspace), do: :none
+
+  defp process_handoff_request(issue, workspace, contract_identity) do
+    case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested", contract_identity) do
+      {:ok, request} ->
+        result = certify_handoff(issue, workspace)
+        :ok = record_request_result(workspace, request, result)
+        result
+
+      {:stale, request, reason} ->
+        :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})
+        :none
+
+      :none ->
+        :none
+    end
+  end
+
+  defp process_invalid_contract_request(workspace, reason, result) do
+    case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested") do
+      {:ok, request} ->
+        :ok = RuntimeRequest.mark_processed(workspace, request, "failed", %{"reason" => inspect(reason)})
+        result
+
+      {:stale, request, stale_reason} ->
+        :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(stale_reason)})
+        :none
+
+      :none ->
+        :none
+    end
+  end
 
   defp certify_handoff(issue, workspace) do
     with {:ok, compiled} <- structured_contract(issue),

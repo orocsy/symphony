@@ -127,6 +127,10 @@ A worker MUST request completion with `miu.completion_requested`; it MUST NOT
 author authoritative `miu.completed` evidence directly. The request names the
 MIU ID and current contract hash.
 
+Immediately before consuming a pending completion or handoff request, the
+runtime MUST refresh the issue from Linear. A pre-turn issue snapshot is not
+current-contract evidence.
+
 Symphony MUST issue `miu.completed` only after it independently verifies:
 
 - the MIU exists in the locked current contract;
@@ -411,8 +415,8 @@ The runtime retains two separate identities:
 
 - `contract_hash`: SHA-256 of canonical JSON produced from the validated
   structured Runtime Contract;
-- `issue_revision`: Linear issue `updatedAt` plus SHA-256 of the complete
-  current description.
+- `issue_revision`: SHA-256 of the complete current Linear issue description.
+  Unrelated tracker metadata timestamps do not change this identity.
 
 The contract hash controls machine authority. The issue revision prevents
 silent reuse after explanatory requirements change. A change to either
@@ -426,15 +430,15 @@ Runtime Contract; they MUST NOT be appended into authority-bearing scope.
 {
   "schema_version": 1,
   "event": "miu.completion_requested",
-  "issue_id": "linear-id",
-  "issue": "COD-266",
+  "event_id": "evt_...",
+  "status": "requested",
   "contract_hash": "sha256:...",
-  "issue_revision": "...",
+  "issue_revision": "sha256:...",
   "miu_id": "COD-266-MIU-2",
-  "branch": "orocsy/cod-246-preference-miu-guest-setup-controls",
   "head_sha": "full-local-checkpoint-sha",
-  "worker_run_id": "...",
-  "requested_at": "RFC3339"
+  "run_id": "run_...",
+  "goal_id": "goal_...",
+  "ts": "RFC3339"
 }
 ```
 

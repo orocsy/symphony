@@ -353,10 +353,36 @@ defmodule SymphonyElixir.RuntimeContract do
 
     trimmed == command and
       trimmed != "" and
-      not String.contains?(trimmed, ["\n", "&&", "||", ";", "`", "$(", ">", "<"])
+      not String.contains?(trimmed, ["\n", "&&", "||", "|", ";", "`", "$(", ">", "<"]) and
+      not shell_command_mode?(trimmed)
   end
 
   defp valid_validation_command?(_command), do: false
+
+  defp shell_command_mode?(command) do
+    command
+    |> OptionParser.split()
+    |> Enum.with_index()
+    |> Enum.any?(fn {part, index} ->
+      executable = part |> Path.basename() |> String.downcase()
+      remaining = command |> OptionParser.split() |> Enum.drop(index + 1)
+
+      cond do
+        executable in ~w(sh bash zsh dash ksh fish) -> Enum.any?(remaining, &shell_command_flag?/1)
+        executable in ~w(powershell powershell.exe pwsh pwsh.exe) -> Enum.any?(remaining, &powershell_command_flag?/1)
+        executable in ~w(cmd cmd.exe) -> Enum.any?(remaining, &(String.downcase(&1) in ["/c", "/k"]))
+        executable in ~w(env env.exe) -> Enum.any?(remaining, &(String.downcase(&1) in ["-s", "--split-string"]))
+        true -> false
+      end
+    end)
+  rescue
+    _error -> true
+  end
+
+  defp shell_command_flag?(flag), do: Regex.match?(~r/^-[^-]*c/, String.downcase(flag))
+
+  defp powershell_command_flag?(flag),
+    do: String.downcase(flag) in ["-c", "-command", "-ec", "-encodedcommand"]
 
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn {key, value} -> {to_string(key), stringify_keys(value)} end)

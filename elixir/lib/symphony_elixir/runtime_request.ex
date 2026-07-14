@@ -33,6 +33,34 @@ defmodule SymphonyElixir.RuntimeRequest do
 
   def latest_unprocessed(_workspace, _event_type), do: :none
 
+  @spec latest_unprocessed(String.t(), String.t(), map()) ::
+          {:ok, request()} | :none | {:stale, request(), term()}
+  def latest_unprocessed(workspace, event_type, expected_contract)
+      when is_binary(workspace) and is_binary(event_type) and is_map(expected_contract) do
+    case latest_unprocessed(workspace, event_type) do
+      {:ok, request} -> classify_for_current_contract(request, expected_contract)
+      result -> result
+    end
+  end
+
+  def latest_unprocessed(_workspace, _event_type, _expected_contract), do: :none
+
+  @spec pending?(String.t(), [String.t()]) :: boolean()
+  def pending?(workspace, event_types)
+      when is_binary(workspace) and is_list(event_types) do
+    events = decoded_events(workspace)
+    processed_ids = processed_request_ids(events)
+
+    Enum.any?(events, fn event ->
+      event["event"] in event_types and
+        event["status"] in ["requested", nil] and
+        valid_request_id?(event["event_id"]) and
+        not MapSet.member?(processed_ids, event["event_id"])
+    end)
+  end
+
+  def pending?(_workspace, _event_types), do: false
+
   @spec mark_processed(String.t(), request(), String.t()) :: :ok
   def mark_processed(workspace, request, status), do: mark_processed(workspace, request, status, %{})
 
@@ -70,6 +98,22 @@ defmodule SymphonyElixir.RuntimeRequest do
 
   defp stale_reason(false), do: :request_head_mismatch
   defp stale_reason({:error, reason}), do: reason
+
+  defp classify_for_current_contract(request, expected_contract) do
+    expected_hash = expected_contract["contract_hash"]
+    expected_revision = expected_contract["issue_revision"]
+
+    cond do
+      request["contract_hash"] != expected_hash ->
+        {:stale, request, :request_contract_hash_mismatch}
+
+      request["issue_revision"] != expected_revision ->
+        {:stale, request, :request_issue_revision_mismatch}
+
+      true ->
+        {:ok, request}
+    end
+  end
 
   defp processed_request_ids(events) do
     events

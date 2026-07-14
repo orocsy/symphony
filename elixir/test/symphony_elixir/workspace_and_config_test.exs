@@ -1246,6 +1246,52 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_merge_automatic" in errors
   end
 
+  test "runtime contract rejects shell command mode and pipelines in validations" do
+    for command <- [
+          "sh -c 'echo 3 tests, 0 failures'",
+          "bash -lc 'mix test'",
+          "env -S 'sh -c echo fake-success'",
+          "mix test | cat"
+        ] do
+      issue = %Issue{
+        id: "issue-shell-validation",
+        identifier: "COD-907",
+        title: "Invalid shell validation",
+        state: "In Progress",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-907
+        dependencies: []
+        mius:
+          - id: COD-907-MIU-1
+            write_scope:
+              - src/app/page.tsx
+            validations:
+              - #{inspect(command)}
+        final_validations:
+          - pnpm typecheck
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:error, {:invalid_runtime_contract, errors}} =
+               SymphonyElixir.IssueRequirements.from_issue(issue)
+
+      assert Enum.any?(errors, fn error ->
+               String.starts_with?(error, "invalid_validations:COD-907-MIU-1:") and
+                 String.contains?(error, command)
+             end)
+    end
+  end
+
   test "runtime contract rejects human review authority until routed" do
     issue = %Issue{
       id: "issue-human-review-runtime",
@@ -2011,6 +2057,112 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
       refute String.contains?(status, "origin/main")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace checks out the structured runtime contract integration branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-contract-branch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      integration_branch = "orocsy/cod-907-integration"
+      generated_branch = "orocsy/generated-linear-branch"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", integration_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "integration\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Integration head"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", generated_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "generated-pr\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Generated PR head"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main",
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/symphony"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-907",
+        identifier: "COD-907",
+        title: "Structured branch authority",
+        state: "Ready for Symphony",
+        branch_name: generated_branch,
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: #{integration_branch}
+        dependencies: []
+        mius:
+          - id: COD-907-MIU-1
+            write_scope:
+              - README.md
+            validations:
+              - mix test
+        final_validations:
+          - mix test
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == integration_branch
+      refute String.trim(current_branch) == generated_branch
+      assert File.read!(Path.join(workspace, "README.md")) == "integration\n"
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/symphony/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 907,
+                 "html_url" => "https://github.com/acme/symphony/pull/907",
+                 "head" => %{"sha" => "generated-head", "ref" => generated_branch}
+               }
+             ]}
+
+          endpoint == "repos/acme/symphony/pulls/907/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/symphony/pulls/907/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      assert preflight["branch"] == integration_branch
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == integration_branch
+      assert File.read!(Path.join(workspace, "README.md")) == "integration\n"
     after
       File.rm_rf(test_root)
     end

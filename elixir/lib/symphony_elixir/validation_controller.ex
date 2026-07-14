@@ -18,21 +18,28 @@ defmodule SymphonyElixir.ValidationController do
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
   def process_requests(%Issue{} = issue, workspace) when is_binary(workspace) do
-    case RuntimeRequest.latest_unprocessed(workspace, "miu.completion_requested") do
-      {:ok, %{"step" => miu_id} = request} when is_binary(miu_id) and miu_id != "" ->
-        result =
-          case current_certificate(workspace, issue, miu_id) do
-            {:ok, certificate} -> {:ok, certificate}
-            :none -> certify_miu(issue, workspace, miu_id)
-          end
+    case structured_contract(issue) do
+      {:ok, compiled} ->
+        contract_identity = %{
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
+        }
 
-        :ok = record_request_result(workspace, request, result)
-        result
+        process_miu_request(issue, workspace, contract_identity)
 
+      {:error, reason} = error ->
+        process_invalid_contract_request(workspace, "miu.completion_requested", reason, error)
+    end
+  end
+
+  def process_requests(_issue, _workspace), do: :none
+
+  defp process_miu_request(issue, workspace, contract_identity) do
+    case RuntimeRequest.latest_unprocessed(workspace, "miu.completion_requested", contract_identity) do
       {:ok, request} ->
-        result = {:error, :missing_miu_request_step}
-        :ok = record_request_result(workspace, request, result)
-        result
+        miu_id = request["miu_id"] || request["step"]
+
+        process_named_miu_request(issue, workspace, request, miu_id)
 
       {:stale, request, reason} ->
         :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})
@@ -43,7 +50,38 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  def process_requests(_issue, _workspace), do: :none
+  defp process_named_miu_request(issue, workspace, request, miu_id)
+       when is_binary(miu_id) and miu_id != "" do
+    result =
+      case current_certificate(workspace, issue, miu_id) do
+        {:ok, certificate} -> {:ok, certificate}
+        :none -> certify_miu(issue, workspace, miu_id)
+      end
+
+    :ok = record_request_result(workspace, request, result)
+    result
+  end
+
+  defp process_named_miu_request(_issue, workspace, request, _miu_id) do
+    result = {:error, :missing_miu_request_step}
+    :ok = record_request_result(workspace, request, result)
+    result
+  end
+
+  defp process_invalid_contract_request(workspace, event_type, reason, result) do
+    case RuntimeRequest.latest_unprocessed(workspace, event_type) do
+      {:ok, request} ->
+        :ok = RuntimeRequest.mark_processed(workspace, request, "failed", %{"reason" => inspect(reason)})
+        result
+
+      {:stale, request, stale_reason} ->
+        :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(stale_reason)})
+        :none
+
+      :none ->
+        :none
+    end
+  end
 
   @spec certify_miu(Issue.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -62,6 +100,7 @@ defmodule SymphonyElixir.ValidationController do
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
          true <- not paths_denied?(changed_paths, compiled.denied_scope) || {:error, {:denied_scope_write, changed_paths}},
          {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha),
+         {:ok, ^head_sha} <- unchanged_head(workspace, head_sha),
          true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
       certificate =
         ControllerEvidence.sign(%{
@@ -136,9 +175,18 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
          true <- branch == compiled.contract["integration_branch"] || {:error, :canonical_branch_mismatch},
          true <- clean_worktree?(workspace) || {:error, :dirty_worktree},
-         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]) do
-      final_miu = %{"id" => "__final__", "validations" => compiled.contract["final_validations"]}
-      run_validations(issue, workspace, compiled, final_miu, head_sha)
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         {:ok, events} <-
+           run_validations(
+             issue,
+             workspace,
+             compiled,
+             %{"id" => "__final__", "validations" => compiled.contract["final_validations"]},
+             head_sha
+           ),
+         {:ok, ^head_sha} <- unchanged_head(workspace, head_sha),
+         true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
+      {:ok, events}
     else
       {:error, _reason} = error -> error
     end
@@ -308,7 +356,10 @@ defmodule SymphonyElixir.ValidationController do
           :ok = append_event(workspace, result)
 
           if result["status"] == "passed" do
-            {:cont, {:ok, events ++ [result]}}
+            case validation_state_unchanged(workspace, head_sha) do
+              :ok -> {:cont, {:ok, events ++ [result]}}
+              {:error, _reason} = error -> {:halt, error}
+            end
           else
             if product_failure?(result) and prior_product_failures >= 2 do
               {:halt, {:blocked, {:product_fix_budget_exhausted, miu["id"]}}}
@@ -331,7 +382,7 @@ defmodule SymphonyElixir.ValidationController do
     bounded_output = truncate(output, @max_log_bytes)
     log_path = write_validation_log(workspace, event_id, bounded_output)
 
-    %{
+    ControllerEvidence.sign(%{
       "schema_version" => 1,
       "event" => "validation.completed",
       "event_id" => event_id,
@@ -354,7 +405,7 @@ defmodule SymphonyElixir.ValidationController do
       "output_digest" => "sha256:" <> sha256(output),
       "bounded_log_path" => log_path,
       "ts" => now()
-    }
+    })
   end
 
   defp run_command(workspace, command, timeout_ms) do
@@ -464,8 +515,7 @@ defmodule SymphonyElixir.ValidationController do
 
   defp failed_fingerprint(workspace, fingerprint) do
     workspace
-    |> Path.join(@attempts_path)
-    |> decoded_lines()
+    |> trusted_attempts()
     |> Enum.find(&(&1["validation_fingerprint"] == fingerprint and &1["status"] == "failed"))
   end
 
@@ -473,8 +523,7 @@ defmodule SymphonyElixir.ValidationController do
     command_hash = "sha256:" <> sha256(command)
 
     workspace
-    |> Path.join(@attempts_path)
-    |> decoded_lines()
+    |> trusted_attempts()
     |> Enum.count(fn attempt ->
       product_failure?(attempt) and
         attempt["issue"] == issue.identifier and
@@ -494,8 +543,7 @@ defmodule SymphonyElixir.ValidationController do
     command_hash = "sha256:" <> sha256(command)
 
     workspace
-    |> Path.join(@attempts_path)
-    |> decoded_lines()
+    |> trusted_attempts()
     |> Enum.count(fn attempt ->
       infrastructure_failure?(attempt) and
         attempt["issue"] == issue.identifier and
@@ -510,8 +558,7 @@ defmodule SymphonyElixir.ValidationController do
     current_environment = environment_fingerprint(workspace)
 
     workspace
-    |> Path.join(@attempts_path)
-    |> decoded_lines()
+    |> trusted_attempts()
     |> Enum.any?(fn attempt ->
       infrastructure_failure?(attempt) and
         attempt["issue"] == issue.identifier and
@@ -624,6 +671,32 @@ defmodule SymphonyElixir.ValidationController do
       end)
     else
       []
+    end
+  end
+
+  defp trusted_attempts(workspace) do
+    workspace
+    |> Path.join(@attempts_path)
+    |> decoded_lines()
+    |> Enum.filter(fn attempt ->
+      attempt["event"] == "validation.completed" and
+        attempt["authority"] == @authority and
+        ControllerEvidence.valid?(attempt)
+    end)
+  end
+
+  defp unchanged_head(workspace, expected_head_sha) do
+    case git(workspace, ["rev-parse", "HEAD"]) do
+      {:ok, ^expected_head_sha} = current -> current
+      {:ok, current_head_sha} -> {:error, {:validation_changed_head, expected_head_sha, current_head_sha}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validation_state_unchanged(workspace, expected_head_sha) do
+    with {:ok, ^expected_head_sha} <- unchanged_head(workspace, expected_head_sha),
+         true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
+      :ok
     end
   end
 

@@ -32,11 +32,15 @@ defmodule SymphonyElixir.MergeControllerTest do
       assert evidence["reviewed_head_sha"] == head_sha
       assert evidence["merge_sha"] == "merge-sha-700"
       assert evidence["completed_state"] == "Done"
+      assert evidence["issue_revision"] == SymphonyElixir.RuntimeContract.issue_revision(issue.description, issue.updated_at)
 
       assert_received {:merge_called, "repos/orocsy/symphony/pulls/53/merge", %{"merge_method" => "squash", "sha" => ^head_sha}}
 
       assert {:ok, persisted} = MergeController.completed_evidence(issue, workspace)
       assert persisted["merge_sha"] == "merge-sha-700"
+
+      changed_issue = %{issue | description: issue.description <> "\nAdditional post-review requirement.\n"}
+      assert :none = MergeController.completed_evidence(changed_issue, workspace)
     after
       File.rm_rf(workspace)
     end

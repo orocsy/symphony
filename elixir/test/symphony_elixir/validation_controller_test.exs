@@ -222,10 +222,10 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
-      append_event!(workspace, %{
+      append_event!(workspace, issue, %{
         "event" => "miu.completion_requested",
         "status" => "requested",
-        "step" => "COD-700-MIU-1"
+        "miu_id" => "COD-700-MIU-1"
       })
 
       assert {:ok, miu_certificate} = ValidationController.process_requests(issue, workspace)
@@ -233,12 +233,168 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       push_to_local_origin!(workspace)
 
-      append_event!(workspace, %{"event" => "handoff.requested", "status" => "requested"})
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
 
       assert {:ok, handoff} = HandoffController.process_requests(issue, workspace)
       assert handoff["event"] == "handoff.ready"
       assert handoff["completed_mius"] == ["COD-700-MIU-1"]
       assert length(handoff["validation_event_ids"]) == 2
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not certify a request made for an older runtime contract" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      append_event!(workspace, issue, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "step" => "COD-700-MIU-1"
+      })
+
+      changed_issue = %{
+        issue
+        | description: String.replace(issue.description, "validation_timeout_ms: 900000", "validation_timeout_ms: 800000")
+      }
+
+      assert :none = ValidationController.process_requests(changed_issue, workspace)
+
+      assert Enum.any?(events(workspace), fn event ->
+               event["event"] == "runtime.request.processed" and
+                 event["status"] == "stale" and
+                 event["reason"] =~ "request_contract_hash_mismatch"
+             end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not certify handoff requested for an older runtime contract" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      changed_issue = %{
+        issue
+        | description: String.replace(issue.description, "validation_timeout_ms: 900000", "validation_timeout_ms: 800000")
+      }
+
+      assert :none = HandoffController.process_requests(changed_issue, workspace)
+
+      assert Enum.any?(events(workspace), fn event ->
+               event["event"] == "runtime.request.processed" and
+                 event["status"] == "stale" and
+                 event["reason"] =~ "request_contract_hash_mismatch"
+             end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not sign a MIU when validation changes HEAD but leaves the worktree clean" do
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\ngit commit --allow-empty -m validation-mutated-head >/dev/null\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      original_head = git_output!(workspace, ["rev-parse", "HEAD"])
+
+      assert {:error, {:validation_changed_head, ^original_head, changed_head}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      refute changed_head == original_head
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "stops a validation sequence immediately after a command changes HEAD" do
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\ngit commit --allow-empty -m validation-mutated-head >/dev/null\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      File.write!(Path.join(workspace, "must-not-run"), "#!/bin/sh\ntouch SECOND_VALIDATION_RAN\necho '3 tests, 0 failures'\n")
+      File.chmod!(Path.join(workspace, "must-not-run"), 0o755)
+      git!(workspace, ["add", "must-not-run"])
+      git!(workspace, ["commit", "-m", "Add second validation command"])
+
+      issue = %{
+        issue
+        | description:
+            issue.description
+            |> String.replace("- README.md", "- \"**\"")
+            |> String.replace(
+              "validations:\n      - ./fake-test",
+              "validations:\n      - ./fake-test\n      - ./must-not-run"
+            )
+      }
+
+      assert {:error, {:validation_changed_head, _original_head, _changed_head}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      refute File.exists?(Path.join(workspace, "SECOND_VALIDATION_RAN"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not accept final validation that changes HEAD" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      final_script = Path.join(workspace, "final-test")
+      File.write!(final_script, "#!/bin/sh\ngit commit --allow-empty -m final-validation-mutated-head >/dev/null\necho '3 tests, 0 failures'\n")
+      File.chmod!(final_script, 0o755)
+      git!(workspace, ["add", "final-test"])
+      git!(workspace, ["commit", "-m", "Add final validation command"])
+
+      issue = %{
+        issue
+        | description:
+            String.replace(
+              issue.description,
+              "final_validations:\n  - ./fake-test",
+              "final_validations:\n  - ./final-test"
+            )
+      }
+
+      original_head = git_output!(workspace, ["rev-parse", "HEAD"])
+
+      assert {:error, {:validation_changed_head, ^original_head, changed_head}} =
+               ValidationController.validate_final(issue, workspace)
+
+      refute changed_head == original_head
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "ignores unsigned validation attempts when applying replay and retry guards" do
+    {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      attempts_path = Path.join(workspace, ".orocsy/delivery/state/validation-attempts.jsonl")
+      unsigned = Map.delete(first, "controller_signature")
+      File.write!(attempts_path, Jason.encode!(unsigned) <> "\n")
+
+      assert {:error, {:validation_failed, second}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert second["validation_fingerprint"] == first["validation_fingerprint"]
+      assert second["controller_signature"]
     after
       File.rm_rf(workspace)
     end
@@ -266,7 +422,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
   end
 
   test "infrastructure failures do not consume or trigger the product fix budget" do
-    {workspace, issue} = workspace_and_issue("0 tests, 0 failures", timeout_ms: 1_000)
+    {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
     issue = %{issue | description: String.replace(issue.description, "- README.md", "- \"**\"")}
 
     try do
@@ -278,16 +434,17 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert {:error, {:validation_failed, _second}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
-      File.write!(Path.join(workspace, "fake-test"), "#!/bin/sh\nsleep 2\necho '3 tests, 0 failures'\n")
+      File.rm!(Path.join(workspace, "fake-test"))
       git!(workspace, ["add", "fake-test"])
-      git!(workspace, ["commit", "-m", "Simulate validation infrastructure timeout"])
+      git!(workspace, ["commit", "-m", "Simulate missing validation executable"])
 
       assert {:error, {:validation_failed, timeout}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
-      assert timeout["reason_class"] == "command_timed_out"
+      assert timeout["reason_class"] == "command_launch_failed"
 
       File.write!(Path.join(workspace, "fake-test"), "#!/bin/sh\necho '0 tests, 0 failures'\n")
+      File.chmod!(Path.join(workspace, "fake-test"), 0o755)
       File.write!(Path.join(workspace, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
       git!(workspace, ["add", "fake-test", "pnpm-lock.yaml"])
       git!(workspace, ["commit", "-m", "Restore product validation failure"])
@@ -346,7 +503,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
-      append_event!(workspace, %{
+      append_event!(workspace, issue, %{
         "event" => "miu.completion_requested",
         "status" => "requested",
         "step" => "COD-700-MIU-1"
@@ -366,7 +523,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     try do
       request_id = "worker-request-forgery-test"
 
-      append_event!(workspace, %{
+      append_event!(workspace, issue, %{
         "event" => "miu.completion_requested",
         "event_id" => request_id,
         "status" => "requested",
@@ -391,7 +548,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
-      append_event!(workspace, %{
+      append_event!(workspace, issue, %{
         "event" => "miu.completion_requested",
         "status" => "requested",
         "step" => "COD-700-MIU-1"
@@ -414,7 +571,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
-      append_event!(workspace, %{
+      append_event!(workspace, issue, %{
         "event" => "miu.completion_requested",
         "status" => "requested",
         "step" => "COD-700-MIU-1",
@@ -513,9 +670,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
       git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
       git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
       git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-700"])
-      append_event!(workspace, %{"event" => "handoff.requested", "status" => "requested"})
-
       other_issue = %{issue | id: "other-issue-id", identifier: "COD-701"}
+      append_event!(workspace, other_issue, %{"event" => "handoff.requested", "status" => "requested"})
 
       assert ValidationController.certified_miu_ids(issue, workspace) == ["COD-700-MIU-1"]
       assert ValidationController.certified_miu_ids(other_issue, workspace) == []
@@ -539,7 +695,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
       git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
       git!(workspace, ["branch", "--set-upstream-to", "origin/orocsy/cod-700"])
-      append_event!(workspace, %{"event" => "handoff.requested", "status" => "requested"})
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
 
       assert {:error, {:uncertified_commits_after_last_miu, _certified_head, _head_sha}} =
                HandoffController.process_requests(issue, workspace)
@@ -675,7 +831,9 @@ defmodule SymphonyElixir.ValidationControllerTest do
     %{issue | description: String.replace(issue.description, "final_validations:\n", second_miu)}
   end
 
-  defp append_event!(workspace, event) do
+  defp append_event!(workspace, event), do: append_event!(workspace, nil, event)
+
+  defp append_event!(workspace, issue, event) do
     path = Path.join(workspace, ".orocsy/delivery/events/events.jsonl")
     File.mkdir_p!(Path.dirname(path))
 
@@ -684,6 +842,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       |> Map.put_new("event_id", "test-event-#{System.unique_integer([:positive])}")
       |> Map.put_new("ts", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
       |> maybe_put_head_sha(workspace)
+      |> maybe_put_contract_identity(issue)
 
     File.write!(path, Jason.encode!(event) <> "\n", [:append])
   end
@@ -697,6 +856,24 @@ defmodule SymphonyElixir.ValidationControllerTest do
   end
 
   defp maybe_put_head_sha(event, _workspace), do: event
+
+  defp maybe_put_contract_identity(%{"event" => event_type} = event, %Issue{} = issue)
+       when event_type in ["miu.completion_requested", "handoff.requested"] do
+    {:ok, compiled} = SymphonyElixir.RuntimeContract.compile(issue.description)
+
+    event
+    |> Map.put("contract_hash", compiled.contract_hash)
+    |> Map.put("issue_revision", SymphonyElixir.RuntimeContract.issue_revision(issue.description, issue.updated_at))
+  end
+
+  defp maybe_put_contract_identity(event, _issue), do: event
+
+  defp git_output!(workspace, args) do
+    case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, status} -> flunk("git #{Enum.join(args, " ")} failed (#{status}): #{output}")
+    end
+  end
 
   defp events(workspace) do
     workspace

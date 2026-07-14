@@ -15,6 +15,7 @@ defmodule SymphonyElixir.AgentRunner do
     PromptBuilder,
     ReviewMonitor,
     RuntimeContract,
+    RuntimeRequest,
     ScopeAccess,
     Tracker,
     ValidationController,
@@ -98,6 +99,9 @@ defmodule SymphonyElixir.AgentRunner do
     def pushed_handoff_stop_for_test(workspace, issue), do: pushed_handoff_stop?(workspace, issue)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
     def policy_violation_recovery_budget_for_test(workspace), do: policy_violation_recovery_budget(workspace)
+
+    def current_issue_for_runtime_transition_for_test(workspace, issue, fetcher),
+      do: current_issue_for_runtime_transition(workspace, issue, fetcher)
 
     def policy_violation_recovery_action_for_test(
           workspace,
@@ -471,46 +475,50 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      transition_result = process_runtime_transition_requests(workspace, issue)
+      case process_runtime_transition_requests(workspace, issue, issue_state_fetcher) do
+        {:error, _reason} = error ->
+          error
 
-      cond do
-        runtime_transition_stop?(transition_result) ->
-          Logger.info("Stopping agent run for #{issue_context(issue)} after runtime transition certification; returning control to orchestrator")
-          :ok
-
-        fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) ->
-          Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
-          :ok
-
-        true ->
-          next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
-
-          case next_action do
-            {:continue, refreshed_issue} when turn_number < max_turns ->
-              Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-              do_run_codex_turns(
-                app_session,
-                workspace,
-                refreshed_issue,
-                codex_update_recipient,
-                opts,
-                issue_state_fetcher,
-                turn_number + 1,
-                max_turns,
-                worker_host
-              )
-
-            {:continue, refreshed_issue} ->
-              Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
+        transition_result ->
+          cond do
+            runtime_transition_stop?(transition_result) ->
+              Logger.info("Stopping agent run for #{issue_context(issue)} after runtime transition certification; returning control to orchestrator")
               :ok
 
-            {:done, _refreshed_issue} ->
+            fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) ->
+              Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
               :ok
 
-            {:error, reason} ->
-              {:error, reason}
+            true ->
+              next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
+
+              case next_action do
+                {:continue, refreshed_issue} when turn_number < max_turns ->
+                  Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+                  do_run_codex_turns(
+                    app_session,
+                    workspace,
+                    refreshed_issue,
+                    codex_update_recipient,
+                    opts,
+                    issue_state_fetcher,
+                    turn_number + 1,
+                    max_turns,
+                    worker_host
+                  )
+
+                {:continue, refreshed_issue} ->
+                  Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+                  :ok
+
+                {:done, _refreshed_issue} ->
+                  :ok
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
           end
       end
     end
@@ -689,22 +697,53 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp structured_runtime_contract?(_preflight), do: false
 
-  defp process_runtime_transition_requests(workspace, %Issue{} = issue) do
-    validation_result = ValidationController.process_requests(issue, workspace)
-    handoff_result = HandoffController.process_requests(issue, workspace)
+  defp process_runtime_transition_requests(workspace, %Issue{} = issue, issue_state_fetcher) do
+    with {:ok, current_issue} <- current_issue_for_runtime_transition(workspace, issue, issue_state_fetcher) do
+      validation_result = ValidationController.process_requests(current_issue, workspace)
+      handoff_result = HandoffController.process_requests(current_issue, workspace)
 
-    maybe_record_controller_block(workspace, issue, "validation", validation_result)
-    maybe_record_controller_block(workspace, issue, "handoff", handoff_result)
+      maybe_record_controller_block(workspace, current_issue, "validation", validation_result)
+      maybe_record_controller_block(workspace, current_issue, "handoff", handoff_result)
 
-    Logger.info("Processed runtime transition requests for #{issue_context(issue)} validation=#{inspect(validation_result)} handoff=#{inspect(handoff_result)}")
+      Logger.info("Processed runtime transition requests for #{issue_context(current_issue)} validation=#{inspect(validation_result)} handoff=#{inspect(handoff_result)}")
 
-    {validation_result, handoff_result}
+      {validation_result, handoff_result}
+    end
   rescue
     error ->
       Logger.warning("Failed to process runtime transition requests for #{issue_context(issue)} error=#{Exception.message(error)}")
 
       {:error, {:runtime_transition_failed, Exception.message(error)}}
   end
+
+  defp current_issue_for_runtime_transition(workspace, %Issue{} = issue, issue_state_fetcher) do
+    if RuntimeRequest.pending?(workspace, ["miu.completion_requested", "handoff.requested"]) do
+      refresh_runtime_transition_issue(issue, issue_state_fetcher)
+    else
+      {:ok, issue}
+    end
+  end
+
+  defp refresh_runtime_transition_issue(%Issue{id: issue_id}, issue_state_fetcher)
+       when is_binary(issue_id) and is_function(issue_state_fetcher, 1) do
+    case issue_state_fetcher.([issue_id]) do
+      {:ok, [%Issue{} = current_issue | _]} ->
+        if active_issue_state?(current_issue.state) do
+          {:ok, current_issue}
+        else
+          {:error, {:runtime_transition_issue_inactive, current_issue.state}}
+        end
+
+      {:ok, []} ->
+        {:error, :runtime_transition_issue_unavailable}
+
+      {:error, reason} ->
+        {:error, {:runtime_transition_issue_refresh_failed, reason}}
+    end
+  end
+
+  defp refresh_runtime_transition_issue(_issue, _issue_state_fetcher),
+    do: {:error, :runtime_transition_issue_unavailable}
 
   defp runtime_transition_stop?({{:ok, certificate}, _handoff_result}) when is_map(certificate), do: true
   defp runtime_transition_stop?({_validation_result, {:ok, certificate}}) when is_map(certificate), do: true

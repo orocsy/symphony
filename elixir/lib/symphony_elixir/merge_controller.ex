@@ -53,7 +53,8 @@ defmodule SymphonyElixir.MergeController do
          %{} = event <- latest_merge_event(workspace),
          true <- event["issue_id"] == issue.id,
          true <- event["issue"] == issue.identifier,
-         true <- event["contract_hash"] == compiled.contract_hash do
+         true <- event["contract_hash"] == compiled.contract_hash,
+         true <- event["issue_revision"] == RuntimeContract.issue_revision(issue.description, issue.updated_at) do
       {:ok, event}
     else
       _ -> :none
@@ -202,6 +203,7 @@ defmodule SymphonyElixir.MergeController do
           "issue_id" => issue.id,
           "issue" => issue.identifier,
           "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
           "branch" => certificate["branch"],
           "base_branch" => certificate["base_branch"],
           "reviewed_head_sha" => certificate["head_sha"],
