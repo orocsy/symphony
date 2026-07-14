@@ -627,11 +627,11 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp issue_branch_base_names(%{description: description}) when is_binary(description) do
-    description_branch_base_names(description)
+    runtime_contract_base_names(description)
   end
 
   defp issue_branch_base_names(%{"description" => description}) when is_binary(description) do
-    description_branch_base_names(description)
+    runtime_contract_base_names(description)
   end
 
   defp issue_branch_base_names(%{base_branch: base_branch, integration_branch: integration_branch}) do
@@ -643,6 +643,14 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp issue_branch_base_names(_issue_or_identifier), do: []
+
+  defp runtime_contract_base_names(description) do
+    case RuntimeContract.compile(description) do
+      {:ok, compiled} -> [compiled.contract["base_branch"]]
+      :none -> description_branch_base_names(description)
+      {:error, _errors} -> []
+    end
+  end
 
   defp description_branch_base_names(description) do
     [

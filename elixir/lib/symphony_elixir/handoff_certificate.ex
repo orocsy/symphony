@@ -11,7 +11,7 @@ defmodule SymphonyElixir.HandoffCertificate do
 
   @certificate_path ".orocsy/delivery/state/handoff-ready.json"
   @authority "symphony.runtime.handoff-controller"
-  @schema_version 2
+  @schema_version 3
   @remote_lookup_timeout_ms 30_000
 
   @spec issue(Issue.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -22,6 +22,8 @@ defmodule SymphonyElixir.HandoffCertificate do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          {:ok, remote_head} <- remote_branch_head(branch),
          true <- head_sha == remote_head["head_sha"] || {:error, :unpushed_head},
+         {:ok, pr} <- open_pull_request(remote_head["repo"], branch),
+         :ok <- verify_pull_request(pr, compiled.contract, head_sha),
          true <- clean_worktree?(workspace) || {:error, :dirty_worktree},
          completed_mius when is_list(completed_mius) <- Keyword.get(opts, :completed_mius),
          true <- same_values?(completed_mius, compiled.miu_ids) || {:error, :incomplete_mius},
@@ -42,6 +44,8 @@ defmodule SymphonyElixir.HandoffCertificate do
           "remote_repo" => remote_head["repo"],
           "remote_branch" => remote_head["branch"],
           "remote_head_sha" => remote_head["head_sha"],
+          "pr_number" => pr["number"],
+          "pr_url" => pr["html_url"],
           "completed_mius" => completed_mius,
           "validation_event_ids" => validation_event_ids,
           "issued_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -75,7 +79,11 @@ defmodule SymphonyElixir.HandoffCertificate do
            true <- clean_worktree?(workspace) || {:stale, :dirty_worktree},
            {:ok, remote_head} <- remote_branch_head(branch),
            :ok <- equal_or_stale(head_sha, remote_head["head_sha"], :unpushed_head),
-           :ok <- equal_or_stale(certificate["remote_repo"], remote_head["repo"], :remote_repo_mismatch) do
+           :ok <- equal_or_stale(certificate["remote_repo"], remote_head["repo"], :remote_repo_mismatch),
+           {:ok, pr} <- open_pull_request(remote_head["repo"], branch),
+           :ok <- verify_pull_request(pr, compiled.contract, head_sha),
+           :ok <- equal_or_stale(certificate["pr_number"], pr["number"], :pull_request_mismatch),
+           :ok <- equal_or_stale(certificate["pr_url"], pr["html_url"], :pull_request_mismatch) do
         {:ok, certificate}
       else
         :none -> {:stale, :legacy_or_missing_runtime_contract}
@@ -114,10 +122,13 @@ defmodule SymphonyElixir.HandoffCertificate do
       certificate["issue"] != issue.identifier -> {:stale, :issue_identifier_mismatch}
       certificate["contract_hash"] != compiled.contract_hash -> {:stale, :contract_hash_mismatch}
       certificate["issue_revision"] != expected_revision -> {:stale, :issue_revision_mismatch}
+      certificate["base_branch"] != compiled.contract["base_branch"] -> {:stale, :base_branch_mismatch}
       certificate["branch"] != compiled.contract["integration_branch"] -> {:stale, :canonical_branch_mismatch}
       certificate["remote_branch"] != certificate["branch"] -> {:stale, :remote_branch_mismatch}
       certificate["remote_head_sha"] != certificate["head_sha"] -> {:stale, :remote_head_mismatch}
       not is_binary(certificate["remote_repo"]) or certificate["remote_repo"] == "" -> {:stale, :remote_repo_missing}
+      not is_integer(certificate["pr_number"]) or certificate["pr_number"] <= 0 -> {:stale, :pull_request_missing}
+      not is_binary(certificate["pr_url"]) or certificate["pr_url"] == "" -> {:stale, :pull_request_missing}
       not same_values?(certificate["completed_mius"], compiled.miu_ids) -> {:stale, :incomplete_mius}
       not valid_validation_evidence?(certificate["validation_event_ids"]) -> {:stale, :missing_validation_evidence}
       true -> :ok
@@ -214,6 +225,33 @@ defmodule SymphonyElixir.HandoffCertificate do
 
   defp normalize_remote_head_result({:error, _reason} = error, _branch), do: error
   defp normalize_remote_head_result(_result, _branch), do: {:error, :invalid_remote_head_result}
+
+  defp open_pull_request(repo, branch) do
+    result =
+      case Application.get_env(:symphony_elixir, :handoff_pull_request_runner) do
+        runner when is_function(runner, 2) -> runner.(repo, branch)
+        _ -> ReviewMonitor.open_pull_request(repo, branch)
+      end
+
+    case result do
+      {:ok, %{} = pr} -> {:ok, pr}
+      {:ok, nil} -> {:error, :missing_open_pull_request}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_pull_request_result}
+    end
+  end
+
+  defp verify_pull_request(pr, contract, head_sha) do
+    cond do
+      pr["state"] != "open" -> {:error, :pull_request_not_open}
+      get_in(pr, ["head", "ref"]) != contract["integration_branch"] -> {:error, :pull_request_branch_mismatch}
+      get_in(pr, ["head", "sha"]) != head_sha -> {:error, :pull_request_head_mismatch}
+      get_in(pr, ["base", "ref"]) != contract["base_branch"] -> {:error, :pull_request_base_mismatch}
+      not is_integer(pr["number"]) or pr["number"] <= 0 -> {:error, :missing_pull_request_number}
+      not is_binary(pr["html_url"]) or pr["html_url"] == "" -> {:error, :missing_pull_request_url}
+      true -> :ok
+    end
+  end
 
   defp git(workspace, args) do
     case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do

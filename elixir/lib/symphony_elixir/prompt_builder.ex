@@ -150,6 +150,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
         - All required MIUs are runtime-certified for contract `#{compiled.contract_hash}`.
         - Keep the worktree clean, push the canonical integration branch, and verify local `HEAD` matches its upstream.
+        - Ensure an open pull request exists from the canonical integration branch into `#{compiled.contract["base_branch"]}`. Create it with `gh pr create` if absent; do not substitute a PR for another branch or base.
         - Request final runtime certification exactly once:
           `python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.requested --status requested --step final`
         - End the turn after the request. Symphony runs final validations, issues `handoff.ready`, and requests GitHub Codex review.

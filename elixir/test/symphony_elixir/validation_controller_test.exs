@@ -61,6 +61,38 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "treats zero-test Python unittest output as a failed test validation" do
+    {workspace, issue} = workspace_and_issue("Ran 0 tests in 0.001s")
+
+    try do
+      issue = %{
+        issue
+        | description:
+            issue.description
+            |> String.replace("- ./fake-test", "- ./fake-test -m unittest test_empty.py")
+      }
+
+      assert {:error, {:validation_failed, result}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert result["reason_class"] == "zero_tests_collected"
+      assert result["tests"]["collected"] == 0
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "parses Jest success summaries" do
+    {workspace, issue} = workspace_and_issue("Tests: \e[32m3 passed\e[0m, 3 total")
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert length(certificate["validation_event_ids"]) == 1
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "treats colon-suffixed test scripts as test commands" do
     {workspace, issue} = workspace_and_issue("setup complete")
 
@@ -309,6 +341,22 @@ defmodule SymphonyElixir.ValidationControllerTest do
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
       refute changed_head == original_head
+      refute File.regular?(Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "detects worktree mutation even when validation exits non-zero" do
+    {workspace, issue} =
+      workspace_and_issue("unused",
+        script_body: "#!/bin/sh\necho dirty > DIRTY.md\necho '3 tests, 0 failures'\nexit 1\n"
+      )
+
+    try do
+      assert {:error, :validation_left_dirty_worktree} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
       refute File.regular?(Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json"))
     after
       File.rm_rf(workspace)
@@ -812,7 +860,21 @@ defmodule SymphonyElixir.ValidationControllerTest do
       end
     end)
 
+    previous_pr_runner = Application.get_env(:symphony_elixir, :handoff_pull_request_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_pull_request_runner, fn _repo, branch ->
+      {:ok,
+       %{
+         "number" => 700,
+         "html_url" => "https://github.com/test/symphony/pull/700",
+         "state" => "open",
+         "head" => %{"ref" => branch, "sha" => git_output!(workspace, ["rev-parse", "HEAD"])},
+         "base" => %{"ref" => "main"}
+       }}
+    end)
+
     on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
+    on_exit(fn -> restore_env(:handoff_pull_request_runner, previous_pr_runner) end)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

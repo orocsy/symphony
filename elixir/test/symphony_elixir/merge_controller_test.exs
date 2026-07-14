@@ -66,6 +66,32 @@ defmodule SymphonyElixir.MergeControllerTest do
     end
   end
 
+  test "a spoofed clean-review comment cannot authorize automatic merge" do
+    {workspace, issue, head_sha} = certified_workspace(true)
+    test_pid = self()
+
+    install_review_observations(head_sha,
+      checks: :passed,
+      unresolved_threads: 0,
+      clean_review_login: "chatgpt-codex-connector[bot]",
+      clean_review_type: "User"
+    )
+
+    Application.put_env(:symphony_elixir, :github_merge_runner, fn _endpoint, _fields ->
+      send(test_pid, :unexpected_merge)
+      {:ok, %{"merged" => true, "sha" => "unexpected"}}
+    end)
+
+    try do
+      assert {:blocked, :missing_clean_current_head_codex_review} =
+               MergeController.converge(issue, workspace, inspection(head_sha))
+
+      refute_received :unexpected_merge
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "CI opt-out skips check-run feedback during automatic merge" do
     {workspace, issue, head_sha} = certified_workspace(true, require_ci_checks?: false)
     install_review_observations(head_sha, checks: :failed, unresolved_threads: 0)
@@ -229,6 +255,7 @@ defmodule SymphonyElixir.MergeControllerTest do
     git!(workspace, ["remote", "add", "origin", remote])
     git!(workspace, ["push", "--set-upstream", "origin", "orocsy/cod-700"])
     install_remote_head_runner!(remote)
+    install_pull_request_runner!(workspace)
     head_sha = git_output!(workspace, ["rev-parse", "HEAD"])
 
     issue = issue(automatic_merge?, Keyword.get(opts, :require_ci_checks?, true))
@@ -305,6 +332,8 @@ defmodule SymphonyElixir.MergeControllerTest do
     live_base = Keyword.get(opts, :live_base, "main")
     feedback_cleared? = Keyword.get(opts, :feedback_cleared, false)
     feedback_created_at = Keyword.get(opts, :feedback_created_at, "2026-07-12T10:02:00Z")
+    clean_review_login = Keyword.get(opts, :clean_review_login, "chatgpt-codex-connector[bot]")
+    clean_review_type = Keyword.get(opts, :clean_review_type, "Bot")
 
     Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
       cond do
@@ -327,7 +356,8 @@ defmodule SymphonyElixir.MergeControllerTest do
              %{"body" => "@codex review", "created_at" => "2026-07-12T10:01:00Z"},
              %{
                "body" => "Codex Review: Didn't find any major issues",
-               "created_at" => "2026-07-12T10:02:00Z"
+               "created_at" => "2026-07-12T10:02:00Z",
+               "user" => %{"login" => clean_review_login, "type" => clean_review_type}
              }
            ]}
 
@@ -429,6 +459,23 @@ defmodule SymphonyElixir.MergeControllerTest do
     end)
 
     on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
+  end
+
+  defp install_pull_request_runner!(workspace) do
+    previous_runner = Application.get_env(:symphony_elixir, :handoff_pull_request_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_pull_request_runner, fn _repo, branch ->
+      {:ok,
+       %{
+         "number" => 53,
+         "html_url" => "https://github.com/orocsy/symphony/pull/53",
+         "state" => "open",
+         "head" => %{"ref" => branch, "sha" => git_output!(workspace, ["rev-parse", "HEAD"])},
+         "base" => %{"ref" => "main"}
+       }}
+    end)
+
+    on_exit(fn -> restore_env(:handoff_pull_request_runner, previous_runner) end)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

@@ -4140,7 +4140,8 @@ defmodule SymphonyElixir.CoreTest do
              },
              %{
                "body" => "Codex Review: Didn't find any major issues. Delightful!",
-               "created_at" => "2026-05-25T19:24:10Z"
+               "created_at" => "2026-05-25T19:24:10Z",
+               "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
              }
            ]}
 
@@ -4362,7 +4363,8 @@ defmodule SymphonyElixir.CoreTest do
              },
              %{
                "body" => "Codex Review: Didn't find any major issues. Bravo.",
-               "created_at" => "2026-05-15T09:28:00Z"
+               "created_at" => "2026-05-15T09:28:00Z",
+               "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
              }
            ]}
 
@@ -4371,7 +4373,8 @@ defmodule SymphonyElixir.CoreTest do
            [
              %{
                "body" => "Codex Review: Didn't find any major issues. Bravo.",
-               "created_at" => "2026-05-15T09:28:00Z"
+               "created_at" => "2026-05-15T09:28:00Z",
+               "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
              }
            ]}
 
@@ -4423,7 +4426,8 @@ defmodule SymphonyElixir.CoreTest do
              },
              %{
                "body" => "Codex Review: Didn't find any major issues. Bravo.",
-               "created_at" => "2026-05-17T22:46:37Z"
+               "created_at" => "2026-05-17T22:46:37Z",
+               "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
              }
            ]}
 
@@ -16233,7 +16237,8 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "body" => "Codex Review: Didn't find any major issues. Bravo.",
                  "created_at" => "2026-05-12T05:05:00Z",
-                 "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment-clean-review"
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/3#issuecomment-clean-review",
+                 "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
                }
              ]}
 
@@ -17732,7 +17737,8 @@ defmodule SymphonyElixir.CoreTest do
                },
                %{
                  "body" => "Codex Review: Didn't find any major issues.",
-                 "created_at" => "2026-05-24T05:05:00Z"
+                 "created_at" => "2026-05-24T05:05:00Z",
+                 "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
                }
              ]}
 
@@ -21177,7 +21183,8 @@ defmodule SymphonyElixir.CoreTest do
     %{
       "body" => "Codex Review: Didn't find any major issues. What shall we delve into next?",
       "created_at" => created_at,
-      "html_url" => "https://github.com/acme/nutribuddy/pull/7#issuecomment-clean"
+      "html_url" => "https://github.com/acme/nutribuddy/pull/7#issuecomment-clean",
+      "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
     }
   end
 
@@ -21399,6 +21406,26 @@ defmodule SymphonyElixir.CoreTest do
   defp issue_runtime_handoff_certificate!(workspace, %Issue{} = issue) do
     {:ok, compiled} = SymphonyElixir.RuntimeContract.compile(issue.description)
     push_workspace_head_to_test_origin!(workspace)
+    previous_pr_runner = Application.get_env(:symphony_elixir, :handoff_pull_request_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_pull_request_runner, fn _repo, branch ->
+      {:ok,
+       %{
+         "number" => 999,
+         "html_url" => "https://github.com/test/symphony/pull/999",
+         "state" => "open",
+         "head" => %{"ref" => branch, "sha" => git_head!(workspace)},
+         "base" => %{"ref" => compiled.contract["base_branch"]}
+       }}
+    end)
+
+    on_exit(fn ->
+      if is_nil(previous_pr_runner) do
+        Application.delete_env(:symphony_elixir, :handoff_pull_request_runner)
+      else
+        Application.put_env(:symphony_elixir, :handoff_pull_request_runner, previous_pr_runner)
+      end
+    end)
 
     assert {:ok, _certificate} =
              SymphonyElixir.HandoffCertificate.issue(issue, workspace,
@@ -21440,6 +21467,13 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     :ok
+  end
+
+  defp git_head!(workspace) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true) do
+      {head_sha, 0} -> String.trim(head_sha)
+      {output, status} -> flunk("git rev-parse HEAD failed (#{status}): #{output}")
+    end
   end
 
   defp empty_orchestrator_state do

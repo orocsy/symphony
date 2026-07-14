@@ -382,7 +382,7 @@ defmodule SymphonyElixir.RuntimeContract do
   defp shell_command_flag?(flag), do: Regex.match?(~r/^-[^-]*c/, String.downcase(flag))
 
   defp powershell_command_flag?(flag),
-    do: String.downcase(flag) in ["-c", "-command", "-ec", "-encodedcommand"]
+    do: String.downcase(flag) in ["-c", "-command", "-e", "-ec", "-encodedcommand"]
 
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn {key, value} -> {to_string(key), stringify_keys(value)} end)

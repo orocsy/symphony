@@ -23,6 +23,7 @@ have a runtime-verifiable `handoff.ready` certificate bound to all of:
 - current issue-contract hash;
 - canonical integration branch;
 - current pushed head SHA;
+- open pull request from the canonical integration branch to the contract base;
 - required MIU completion evidence;
 - required validation evidence.
 
@@ -428,7 +429,7 @@ Runtime Contract; they MUST NOT be appended into authority-bearing scope.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "event": "miu.completion_requested",
   "event_id": "evt_...",
   "status": "requested",
@@ -502,7 +503,11 @@ Secrets and raw environment values MUST NOT be persisted.
   "base_branch": "main",
   "branch": "orocsy/cod-246-preference-miu-guest-setup-controls",
   "head_sha": "...",
+  "remote_repo": "orocsy/nutribuddy",
+  "remote_branch": "orocsy/cod-246-preference-miu-guest-setup-controls",
+  "remote_head_sha": "...",
   "pr_number": 103,
+  "pr_url": "https://github.com/orocsy/nutribuddy/pull/103",
   "completed_mius": ["COD-266-MIU-1", "COD-266-MIU-2"],
   "validation_event_ids": ["..."],
   "issued_at": "RFC3339"

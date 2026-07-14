@@ -355,20 +355,26 @@ defmodule SymphonyElixir.ValidationController do
           :ok = append_attempt(workspace, result)
           :ok = append_event(workspace, result)
 
-          if result["status"] == "passed" do
-            case validation_state_unchanged(workspace, head_sha) do
-              :ok -> {:cont, {:ok, events ++ [result]}}
-              {:error, _reason} = error -> {:halt, error}
-            end
-          else
-            if product_failure?(result) and prior_product_failures >= 2 do
-              {:halt, {:blocked, {:product_fix_budget_exhausted, miu["id"]}}}
-            else
-              {:halt, {:error, {:validation_failed, result}}}
-            end
+          case validation_state_unchanged(workspace, head_sha) do
+            :ok ->
+              continue_after_validation(result, events, prior_product_failures, miu["id"])
+
+            {:error, _reason} = error ->
+              {:halt, error}
           end
       end
     end)
+  end
+
+  defp continue_after_validation(%{"status" => "passed"} = result, events, _prior_failures, _miu_id),
+    do: {:cont, {:ok, events ++ [result]}}
+
+  defp continue_after_validation(result, _events, prior_product_failures, miu_id) do
+    if product_failure?(result) and prior_product_failures >= 2 do
+      {:halt, {:blocked, {:product_fix_budget_exhausted, miu_id}}}
+    else
+      {:halt, {:error, {:validation_failed, result}}}
+    end
   end
 
   defp execute_validation(issue, workspace, compiled, miu_id, head_sha, command, fingerprint) do
@@ -454,7 +460,19 @@ defmodule SymphonyElixir.ValidationController do
 
   defp test_counts(command, output) do
     if test_command?(command) do
+      output = strip_ansi(output)
+
       cond do
+        match = Regex.run(~r/Ran\s+(\d+)\s+tests?\s+in\s+[\d.]+s/i, output, capture: :all_but_first) ->
+          [collected] = Enum.map(match, &String.to_integer/1)
+          %{"collected" => collected, "passed" => collected, "failed" => 0}
+
+        match = Regex.run(~r/Tests:\s*(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(\d+)\s+total/i, output, capture: :all_but_first) ->
+          [failed, passed, collected] =
+            Enum.map(match, fn value -> if value == "", do: 0, else: String.to_integer(value) end)
+
+          %{"collected" => collected, "passed" => passed, "failed" => failed}
+
         match = Regex.run(~r/(\d+)\s+tests?,\s+(\d+)\s+failures?/i, output, capture: :all_but_first) ->
           [collected, failed] = Enum.map(match, &String.to_integer/1)
           %{"collected" => collected, "passed" => max(0, collected - failed), "failed" => failed}
@@ -480,8 +498,12 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
+  defp strip_ansi(output) when is_binary(output) do
+    Regex.replace(~r/\x1B\[[0-?]*[ -\/]*[@-~]/, output, "")
+  end
+
   defp test_command?(command) do
-    Regex.match?(~r/(^|[\s\/.\-])(test|tests|vitest|pytest)([\s\/.\-:]|$)/i, command)
+    Regex.match?(~r/(^|[\s\/.\-_])(test|tests|unittest|jest|vitest|pytest)([\s\/.\-_:]|$)/i, command)
   end
 
   defp validation_fingerprint(issue, workspace, compiled, miu_id, head_sha, command) do

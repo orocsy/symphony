@@ -1251,6 +1251,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           "sh -c 'echo 3 tests, 0 failures'",
           "bash -lc 'mix test'",
           "env -S 'sh -c echo fake-success'",
+          "pwsh -e ZQBjAGgAbwAgAGYAYQBrAGUALQBzAHUAYwBjAGUAcwBzAA==",
           "mix test | cat"
         ] do
       issue = %Issue{
@@ -2072,6 +2073,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       source_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "workspaces")
+      base_branch = "release/1.x"
       integration_branch = "orocsy/cod-907-integration"
       generated_branch = "orocsy/generated-linear-branch"
 
@@ -2082,9 +2084,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.write!(Path.join(source_repo, "README.md"), "main\n")
       assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
       assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
-      assert {_output, 0} = System.cmd("git", ["switch", "-c", integration_branch], cd: source_repo, stderr_to_stdout: true)
-      File.write!(Path.join(source_repo, "README.md"), "integration\n")
-      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Integration head"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", base_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "release base\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Release base"], cd: source_repo, stderr_to_stdout: true)
       assert {_output, 0} = System.cmd("git", ["switch", "-c", generated_branch], cd: source_repo, stderr_to_stdout: true)
       File.write!(Path.join(source_repo, "README.md"), "generated-pr\n")
       assert {_output, 0} = System.cmd("git", ["commit", "-am", "Generated PR head"], cd: source_repo, stderr_to_stdout: true)
@@ -2109,7 +2111,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         ```yaml
         schema_version: 1
         ticket_type: implementation
-        base_branch: main
+        base_branch: #{base_branch}
         integration_branch: #{integration_branch}
         dependencies: []
         mius:
@@ -2131,7 +2133,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
       assert String.trim(current_branch) == integration_branch
       refute String.trim(current_branch) == generated_branch
-      assert File.read!(Path.join(workspace, "README.md")) == "integration\n"
+      assert File.read!(Path.join(workspace, "README.md")) == "release base\n"
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -2162,7 +2164,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert preflight["branch"] == integration_branch
       assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
       assert String.trim(current_branch) == integration_branch
-      assert File.read!(Path.join(workspace, "README.md")) == "integration\n"
+      assert File.read!(Path.join(workspace, "README.md")) == "release base\n"
     after
       File.rm_rf(test_root)
     end

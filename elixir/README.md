@@ -37,7 +37,8 @@ contract is the sole authority for branch, write scope, MIUs, validation, and
 review behavior. The runtime certifies one clean micro-commit at a time,
 executes declared validation itself, and issues `handoff.ready` only after all
 MIU certificates and final validations match the current issue revision and
-pushed head. Worker-authored generic gate events cannot imply completion.
+pushed head, and an open pull request connects the canonical integration branch
+to the contract base. Worker-authored generic gate events cannot imply completion.
 Authority-bearing MIU, handoff, processed-request, and merge evidence is HMAC
 signed with a runtime key stored outside the issue workspace. Override its
 location with `SYMPHONY_CONTROLLER_EVIDENCE_KEY_PATH`; keep that file unreadable

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.ReviewMonitor do
   alias SymphonyElixir.Linear.Issue
 
   @review_feedback_states MapSet.new(["CHANGES_REQUESTED", "REQUEST_CHANGES"])
+  @codex_review_login "chatgpt-codex-connector[bot]"
   @issue_comments_per_page 100
   @review_threads_query """
   query SymphonyPullReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -357,6 +358,18 @@ defmodule SymphonyElixir.ReviewMonitor do
   end
 
   def unresolved_review_thread_count(_repo, _pr), do: {:error, :invalid_review_thread_request}
+
+  @spec open_pull_request(String.t() | nil, String.t() | nil) ::
+          {:ok, map() | nil} | {:error, term()}
+  def open_pull_request(repo, branch)
+      when is_binary(repo) and repo != "" and is_binary(branch) and branch != "" do
+    with {:ok, pr} <- fetch_open_pull_request(repo, branch),
+         {:ok, hydrated} <- hydrate_pull_request_detail(repo, pr) do
+      {:ok, hydrated}
+    end
+  end
+
+  def open_pull_request(_repo, _branch), do: {:error, :invalid_pull_request_lookup}
 
   @spec check_runs_state(String.t() | nil, String.t() | nil) ::
           {:ok, :passed | :pending | :failed | :none} | {:error, term()}
@@ -1043,13 +1056,20 @@ defmodule SymphonyElixir.ReviewMonitor do
 
   defp head_committed_at(_pr), do: nil
 
-  defp clean_codex_review_comment?(%{"body" => body}) when is_binary(body) do
-    body
-    |> String.trim()
-    |> String.match?(~r/^Codex Review:\s*(Didn['’]?t|Did not) find any major issues\b/i)
+  defp clean_codex_review_comment?(%{"body" => body} = comment) when is_binary(body) do
+    codex_review_author?(comment) and
+      body
+      |> String.trim()
+      |> String.match?(~r/^Codex Review:\s*(Didn['’]?t|Did not) find any major issues\b/i)
   end
 
   defp clean_codex_review_comment?(_comment), do: false
+
+  defp codex_review_author?(comment) do
+    login = get_in(comment, ["user", "login"]) || get_in(comment, ["author", "login"])
+    type = get_in(comment, ["user", "type"]) || get_in(comment, ["author", "type"])
+    login == @codex_review_login and type == "Bot"
+  end
 
   defp latest_review_feedback_at(feedback) when is_list(feedback) do
     feedback

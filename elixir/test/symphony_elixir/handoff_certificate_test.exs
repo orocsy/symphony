@@ -29,6 +29,7 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     git!(workspace, ["push", "--set-upstream", "origin", "orocsy/cod-266"])
     File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
     install_remote_head_runner!(remote)
+    install_pull_request_runner!(workspace)
 
     issue = issue()
 
@@ -64,7 +65,21 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     assert certificate["remote_repo"] == "test/symphony"
     assert certificate["remote_branch"] == "orocsy/cod-266"
     assert certificate["remote_head_sha"] == certificate["head_sha"]
+    assert certificate["pr_number"] == 266
     assert {:ok, ^certificate} = HandoffCertificate.current(issue, workspace)
+  end
+
+  test "refuses to issue a final handoff certificate without an open PR", %{
+    workspace: workspace,
+    issue: issue
+  } do
+    Application.put_env(:symphony_elixir, :handoff_pull_request_runner, fn _repo, _branch -> {:ok, nil} end)
+
+    assert {:error, :missing_open_pull_request} =
+             HandoffCertificate.issue(issue, workspace,
+               completed_mius: ["COD-266-MIU-1"],
+               validation_event_ids: ["validation-1"]
+             )
   end
 
   test "trusted GitHub branch lookup uses the configured repository path" do
@@ -184,6 +199,13 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     end
   end
 
+  defp git_output!(workspace, args) do
+    case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, status} -> flunk("git #{Enum.join(args, " ")} failed (#{status}): #{output}")
+    end
+  end
+
   defp install_remote_head_runner!(remote) do
     previous_runner = Application.get_env(:symphony_elixir, :handoff_remote_head_runner)
 
@@ -195,6 +217,23 @@ defmodule SymphonyElixir.HandoffCertificateTest do
     end)
 
     on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
+  end
+
+  defp install_pull_request_runner!(workspace) do
+    previous_runner = Application.get_env(:symphony_elixir, :handoff_pull_request_runner)
+
+    Application.put_env(:symphony_elixir, :handoff_pull_request_runner, fn _repo, branch ->
+      {:ok,
+       %{
+         "number" => 266,
+         "html_url" => "https://github.com/test/symphony/pull/266",
+         "state" => "open",
+         "head" => %{"ref" => branch, "sha" => git_output!(workspace, ["rev-parse", "HEAD"])},
+         "base" => %{"ref" => "main"}
+       }}
+    end)
+
+    on_exit(fn -> restore_env(:handoff_pull_request_runner, previous_runner) end)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

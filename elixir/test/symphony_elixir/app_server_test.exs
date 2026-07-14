@@ -536,6 +536,13 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Symphony fresh-MIU micro-worker"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ ".orocsy/delivery/issue-brief.md"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "technical-miu-trace"
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~
+               "Runtime Contract execution gate"
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~
+               "append `miu.completion_requested`"
+
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run `rg`, `grep`, `find`"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Never merge automatically"
 
