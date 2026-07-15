@@ -6614,6 +6614,74 @@ defmodule SymphonyElixir.CoreTest do
         })
       )
 
+      assert {:error, {:invalid_certification_preflight, :missing_controller_signature}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight blocks tampered signed evidence even with an explicit recovery baseline" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-tampered-certification-baseline-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      baseline = String.duplicate("a", 40)
+
+      issue = %Issue{
+        id: "issue-cod-tampered-baseline",
+        identifier: "COD-TAMPERED",
+        title: "Tampered recovery",
+        state: "Rework",
+        branch_name: "orocsy/cod-tampered",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-tampered
+        certification_base_sha: #{baseline}
+        dependencies: []
+        mius:
+          - id: COD-TAMPERED-MIU-1
+            write_scope:
+              - README.md
+            validations:
+              - pnpm typecheck
+        final_validations:
+          - pnpm typecheck
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      tampered =
+        SymphonyElixir.ControllerEvidence.sign(%{
+          "issue" => issue.identifier,
+          "branch" => issue.branch_name,
+          "certification_base_sha" => baseline
+        })
+        |> Map.put("certification_base_sha", String.duplicate("b", 40))
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(tampered)
+      )
+
       assert {:error, {:invalid_certification_preflight, :invalid_controller_signature}} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
     after

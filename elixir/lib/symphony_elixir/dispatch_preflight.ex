@@ -69,12 +69,17 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   @spec read_authoritative(String.t() | nil) :: {:ok, map()} | :none | {:error, term()}
   def read_authoritative(workspace) when is_binary(workspace) do
-    with {:ok, preflight} <- read_raw(workspace),
-         true <- ControllerEvidence.valid?(preflight) do
-      {:ok, preflight}
-    else
-      false -> {:error, :invalid_controller_signature}
-      other -> other
+    case read_raw(workspace) do
+      {:ok, %{"controller_signature" => signature} = preflight} when is_binary(signature) ->
+        if ControllerEvidence.valid?(preflight),
+          do: {:ok, preflight},
+          else: {:error, :invalid_controller_signature}
+
+      {:ok, preflight} when is_map(preflight) ->
+        {:error, :missing_controller_signature}
+
+      other ->
+        other
     end
   rescue
     error -> {:error, {:authoritative_preflight_read_failed, Exception.message(error)}}
@@ -919,7 +924,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       :none ->
         {:ok, explicit_base_sha || Map.get(inspection, :head_sha)}
 
-      {:error, :invalid_controller_signature} when is_binary(explicit_base_sha) ->
+      {:error, :missing_controller_signature} when is_binary(explicit_base_sha) ->
         {:ok, explicit_base_sha}
 
       {:error, reason} ->
