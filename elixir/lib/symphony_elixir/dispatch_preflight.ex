@@ -26,7 +26,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements) do
-      prepare_with_inspection(workspace, issue, requirements, inspection)
+      prepare_with_inspection(workspace, issue, requirements, inspection, false)
     end
   end
 
@@ -39,7 +39,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          true <- review_delta_recovery?(workspace, issue, requirements, inspection) do
-      prepare_with_inspection(workspace, issue, requirements, inspection)
+      prepare_with_inspection(workspace, issue, requirements, inspection, true)
     else
       false -> {:error, :review_delta_recovery_not_authorized}
       {:error, _reason} = error -> error
@@ -50,9 +50,21 @@ defmodule SymphonyElixir.DispatchPreflight do
   def prepare_review_delta_recovery(_workspace, _issue, _inspection),
     do: {:error, :invalid_review_delta_recovery}
 
-  defp prepare_with_inspection(workspace, issue, requirements, inspection) do
-    with mode <- preflight_mode(workspace, issue, requirements, inspection),
-         :ok <- maybe_switch_to_review_head(workspace, inspection, mode, requirements),
+  defp prepare_with_inspection(workspace, issue, requirements, inspection, review_delta_recovery?) do
+    with mode <-
+           if(review_delta_recovery?,
+             do: "review_rework",
+             else: preflight_mode(workspace, requirements, inspection)
+           ),
+         :ok <-
+           maybe_switch_to_review_head(
+             workspace,
+             inspection,
+             mode,
+             requirements,
+             review_delta_recovery?
+           ),
+         :ok <- verify_review_delta_head(workspace, inspection, review_delta_recovery?),
          {:ok, certification_base_sha} <-
            certification_base_sha(workspace, issue, requirements, inspection, mode) do
       preflight =
@@ -254,7 +266,9 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp issue_brief_candidate_paths(_workspace, _requirements), do: []
 
-  defp maybe_switch_to_review_head(workspace, inspection, mode, requirements)
+  defp maybe_switch_to_review_head(_workspace, _inspection, _mode, _requirements, true), do: :ok
+
+  defp maybe_switch_to_review_head(workspace, inspection, mode, requirements, false)
        when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] do
     branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref)
 
@@ -272,7 +286,26 @@ defmodule SymphonyElixir.DispatchPreflight do
     :ok
   end
 
-  defp maybe_switch_to_review_head(_workspace, _inspection, _mode, _requirements), do: :ok
+  defp maybe_switch_to_review_head(_workspace, _inspection, _mode, _requirements, _review_delta_recovery?),
+    do: :ok
+
+  defp verify_review_delta_head(workspace, %{head_sha: review_head}, true)
+       when is_binary(workspace) and is_binary(review_head) and review_head != "" do
+    case git_command(workspace, ["rev-parse", "HEAD"]) do
+      {local_head, 0} when is_binary(local_head) ->
+        if String.trim(local_head) == review_head,
+          do: :ok,
+          else: {:error, :review_delta_head_changed}
+
+      _ ->
+        {:error, :review_delta_head_unavailable}
+    end
+  end
+
+  defp verify_review_delta_head(_workspace, _inspection, true),
+    do: {:error, :review_delta_head_missing}
+
+  defp verify_review_delta_head(_workspace, _inspection, false), do: :ok
 
   defp clean_worktree?(workspace) do
     case git_command(workspace, ["status", "--porcelain", "--untracked-files=all"]) do
@@ -337,15 +370,12 @@ defmodule SymphonyElixir.DispatchPreflight do
     review_feedback?(inspection) and review_feedback_for_requirements(inspection, requirements) != []
   end
 
-  defp preflight_mode(workspace, issue, requirements, inspection) do
+  defp preflight_mode(workspace, requirements, inspection) do
     cond do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
       scoped_review_feedback?(inspection, requirements) ->
-        "review_rework"
-
-      review_delta_recovery?(workspace, issue, requirements, inspection) ->
         "review_rework"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
@@ -375,7 +405,7 @@ defmodule SymphonyElixir.DispatchPreflight do
            "runtime_contract_status" => "structured",
            "integration_branch" => integration_branch
          },
-         %{head_sha: review_head, head_ref: review_branch}
+         %{head_sha: review_head, head_ref: review_branch} = inspection
        )
        when is_binary(workspace) and is_binary(review_head) and review_head != "" and
               is_binary(integration_branch) and integration_branch != "" and
@@ -383,13 +413,15 @@ defmodule SymphonyElixir.DispatchPreflight do
     issue = struct_issue(issue)
 
     with %Issue{state: state} <- issue,
-         true <- normalize_state(state) == "rework",
+         true <- normalize_state(state) == configured_rework_state(),
+         false <- review_feedback?(%{feedback: Map.get(inspection, :feedback, [])}),
          true <- review_branch == integration_branch,
          {:ok, signed_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
          true <- signed_head != review_head,
          {current_branch, 0} <- git_command(workspace, ["branch", "--show-current"]),
          true <- String.trim(current_branch) == integration_branch,
-         {status, 0} <- git_command(workspace, ["status", "--short", "--branch"]),
+         {status, 0} <-
+           git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]),
          true <- clean_pushed_tracking_status?(status),
          {local_head, 0} <- git_command(workspace, ["rev-parse", "HEAD"]),
          true <- String.trim(local_head) == review_head,
@@ -426,10 +458,15 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp normalize_state(value) when is_binary(value), do: value |> String.trim() |> String.downcase()
   defp normalize_state(_value), do: ""
 
+  defp configured_rework_state do
+    Config.settings!().review_monitor.rework_state
+    |> normalize_state()
+  end
+
   defp clean_pushed_tracking_status?(status) when is_binary(status) do
     lines = String.split(status, "\n", trim: true)
     branch_line = List.first(lines) || ""
-    dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+    dirty_lines = substantive_status_lines(status)
 
     dirty_lines == [] and
       String.contains?(branch_line, "...") and

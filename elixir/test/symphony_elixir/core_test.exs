@@ -17596,12 +17596,12 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
-        tracker_active_states: ["Rework"],
+        tracker_active_states: ["Changes Requested"],
         workspace_root: workspace_root,
         review_monitor_enabled: true,
         review_monitor_repo: "acme/nutribuddy",
         review_monitor_states: ["Human Review"],
-        review_monitor_rework_state: "Rework"
+        review_monitor_rework_state: "Changes Requested"
       )
 
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
@@ -17612,7 +17612,7 @@ defmodule SymphonyElixir.CoreTest do
           identifier: "COD-273",
           title: "Responsive design source",
           description: "Certify an already-pushed review fix.",
-          state: "Rework",
+          state: "Changes Requested",
           branch_name: "orocsy/cod-273",
           labels: []
         })
@@ -17628,7 +17628,6 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nInitial MIU.\n")
       {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["commit", "-m", "Implement MIU"], cd: workspace, stderr_to_stdout: true)
-      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       assert {:ok, _miu} =
                SymphonyElixir.ValidationController.certify_miu(issue, workspace, "COD-273-MIU-1")
@@ -17661,6 +17660,8 @@ defmodule SymphonyElixir.CoreTest do
              ]}
 
           decoded == "repos/acme/nutribuddy/pulls/61" ->
+            send(parent, :clean_review_pull_inspected)
+
             {:ok,
              %{
                "number" => 61,
@@ -17725,10 +17726,28 @@ defmodule SymphonyElixir.CoreTest do
         Application.delete_env(:symphony_elixir, :github_graphql_runner)
       end)
 
-      assert {:ok, %{"mode" => "review_rework"} = prepared} =
-               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      assert {:error, :review_delta_recovery_not_authorized} =
+               SymphonyElixir.DispatchPreflight.prepare_review_delta_recovery(workspace, issue, %{
+                 head_sha: reviewed_head,
+                 head_ref: issue.branch_name,
+                 feedback: [%{path: "README.md", summary: "New current-head feedback"}]
+               })
 
-      assert prepared["review_delta_base_head"] == prior_handoff_head
+      assert {:error, :review_delta_recovery_not_authorized} =
+               SymphonyElixir.DispatchPreflight.prepare_review_delta_recovery(workspace, issue, %{
+                 head_sha: String.duplicate("f", 40),
+                 head_ref: issue.branch_name,
+                 feedback: []
+               })
+
+      assert {:ok, %{"mode" => "review_rework"} = recovery_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare_review_delta_recovery(workspace, issue, %{
+                 head_sha: reviewed_head,
+                 head_ref: issue.branch_name,
+                 feedback: []
+               })
+
+      assert recovery_preflight["review_delta_base_head"] == prior_handoff_head
 
       assert {:completed, handoff} =
                Orchestrator.handle_orchestration_review_pending_for_test(issue)
@@ -17742,6 +17761,8 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.read_authoritative(workspace)
 
       assert preflight["review_delta_base_head"] == prior_handoff_head
+      assert_receive :clean_review_pull_inspected
+      assert_receive :clean_review_pull_inspected
       refute_receive {:unexpected_github_post, _endpoint, _fields}, 50
       assert_receive {:memory_tracker_state_update, "issue-clean-reviewed-delta", "Human Review"}
     after
