@@ -6,6 +6,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   alias SymphonyElixir.{
     Config,
     ControllerEvidence,
+    HandoffCertificate,
     IssueRequirements,
     KnowledgeLedger,
     PromptBuilder,
@@ -24,8 +25,33 @@ defmodule SymphonyElixir.DispatchPreflight do
   def prepare(workspace, issue) when is_binary(workspace) do
     with :ok <- ensure_dirs(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
-         {:ok, inspection} <- inspect_review(workspace, issue, requirements),
-         mode <- preflight_mode(workspace, requirements, inspection),
+         {:ok, inspection} <- inspect_review(workspace, issue, requirements) do
+      prepare_with_inspection(workspace, issue, requirements, inspection)
+    end
+  end
+
+  def prepare(_workspace, _issue), do: {:error, :invalid_workspace}
+
+  @spec prepare_review_delta_recovery(String.t(), Issue.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def prepare_review_delta_recovery(workspace, %Issue{} = issue, inspection)
+      when is_binary(workspace) and is_map(inspection) do
+    with :ok <- ensure_dirs(workspace),
+         {:ok, requirements} <- requirements_for(workspace, issue),
+         true <- review_delta_recovery?(workspace, issue, requirements, inspection) do
+      prepare_with_inspection(workspace, issue, requirements, inspection)
+    else
+      false -> {:error, :review_delta_recovery_not_authorized}
+      {:error, _reason} = error -> error
+      _ -> {:error, :review_delta_recovery_failed}
+    end
+  end
+
+  def prepare_review_delta_recovery(_workspace, _issue, _inspection),
+    do: {:error, :invalid_review_delta_recovery}
+
+  defp prepare_with_inspection(workspace, issue, requirements, inspection) do
+    with mode <- preflight_mode(workspace, issue, requirements, inspection),
          :ok <- maybe_switch_to_review_head(workspace, inspection, mode, requirements),
          {:ok, certification_base_sha} <-
            certification_base_sha(workspace, issue, requirements, inspection, mode) do
@@ -37,6 +63,7 @@ defmodule SymphonyElixir.DispatchPreflight do
           _ -> fresh_implementation_preflight(workspace, issue, requirements, inspection)
         end
         |> Map.put("certification_base_sha", certification_base_sha)
+        |> maybe_bind_review_delta_base(workspace, issue, requirements, inspection, mode)
         |> merge_policy_patches(workspace)
         |> merge_knowledge_ledger(workspace)
         |> bind_controller_identity(issue, requirements)
@@ -49,8 +76,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       {:ok, preflight}
     end
   end
-
-  def prepare(_workspace, _issue), do: {:error, :invalid_workspace}
 
   @spec read(String.t() | nil) :: {:ok, map()} | :none | {:error, term()}
   def read(workspace) when is_binary(workspace) do
@@ -312,12 +337,15 @@ defmodule SymphonyElixir.DispatchPreflight do
     review_feedback?(inspection) and review_feedback_for_requirements(inspection, requirements) != []
   end
 
-  defp preflight_mode(workspace, requirements, inspection) do
+  defp preflight_mode(workspace, issue, requirements, inspection) do
     cond do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
       scoped_review_feedback?(inspection, requirements) ->
+        "review_rework"
+
+      review_delta_recovery?(workspace, issue, requirements, inspection) ->
         "review_rework"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
@@ -339,6 +367,76 @@ defmodule SymphonyElixir.DispatchPreflight do
         "fresh_implementation"
     end
   end
+
+  defp review_delta_recovery?(
+         workspace,
+         issue,
+         %{
+           "runtime_contract_status" => "structured",
+           "integration_branch" => integration_branch
+         },
+         %{head_sha: review_head, head_ref: review_branch}
+       )
+       when is_binary(workspace) and is_binary(review_head) and review_head != "" and
+              is_binary(integration_branch) and integration_branch != "" and
+              is_binary(review_branch) and review_branch != "" do
+    issue = struct_issue(issue)
+
+    with %Issue{state: state} <- issue,
+         true <- normalize_state(state) == "rework",
+         true <- review_branch == integration_branch,
+         {:ok, signed_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
+         true <- signed_head != review_head,
+         {current_branch, 0} <- git_command(workspace, ["branch", "--show-current"]),
+         true <- String.trim(current_branch) == integration_branch,
+         {status, 0} <- git_command(workspace, ["status", "--short", "--branch"]),
+         true <- clean_pushed_tracking_status?(status),
+         {local_head, 0} <- git_command(workspace, ["rev-parse", "HEAD"]),
+         true <- String.trim(local_head) == review_head,
+         {_output, 0} <- git_command(workspace, ["merge-base", "--is-ancestor", signed_head, review_head]) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp review_delta_recovery?(_workspace, _issue, _requirements, _inspection), do: false
+
+  defp maybe_bind_review_delta_base(
+         preflight,
+         workspace,
+         issue,
+         requirements,
+         inspection,
+         "review_rework"
+       ) do
+    if not scoped_review_feedback?(inspection, requirements) do
+      case HandoffCertificate.latest_signed_head(struct_issue(issue), workspace) do
+        {:ok, signed_head} -> Map.put(preflight, "review_delta_base_head", signed_head)
+        _ -> preflight
+      end
+    else
+      preflight
+    end
+  end
+
+  defp maybe_bind_review_delta_base(preflight, _workspace, _issue, _requirements, _inspection, _mode),
+    do: preflight
+
+  defp normalize_state(value) when is_binary(value), do: value |> String.trim() |> String.downcase()
+  defp normalize_state(_value), do: ""
+
+  defp clean_pushed_tracking_status?(status) when is_binary(status) do
+    lines = String.split(status, "\n", trim: true)
+    branch_line = List.first(lines) || ""
+    dirty_lines = Enum.reject(lines, &String.starts_with?(&1, "##"))
+
+    dirty_lines == [] and
+      String.contains?(branch_line, "...") and
+      not String.contains?(branch_line, ["ahead", "behind", "diverged"])
+  end
+
+  defp clean_pushed_tracking_status?(_status), do: false
 
   defp handoff_recovery_checkpoint?(workspace) when is_binary(workspace) do
     checkpoint = PromptBuilder.workspace_recovery_checkpoint(workspace)

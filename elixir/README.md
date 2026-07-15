@@ -63,6 +63,14 @@ validations at the exact new head before issuing `handoff.ready`. Stale review
 preflight evidence and post-MIU commits in any other dispatch mode remain
 uncertified and block handoff.
 
+If a review-fix delta was pushed and received a clean current-head Codex review
+before the runtime restarted, Symphony may reconstruct `review_rework` from the
+latest signed same-issue handoff instead of starting a model worker. The signed
+handoff remains the immutable delta base; the reviewed PR head remains the
+proposed handoff head. The same all-commit path audit and exact-head validations
+run before a replacement `handoff.ready` certificate is issued. Missing,
+invalid, non-ancestor, cross-issue, or cross-contract evidence fails closed.
+
 Validation commands have a bounded `validation_timeout_ms` (default 15
 minutes, maximum 30 minutes). A failed validation fingerprint runs once;
 changed code may receive at most two product-fix cycles before operator

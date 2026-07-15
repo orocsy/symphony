@@ -486,7 +486,8 @@ defmodule SymphonyElixir.ValidationController do
           preflight["issue_revision"] != expected_revision ->
             {:error, :review_rework_dispatch_issue_revision_mismatch}
 
-          get_in(preflight, ["review", "head_sha"]) != certified_head_sha ->
+          (preflight["review_delta_base_head"] || get_in(preflight, ["review", "head_sha"])) !=
+              certified_head_sha ->
             {:error, :review_rework_dispatch_base_mismatch}
 
           true ->

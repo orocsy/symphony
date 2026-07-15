@@ -6346,7 +6346,7 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Review rework execution contract"
       assert prompt =~ "do not append `review-feedback-classified` as a first action"
       assert prompt =~ "classification alone is lifecycle context"
-      assert prompt =~ "request runtime handoff certification"
+      assert prompt =~ "request a fresh Codex review directly"
       assert prompt =~ "--type handoff.requested"
       assert prompt =~ "legacy issue with no Runtime Contract gate"
       refute prompt =~ "commit, push the same branch, and request fresh Codex review"
@@ -17579,6 +17579,171 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :not_ready = Orchestrator.handle_orchestration_review_pending_for_test(issue)
       refute File.exists?(Path.join(workspace, ".orocsy/delivery/state/handoff-ready.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestration review guard recertifies a clean reviewed delta without a worker" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-clean-reviewed-delta-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_states: ["Human Review"],
+        review_monitor_rework_state: "Rework"
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-clean-reviewed-delta",
+          identifier: "COD-273",
+          title: "Responsive design source",
+          description: "Certify an already-pushed review fix.",
+          state: "Rework",
+          branch_name: "orocsy/cod-273",
+          labels: []
+        })
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nInitial MIU.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Implement MIU"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      assert {:ok, _miu} =
+               SymphonyElixir.ValidationController.certify_miu(issue, workspace, "COD-273-MIU-1")
+
+      push_workspace_head_to_test_origin!(workspace)
+      issue_runtime_handoff_certificate!(workspace, issue)
+      prior_handoff_head = git_head!(workspace)
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nInitial MIU.\n\nReviewed correction.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Address review feedback"], cd: workspace, stderr_to_stdout: true)
+      push_workspace_head_to_test_origin!(workspace)
+      reviewed_head = git_head!(workspace)
+      refute reviewed_head == prior_handoff_head
+
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 61,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/61",
+                 "head" => %{"sha" => reviewed_head, "ref" => issue.branch_name}
+               }
+             ]}
+
+          decoded == "repos/acme/nutribuddy/pulls/61" ->
+            {:ok,
+             %{
+               "number" => 61,
+               "state" => "open",
+               "html_url" => "https://github.com/acme/nutribuddy/pull/61",
+               "head" => %{"sha" => reviewed_head, "ref" => issue.branch_name},
+               "base" => %{"ref" => "main"},
+               "mergeable" => true,
+               "mergeable_state" => "clean"
+             }}
+
+          decoded == "repos/acme/nutribuddy/commits/#{reviewed_head}" ->
+            {:ok, %{"commit" => %{"committer" => %{"date" => "2026-07-15T20:10:00Z"}}}}
+
+          decoded in [
+            "repos/acme/nutribuddy/pulls/61/comments",
+            "repos/acme/nutribuddy/pulls/61/reviews"
+          ] ->
+            {:ok, []}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/issues/61/comments?") ->
+            {:ok,
+             [
+               %{"body" => "@codex review", "created_at" => "2026-07-15T20:11:00Z"},
+               %{
+                 "body" => "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `#{String.slice(reviewed_head, 0, 10)}`",
+                 "created_at" => "2026-07-15T20:12:00Z",
+                 "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_api_post_runner, fn endpoint, fields ->
+        send(parent, {:unexpected_github_post, endpoint, fields})
+        {:ok, fields}
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => reviewed_head,
+                 "reviewThreads" => %{
+                   "nodes" => [],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_api_post_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
+      assert {:ok, %{"mode" => "review_rework"} = prepared} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert prepared["review_delta_base_head"] == prior_handoff_head
+
+      assert {:completed, handoff} =
+               Orchestrator.handle_orchestration_review_pending_for_test(issue)
+
+      assert handoff.head_sha == reviewed_head
+      assert handoff.target_state == "Human Review"
+      assert {:ok, certificate} = SymphonyElixir.HandoffCertificate.current(issue, workspace)
+      assert certificate["head_sha"] == reviewed_head
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               SymphonyElixir.DispatchPreflight.read_authoritative(workspace)
+
+      assert preflight["review_delta_base_head"] == prior_handoff_head
+      refute_receive {:unexpected_github_post, _endpoint, _fields}, 50
+      assert_receive {:memory_tracker_state_update, "issue-clean-reviewed-delta", "Human Review"}
     after
       File.rm_rf(test_root)
     end

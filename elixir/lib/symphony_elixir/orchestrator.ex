@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     DispatchPreflight,
     HandoffCertificate,
+    HandoffController,
     IssueRequirements,
     MergeController,
     ProgressController,
@@ -2022,16 +2023,36 @@ defmodule SymphonyElixir.Orchestrator do
         finish_clean_pushed_review_handoff(issue, candidate, inspection)
 
       :not_ready ->
+        reconcile_clean_review_delta(issue, candidate, inspection)
+
+      {:stale, reason} ->
         Logger.info(
-          "Orchestration review guard found a clean review without a handoff certificate; dispatching certification: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+          "Orchestration review guard found a stale handoff certificate; attempting runtime-owned review delta recertification: #{issue_context(issue)} branch=#{candidate.branch} reason=#{inspect(reason)}"
+        )
+
+        reconcile_clean_review_delta(issue, candidate, inspection)
+    end
+  end
+
+  defp reconcile_clean_review_delta(%Issue{} = issue, candidate, inspection) do
+    case HandoffController.reconcile_review_delta(issue, candidate.workspace, inspection) do
+      {:ok, _certificate} ->
+        finish_clean_pushed_review_handoff(issue, candidate, inspection)
+
+      :not_ready ->
+        Logger.info(
+          "Orchestration review guard found a clean review without a certifiable prior review handoff; dispatching certification: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
         )
 
         :not_ready
 
-      {:stale, reason} ->
-        Logger.info("Orchestration review guard found a stale handoff certificate; dispatching recertification: #{issue_context(issue)} branch=#{candidate.branch} reason=#{inspect(reason)}")
+      {:blocked, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, {:review_delta_reconciliation_blocked, reason})
+        {:blocked, reason}
 
-        :not_ready
+      {:error, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, {:review_delta_reconciliation_failed, reason})
+        {:blocked, reason}
     end
   end
 

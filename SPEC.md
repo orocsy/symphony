@@ -66,6 +66,14 @@ run the affected MIU validations and final validations at that exact head before
 issuing handoff evidence. Stale review dispatches and other post-MIU commits
 remain uncertified and MUST block handoff.
 
+When a current PR head already has a clean exact-head review but its most recent
+signed handoff names an ancestor, the runtime MAY reconstruct a signed
+review-rework preflight without a model worker. This recovery MUST preserve that
+signed handoff head as the review-delta base, require the current local and
+remote PR head to match, and apply the same all-commit path audit and affected
+MIU plus final validations. A clean review without a valid same-issue,
+same-branch, same-contract ancestor certificate MUST NOT authorize this path.
+
 ## 2. Goals and Non-Goals
 
 ### 2.1 Goals
