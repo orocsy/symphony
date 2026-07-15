@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ValidationControllerTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{HandoffController, Linear.Issue, ValidationController}
+  alias SymphonyElixir.{ControllerEvidence, HandoffController, Linear.Issue, RuntimeContract, ValidationController}
 
   test "certifies a clean micro commit after runtime-controlled validation" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
@@ -15,6 +15,108 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert length(certificate["validation_event_ids"]) == 1
 
       assert File.regular?(Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "certifies pushed review rework from the preserved dispatch baseline" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      base_sha = git_output!(workspace, ["rev-parse", "main"])
+      git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
+      git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+      {:ok, compiled} = RuntimeContract.compile(issue.description)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(
+          ControllerEvidence.sign(%{
+            "mode" => "review_rework",
+            "issue_id" => issue.id,
+            "issue" => issue.identifier,
+            "branch" => "orocsy/cod-700",
+            "contract_hash" => compiled.contract_hash,
+            "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+            "certification_base_sha" => base_sha
+          })
+        )
+      )
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["base_head_sha"] == base_sha
+      assert certificate["changed_paths"] == ["README.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "rejects a tampered dispatch certification baseline" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      base_sha = git_output!(workspace, ["rev-parse", "main"])
+      File.write!(Path.join(workspace, "SECRET.md"), "out of scope\n")
+      git!(workspace, ["add", "SECRET.md"])
+      git!(workspace, ["commit", "-m", "Out of scope checkpoint"])
+      hidden_sha = git_output!(workspace, ["rev-parse", "HEAD"])
+      commit_readme!(workspace, "Allowed suffix")
+      {:ok, compiled} = RuntimeContract.compile(issue.description)
+
+      preflight =
+        ControllerEvidence.sign(%{
+          "mode" => "review_rework",
+          "issue_id" => issue.id,
+          "issue" => issue.identifier,
+          "branch" => "orocsy/cod-700",
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+          "certification_base_sha" => base_sha
+        })
+        |> Map.put("certification_base_sha", hidden_sha)
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
+
+      assert {:error, {:invalid_dispatch_preflight, :invalid_controller_signature}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "fails closed when a signed certification baseline is not an ancestor" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      {:ok, compiled} = RuntimeContract.compile(issue.description)
+      missing_base_sha = String.duplicate("a", 40)
+      head_sha = git_output!(workspace, ["rev-parse", "HEAD"])
+
+      preflight =
+        ControllerEvidence.sign(%{
+          "mode" => "review_rework",
+          "issue_id" => issue.id,
+          "issue" => issue.identifier,
+          "branch" => "orocsy/cod-700",
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+          "certification_base_sha" => missing_base_sha
+        })
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
+
+      assert {:error, {:dispatch_certification_base_not_ancestor, ^missing_base_sha, ^head_sha}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
       File.rm_rf(workspace)
     end

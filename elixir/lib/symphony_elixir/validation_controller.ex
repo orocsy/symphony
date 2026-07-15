@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.ValidationController do
   @moduledoc """
-  Validates one micro-commit checkpoint and issues runtime-owned MIU evidence.
+  Validates one MIU commit-range checkpoint and issues runtime-owned evidence.
   """
 
-  alias SymphonyElixir.{ControllerEvidence, Linear.Issue, RuntimeContract, RuntimeRequest}
+  alias SymphonyElixir.{ControllerEvidence, DispatchPreflight, Linear.Issue, RuntimeContract, RuntimeRequest}
 
   @authority "symphony.runtime.validation-controller"
   @attempts_path ".orocsy/delivery/state/validation-attempts.jsonl"
@@ -250,7 +250,7 @@ defmodule SymphonyElixir.ValidationController do
 
     case miu_index do
       0 ->
-        initial_certification_base_sha(workspace, compiled, head_sha)
+        initial_certification_base_sha(issue, workspace, compiled, head_sha)
 
       index when is_integer(index) and index > 0 ->
         previous_miu_id = Enum.at(compiled.miu_ids, index - 1)
@@ -268,7 +268,20 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp initial_certification_base_sha(workspace, compiled, head_sha) do
+  defp initial_certification_base_sha(issue, workspace, compiled, head_sha) do
+    case dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
+      {:ok, base_sha} ->
+        {:ok, base_sha}
+
+      :none ->
+        integration_certification_base_sha(workspace, compiled, head_sha)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp integration_certification_base_sha(workspace, compiled, head_sha) do
     integration_ref = "refs/remotes/origin/#{compiled.contract["integration_branch"]}"
 
     case git(workspace, ["rev-parse", "--verify", integration_ref]) do
@@ -281,6 +294,53 @@ defmodule SymphonyElixir.ValidationController do
 
       {:error, _reason} ->
         base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
+    end
+  end
+
+  defp dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
+    case DispatchPreflight.read_authoritative(workspace) do
+      {:ok, preflight} ->
+        validate_dispatch_certification_base(issue, workspace, compiled, head_sha, preflight)
+
+      :none ->
+        :none
+
+      {:error, reason} ->
+        {:error, {:invalid_dispatch_preflight, reason}}
+    end
+  end
+
+  defp validate_dispatch_certification_base(issue, workspace, compiled, head_sha, preflight) do
+    expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
+
+    cond do
+      preflight["issue_id"] != issue.id ->
+        {:error, :dispatch_preflight_issue_id_mismatch}
+
+      preflight["issue"] != issue.identifier ->
+        {:error, :dispatch_preflight_issue_mismatch}
+
+      preflight["branch"] != compiled.contract["integration_branch"] ->
+        {:error, :dispatch_preflight_branch_mismatch}
+
+      preflight["contract_hash"] != compiled.contract_hash ->
+        {:error, :dispatch_preflight_contract_mismatch}
+
+      preflight["issue_revision"] != expected_revision ->
+        {:error, :dispatch_preflight_issue_revision_mismatch}
+
+      is_nil(preflight["certification_base_sha"]) ->
+        :none
+
+      not is_binary(preflight["certification_base_sha"]) or
+          preflight["certification_base_sha"] == "" ->
+        {:error, :invalid_dispatch_certification_base}
+
+      not git_ancestor?(workspace, preflight["certification_base_sha"], head_sha) ->
+        {:error, {:dispatch_certification_base_not_ancestor, preflight["certification_base_sha"], head_sha}}
+
+      true ->
+        {:ok, preflight["certification_base_sha"]}
     end
   end
 

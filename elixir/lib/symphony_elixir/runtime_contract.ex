@@ -75,6 +75,7 @@ defmodule SymphonyElixir.RuntimeContract do
       |> validate_ticket_type(contract)
       |> validate_branch(contract, "base_branch")
       |> validate_branch(contract, "integration_branch")
+      |> validate_certification_base_sha(contract)
       |> validate_string_list(contract, "dependencies")
       |> validate_optional_contract_scope(contract, "denied_scope")
       |> validate_mius(contract)
@@ -108,6 +109,21 @@ defmodule SymphonyElixir.RuntimeContract do
       errors
     else
       ["invalid_#{key}:#{inspect(value)}" | errors]
+    end
+  end
+
+  defp validate_certification_base_sha(errors, contract) do
+    case Map.get(contract, "certification_base_sha") do
+      nil ->
+        errors
+
+      sha when is_binary(sha) ->
+        if Regex.match?(~r/\A[0-9a-fA-F]{40,64}\z/, sha),
+          do: errors,
+          else: ["invalid_certification_base_sha" | errors]
+
+      _ ->
+        ["invalid_certification_base_sha" | errors]
     end
   end
 
@@ -297,10 +313,17 @@ defmodule SymphonyElixir.RuntimeContract do
     |> Map.put("mius", Enum.map(contract["mius"], &normalize_miu/1))
     |> Map.put("final_validations", Enum.map(contract["final_validations"], &String.trim/1))
     |> Map.put_new("validation_timeout_ms", @default_validation_timeout_ms)
+    |> normalize_certification_base_sha()
     |> Map.put("review", stringify_keys(contract["review"]))
     |> Map.put("merge", normalize_merge(Map.get(contract, "merge", %{})))
     |> Map.put_new("denied_scope", [])
   end
+
+  defp normalize_certification_base_sha(%{"certification_base_sha" => sha} = contract)
+       when is_binary(sha),
+       do: Map.put(contract, "certification_base_sha", String.downcase(sha))
+
+  defp normalize_certification_base_sha(contract), do: contract
 
   defp normalize_merge(merge) do
     merge
