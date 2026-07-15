@@ -6346,6 +6346,7 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "classification alone is lifecycle context"
       assert prompt =~ "request runtime handoff certification"
       assert prompt =~ "--type handoff.requested"
+      assert prompt =~ "legacy issue with no Runtime Contract gate"
       refute prompt =~ "commit, push the same branch, and request fresh Codex review"
       refute prompt =~ "You are an agent for this repository."
     after

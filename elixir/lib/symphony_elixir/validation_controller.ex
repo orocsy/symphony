@@ -201,7 +201,7 @@ defmodule SymphonyElixir.ValidationController do
   def validate_review_rework_delta(%Issue{} = issue, workspace, certified_head_sha)
       when is_binary(workspace) and is_binary(certified_head_sha) do
     with {:ok, compiled} <- structured_contract(issue),
-         :ok <- validate_review_rework_preflight(issue, workspace, compiled),
+         :ok <- validate_review_rework_preflight(issue, workspace, compiled, certified_head_sha),
          {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
          true <- branch == compiled.contract["integration_branch"] || {:error, :canonical_branch_mismatch},
          true <- clean_worktree?(workspace) || {:error, :dirty_worktree},
@@ -446,7 +446,7 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp validate_review_rework_preflight(issue, workspace, compiled) do
+  defp validate_review_rework_preflight(issue, workspace, compiled, certified_head_sha) do
     expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
 
     case DispatchPreflight.read_authoritative(workspace) do
@@ -466,6 +466,9 @@ defmodule SymphonyElixir.ValidationController do
 
           preflight["issue_revision"] != expected_revision ->
             {:error, :review_rework_dispatch_issue_revision_mismatch}
+
+          get_in(preflight, ["review", "head_sha"]) != certified_head_sha ->
+            {:error, :review_rework_dispatch_base_mismatch}
 
           true ->
             :ok

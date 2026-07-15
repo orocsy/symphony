@@ -1,7 +1,14 @@
 defmodule SymphonyElixir.ValidationControllerTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{ControllerEvidence, HandoffController, Linear.Issue, RuntimeContract, ValidationController}
+  alias SymphonyElixir.{
+    ControllerEvidence,
+    HandoffCertificate,
+    HandoffController,
+    Linear.Issue,
+    RuntimeContract,
+    ValidationController
+  }
 
   test "certifies a clean micro commit after runtime-controlled validation" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
@@ -896,6 +903,32 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "handoff rejects a stale review preflight after a newer signed handoff" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      write_review_rework_preflight!(workspace, issue)
+      commit_readme!(workspace, "First review fix")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+      assert {:ok, first_handoff} = HandoffController.process_requests(issue, workspace)
+
+      commit_readme!(workspace, "Unrelated later commit")
+      git!(workspace, ["push"])
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, :review_rework_dispatch_base_mismatch} =
+               HandoffController.process_requests(issue, workspace)
+
+      assert {:ok, signed_head} = HandoffCertificate.latest_signed_head(issue, workspace)
+      assert signed_head == first_handoff["head_sha"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   defp workspace_and_issue(test_output, opts \\ []) do
     workspace =
       Path.join(
@@ -1033,7 +1066,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
         "issue" => issue.identifier,
         "branch" => compiled.contract["integration_branch"],
         "contract_hash" => compiled.contract_hash,
-        "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
+        "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+        "review" => %{"head_sha" => git_output!(workspace, ["rev-parse", "HEAD"])}
       })
 
     File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))

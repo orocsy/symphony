@@ -73,7 +73,8 @@ defmodule SymphonyElixir.HandoffController do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          certificates <- ValidationController.certificates(workspace),
          :ok <- verify_miu_certificates(issue, workspace, compiled, head_sha, certificates),
-         {:ok, final_head_state} <- verify_final_head_certified(compiled, head_sha, certificates, workspace),
+         {:ok, final_head_state} <-
+           verify_final_head_certified(issue, compiled, head_sha, certificates, workspace),
          {:ok, final_events} <- validate_final_head(issue, workspace, final_head_state) do
       validation_event_ids =
         (Enum.flat_map(certificates, &Map.get(&1, "validation_event_ids", [])) ++
@@ -153,7 +154,7 @@ defmodule SymphonyElixir.HandoffController do
       git_ancestor?(workspace, base_head_sha, certificate_head_sha)
   end
 
-  defp verify_final_head_certified(compiled, head_sha, certificates, workspace) do
+  defp verify_final_head_certified(issue, compiled, head_sha, certificates, workspace) do
     last_miu_id = List.last(compiled.miu_ids)
 
     case Enum.find(certificates, &(&1["miu_id"] == last_miu_id)) do
@@ -162,8 +163,11 @@ defmodule SymphonyElixir.HandoffController do
 
       %{"head_sha" => certified_head} ->
         case DispatchPreflight.read_authoritative(workspace) do
-          {:ok, %{"mode" => "review_rework"}} ->
-            {:ok, {:review_rework_delta, certified_head}}
+          {:ok, %{"mode" => "review_rework"} = preflight} ->
+            with {:ok, review_base_head} <-
+                   review_rework_base_head(issue, workspace, certified_head, preflight) do
+              {:ok, {:review_rework_delta, review_base_head}}
+            end
 
           {:error, reason} ->
             {:error, {:invalid_review_rework_dispatch_preflight, reason}}
@@ -174,6 +178,26 @@ defmodule SymphonyElixir.HandoffController do
 
       _ ->
         {:error, {:missing_miu_certificate, last_miu_id}}
+    end
+  end
+
+  defp review_rework_base_head(issue, workspace, certified_miu_head, preflight) do
+    with {:ok, expected_base_head} <- latest_certified_review_base(issue, workspace, certified_miu_head),
+         review_base_head when is_binary(review_base_head) <- get_in(preflight, ["review", "head_sha"]),
+         true <- review_base_head == expected_base_head do
+      {:ok, review_base_head}
+    else
+      {:stale, reason} -> {:error, {:invalid_prior_handoff_certificate, reason}}
+      false -> {:error, :review_rework_dispatch_base_mismatch}
+      _ -> {:error, :review_rework_dispatch_base_missing}
+    end
+  end
+
+  defp latest_certified_review_base(issue, workspace, certified_miu_head) do
+    case HandoffCertificate.latest_signed_head(issue, workspace) do
+      {:ok, head_sha} -> {:ok, head_sha}
+      :not_ready -> {:ok, certified_miu_head}
+      {:stale, _reason} = stale -> stale
     end
   end
 

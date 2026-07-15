@@ -99,6 +99,27 @@ defmodule SymphonyElixir.HandoffCertificate do
 
   def current(_issue, _workspace), do: :not_ready
 
+  @spec latest_signed_head(Issue.t(), String.t()) :: {:ok, String.t()} | {:stale, atom()} | :not_ready
+  def latest_signed_head(%Issue{} = issue, workspace) when is_binary(workspace) do
+    path = Path.join(workspace, @certificate_path)
+
+    if File.regular?(path) do
+      with {:ok, certificate} <- read(path),
+           {:ok, compiled} <- structured_contract(issue),
+           :ok <- verify_static_fields(certificate, issue, compiled),
+           head_sha when is_binary(head_sha) and head_sha != "" <- certificate["head_sha"] do
+        {:ok, head_sha}
+      else
+        {:stale, reason} -> {:stale, reason}
+        _ -> {:stale, :certificate_unverifiable}
+      end
+    else
+      :not_ready
+    end
+  end
+
+  def latest_signed_head(_issue, _workspace), do: :not_ready
+
   @spec path() :: String.t()
   def path, do: @certificate_path
 
