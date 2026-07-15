@@ -672,7 +672,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp feedback_write_scope_paths(_summary), do: []
 
   defp scope_path_candidates(scope) when is_binary(scope) do
-    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./()\[\]@+*]+(?:/\*\*|/\*|\.[A-Za-z0-9]+)(?:[A-Za-z0-9_\-./()\[\]@+*]*)?)}
+    ~r{`([^`]+)`|(?:^|[\s,;:"'(])((?:\./)?[A-Za-z0-9_@+*\-][A-Za-z0-9_\-./()\[\]@+*]*(?:/\*\*|/\*|\.[A-Za-z0-9]+)(?:[A-Za-z0-9_\-./()\[\]@+*]*)?)}
     |> Regex.scan(scope)
     |> Enum.flat_map(fn captures ->
       captures
@@ -703,7 +703,31 @@ defmodule SymphonyElixir.DispatchPreflight do
     |> String.trim_trailing(".")
     |> String.trim_trailing(",")
     |> String.trim_trailing(";")
+    |> trim_unbalanced_trailing_parentheses()
     |> String.trim()
+  end
+
+  defp trim_unbalanced_trailing_parentheses(path) when is_binary(path) do
+    excess = count_char(path, ")") - count_char(path, "(")
+    trim_trailing_parentheses(path, excess)
+  end
+
+  defp trim_trailing_parentheses(path, excess) when excess > 0 do
+    if String.ends_with?(path, ")") do
+      path
+      |> binary_part(0, byte_size(path) - 1)
+      |> trim_trailing_parentheses(excess - 1)
+    else
+      path
+    end
+  end
+
+  defp trim_trailing_parentheses(path, _excess), do: path
+
+  defp count_char(value, char) do
+    value
+    |> String.graphemes()
+    |> Enum.count(&(&1 == char))
   end
 
   defp requirement_state(requirements) when is_map(requirements) do
@@ -2097,7 +2121,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp feedback_item_paths(_item), do: []
 
   defp feedback_body_paths(body) when is_binary(body) do
-    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    ~r{`([^`]+)`|(?:^|[\s,;:"'(])((?:\./)?[A-Za-z0-9_@+\-][A-Za-z0-9_\-./()\[\]@+]*\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
     |> Regex.scan(body)
     |> Enum.flat_map(fn captures ->
       captures

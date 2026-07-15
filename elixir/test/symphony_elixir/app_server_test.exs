@@ -5623,7 +5623,7 @@ defmodule SymphonyElixir.AppServerTest do
               "`src/features/swipe/SwipeExperience.tsx`"
             ],
             "shared_files" => [
-              "Read-only route context: src/app/(authenticated)/@modal/page.tsx only for the existing modal contract. Do not edit."
+              "Read-only route context: (src/app/(authenticated)/@modal/page.tsx) only for the existing modal contract. Do not edit."
             ]
           }
         })
