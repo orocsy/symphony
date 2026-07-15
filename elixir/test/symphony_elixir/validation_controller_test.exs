@@ -929,6 +929,30 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "handoff audits paths added and reverted within the review delta" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      write_review_rework_preflight!(workspace, issue)
+      File.write!(Path.join(workspace, "SECRET.md"), "temporary out-of-scope write\n")
+      git!(workspace, ["add", "SECRET.md"])
+      git!(workspace, ["commit", "-m", "Add temporary secret file"])
+      File.rm!(Path.join(workspace, "SECRET.md"))
+      commit_readme!(workspace, "Revert temporary file and fix review")
+      git!(workspace, ["add", "-u"])
+      git!(workspace, ["commit", "--amend", "--no-edit"])
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, {:undeclared_review_rework_write, ["SECRET.md"]}} =
+               HandoffController.process_requests(issue, workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   defp workspace_and_issue(test_output, opts \\ []) do
     workspace =
       Path.join(

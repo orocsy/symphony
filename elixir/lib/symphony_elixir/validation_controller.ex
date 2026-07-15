@@ -208,7 +208,7 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          true <- certified_head_sha != head_sha || {:error, :empty_review_rework_delta},
          true <- git_ancestor?(workspace, certified_head_sha, head_sha) || {:error, :review_rework_base_not_ancestor},
-         {:ok, changed_paths} <- changed_paths(workspace, certified_head_sha, head_sha),
+         {:ok, changed_paths} <- changed_paths_across_commits(workspace, certified_head_sha, head_sha),
          true <- changed_paths != [] || {:error, :empty_review_rework_delta},
          true <-
            not paths_denied?(changed_paths, compiled.denied_scope) ||
@@ -400,6 +400,24 @@ defmodule SymphonyElixir.ValidationController do
     case git(workspace, ["diff", "--name-only", "--no-renames", "#{base_head_sha}..#{head_sha}", "--"]) do
       {:ok, output} -> {:ok, String.split(output, "\n", trim: true)}
       error -> error
+    end
+  end
+
+  defp changed_paths_across_commits(workspace, base_head_sha, head_sha) do
+    case git(workspace, [
+           "log",
+           "--format=",
+           "--name-only",
+           "--no-renames",
+           "#{base_head_sha}..#{head_sha}",
+           "--"
+         ]) do
+      {:ok, output} ->
+        paths = output |> String.split("\n", trim: true) |> Enum.uniq() |> Enum.sort()
+        {:ok, paths}
+
+      error ->
+        error
     end
   end
 

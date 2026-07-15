@@ -57,8 +57,8 @@ When a signed dispatch preflight is specifically in `review_rework` mode, the
 runtime may certify a pushed delta after the last MIU checkpoint without
 rewriting the MIU history. The first review round must start at that MIU head;
 later rounds must start at the latest signed `handoff.ready` head. Every changed
-path must remain inside the union of the contract's MIU write scopes and outside
-denied scope. Symphony reruns the affected MIU validations plus final
+path touched by any commit in the delta must remain inside the union of the
+contract's MIU write scopes and outside denied scope. Symphony reruns the affected MIU validations plus final
 validations at the exact new head before issuing `handoff.ready`. Stale review
 preflight evidence and post-MIU commits in any other dispatch mode remain
 uncertified and block handoff.

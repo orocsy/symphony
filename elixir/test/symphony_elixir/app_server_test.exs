@@ -419,6 +419,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "do not post `@codex review` yourself"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "request final runtime certification"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "legacy issue with no Runtime Contract gate"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "structured-versus-legacy handoff rule"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Run only validation commands declared"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "create that exact file"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "alternate app roots"
