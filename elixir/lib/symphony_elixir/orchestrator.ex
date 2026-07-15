@@ -1461,7 +1461,7 @@ defmodule SymphonyElixir.Orchestrator do
             end
 
           clean_review_status == :confirmed ->
-            finish_clean_pushed_review_handoff(issue, candidate, inspection)
+            finish_or_certify_clean_pushed_review_handoff(issue, candidate, inspection)
 
           true ->
             reason = {:clean_codex_review_lookup_failed, clean_review_status}
@@ -2014,6 +2014,25 @@ defmodule SymphonyElixir.Orchestrator do
     - Validation evidence: #{Enum.join(evidence["validation_event_ids"] || [], ", ")}
     """
     |> String.trim()
+  end
+
+  defp finish_or_certify_clean_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
+    case HandoffCertificate.current(issue, candidate.workspace) do
+      {:ok, _certificate} ->
+        finish_clean_pushed_review_handoff(issue, candidate, inspection)
+
+      :not_ready ->
+        Logger.info(
+          "Orchestration review guard found a clean review without a handoff certificate; dispatching certification: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+        )
+
+        :not_ready
+
+      {:stale, reason} ->
+        Logger.info("Orchestration review guard found a stale handoff certificate; dispatching recertification: #{issue_context(issue)} branch=#{candidate.branch} reason=#{inspect(reason)}")
+
+        :not_ready
+    end
   end
 
   defp finish_clean_pushed_review_handoff(%Issue{} = issue, candidate, inspection) do
