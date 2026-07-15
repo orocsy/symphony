@@ -1278,7 +1278,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp read_only_search_command?(_command), do: false
 
   defp search_command_file_paths(command) when is_binary(command) do
-    ~r{(?:^|[\s"'])(\.?/?(?:src|app|apps|packages|lib|tests)/[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    ~r{(?:^|[\s"'])(\.?/?(?:src|app|apps|packages|lib|tests)/[A-Za-z0-9_\-./()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_permission_path(path)]
@@ -1290,7 +1290,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp search_command_file_paths(_command), do: []
 
   defp broad_search_directory_token?(command) when is_binary(command) do
-    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)/
+    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.()\[\]@+]+)*)/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_permission_path(path)]
@@ -1373,7 +1373,7 @@ defmodule SymphonyElixir.RescueSupervisor do
       |> String.downcase()
 
     Regex.match?(
-      ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:src|app|apps|packages|lib|tests|docs|design|skills)/[a-z0-9_\-./ \[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)},
+      ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:src|app|apps|packages|lib|tests|docs|design|skills)/[a-z0-9_\-./ ()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)},
       text
     ) and
       Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)

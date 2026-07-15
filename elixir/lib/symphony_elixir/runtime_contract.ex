@@ -351,7 +351,7 @@ defmodule SymphonyElixir.RuntimeContract do
       trimmed != "" and
       not String.starts_with?(trimmed, ["/", "~"]) and
       ".." not in segments and
-      Enum.all?(segments, &Regex.match?(~r/^[A-Za-z0-9._*-]+$/, &1))
+      Enum.all?(segments, &Regex.match?(~r/^[A-Za-z0-9._*()\[\]@+-]+$/, &1))
   end
 
   defp valid_scope_path?(_path), do: false

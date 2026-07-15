@@ -6901,7 +6901,7 @@ defmodule SymphonyElixir.CoreTest do
         Use the existing branch/PR only. Do not open a new PR. Do not merge.
 
         ## Write Scope
-        - tests/unit/swipe-experience-request.test.ts
+        - tests/app/(authenticated)/@modal/page.test.tsx
         - tests/integration/cards-route.test.ts
 
         ### MIU 1 - Frontend request contract
@@ -6932,7 +6932,7 @@ defmodule SymphonyElixir.CoreTest do
                %{
                  "body" => "**Assert first request carries the bounded guest draft**",
                  "commit_id" => "61f167a7821990d822f3d06f3d610c7c87a67431",
-                 "path" => "tests/unit/swipe-experience-request.test.ts",
+                 "path" => "tests/app/(authenticated)/@modal/page.test.tsx",
                  "line" => 42,
                  "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion-test"
                }
@@ -6954,7 +6954,7 @@ defmodule SymphonyElixir.CoreTest do
       assert preflight["checkpoint_event"] == "review-feedback-classified"
       assert get_in(preflight, ["review", "feedback_count"]) == 1
 
-      assert [%{"path" => "tests/unit/swipe-experience-request.test.ts"}] =
+      assert [%{"path" => "tests/app/(authenticated)/@modal/page.test.tsx"}] =
                get_in(preflight, ["review", "feedback"])
     after
       File.rm_rf(test_root)

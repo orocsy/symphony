@@ -1089,7 +1089,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp paths_from_requirement_text(_text), do: []
 
   defp paths_from_review_rework_text(text) when is_binary(text) do
-    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:tsx|ts|jsx|js|mjs|cjs|md|json|yml|yaml|css|scss|html|svg|png))}
+    ~r{`([^`]+)`|(?:^|[\s,;:"'(])((?:\./)?[A-Za-z0-9_.@+\-][A-Za-z0-9_\-./()\[\]@+]*\.(?:tsx|ts|jsx|js|mjs|cjs|md|json|yml|yaml|css|scss|html|svg|png))}
     |> Regex.scan(text)
     |> Enum.flat_map(fn captures ->
       captures
@@ -2633,7 +2633,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp broad_search_path_token?(_command), do: false
 
   defp search_path_tokens(command) when is_binary(command) do
-    ~r/(?:^|[\s"'])(\.?\/?(?:(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*|(?:opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|package\.json|tsconfig\.json|DESIGN\.md|README\.md|AGENTS\.md|vitest\.config\.[A-Za-z0-9]+)))(?=$|[\s"'])/
+    ~r/(?:^|[\s"'])(\.?\/?(?:(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.()\[\]@+]+)*|(?:opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|package\.json|tsconfig\.json|DESIGN\.md|README\.md|AGENTS\.md|vitest\.config\.[A-Za-z0-9]+)))(?=$|[\s"'])/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_requirement_path(path)]

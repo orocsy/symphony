@@ -737,10 +737,11 @@ defmodule SymphonyElixir.IssueRequirements do
     text = value |> string() |> strip_markdown_code()
 
     matches =
-      ~r/(?:^|[\s,;:])([A-Za-z0-9._*?{}\[\]-]+(?:\/[A-Za-z0-9._*?{}\[\]-]+)+|[A-Za-z0-9._*?{}\[\]-]+\.(?:tsx|jsx|json|yaml|scss|html|exs|mjs|cjs|yml|css|ts|js|md|ex))/
+      ~r/(?:^|[\s,;:(])([A-Za-z0-9._*?{}\[\]@+-][A-Za-z0-9._*?{}()\[\]@+-]*(?:\/[A-Za-z0-9._*?{}()\[\]@+-]+)+|[A-Za-z0-9._*?{}\[\]@+-][A-Za-z0-9._*?{}()\[\]@+-]*\.(?:tsx|jsx|json|yaml|scss|html|exs|mjs|cjs|yml|css|ts|js|md|ex))/
       |> Regex.scan(text, capture: :all_but_first)
       |> List.flatten()
       |> Enum.map(&String.trim_trailing(&1, ".,;:"))
+      |> Enum.map(&trim_unbalanced_trailing_parentheses/1)
       |> Enum.reject(&(&1 == ""))
 
     case matches do
@@ -755,6 +756,29 @@ defmodule SymphonyElixir.IssueRequirements do
     value
     |> String.replace("`", "")
     |> String.trim()
+  end
+
+  defp trim_unbalanced_trailing_parentheses(path) when is_binary(path) do
+    excess = count_char(path, ")") - count_char(path, "(")
+    trim_trailing_parentheses(path, excess)
+  end
+
+  defp trim_trailing_parentheses(path, excess) when excess > 0 do
+    if String.ends_with?(path, ")") do
+      path
+      |> binary_part(0, byte_size(path) - 1)
+      |> trim_trailing_parentheses(excess - 1)
+    else
+      path
+    end
+  end
+
+  defp trim_trailing_parentheses(path, _excess), do: path
+
+  defp count_char(value, char) do
+    value
+    |> String.graphemes()
+    |> Enum.count(&(&1 == char))
   end
 
   defp safe_identifier(identifier) do

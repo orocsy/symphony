@@ -349,7 +349,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   end
 
   defp paths_from_text(text) when is_binary(text) do
-    ~r{`([^`]+)`|((?:\./)?[A-Za-z0-9_\-./\[\]]+\.(?:tsx|ts|jsx|js|mjs|cjs|ex|exs|md|json|yml|yaml|css|scss|html|svg|png))}
+    ~r{`([^`]+)`|(?:^|[\s,;:"'(])((?:\./)?[A-Za-z0-9_.@+\-][A-Za-z0-9_\-./()\[\]@+]*\.(?:tsx|ts|jsx|js|mjs|cjs|ex|exs|md|json|yml|yaml|css|scss|html|svg|png))}
     |> Regex.scan(text)
     |> Enum.flat_map(fn captures ->
       captures
