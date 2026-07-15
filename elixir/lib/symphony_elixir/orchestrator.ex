@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     DispatchPreflight,
     HandoffCertificate,
+    HandoffController,
     IssueRequirements,
     MergeController,
     ProgressController,
@@ -1478,7 +1479,7 @@ defmodule SymphonyElixir.Orchestrator do
     with true <- review_pending_issue_state?(issue.state),
          {:ok, workspace} <- Workspace.path_for_issue(issue),
          true <- File.dir?(workspace),
-         {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
+         {:ok, status} <- pushed_tracking_status(workspace),
          true <- clean_pushed_tracking_status?(status),
          {:ok, branch} <- git_output(workspace, ["branch", "--show-current"]),
          branch <- String.trim(branch),
@@ -1505,7 +1506,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp review_pending_issue_state?(state) when is_binary(state) do
     state = normalize_issue_state(state)
-    state == "rework" or String.contains?(state, "review")
+
+    configured_rework_state =
+      Config.settings!().review_monitor.rework_state
+      |> normalize_issue_state()
+
+    state == configured_rework_state or String.contains?(state, "review")
   end
 
   defp review_pending_issue_state?(_state), do: false
@@ -1521,6 +1527,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp clean_pushed_tracking_status?(_status), do: false
+
+  defp pushed_tracking_status(workspace) when is_binary(workspace) do
+    git_output(workspace, [
+      "status",
+      "--short",
+      "--branch",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude).orocsy/"
+    ])
+  end
 
   defp handoff_branch_name?(branch) when is_binary(branch) do
     branch = String.trim(branch)
@@ -1640,7 +1658,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, classification} <- read_review_classification_handoff(workspace),
          true <- no_code_review_classification?(classification),
          true <- resolved_review_classification?(classification),
-         {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
+         {:ok, status} <- pushed_tracking_status(workspace),
          {:ok, dirty_status} <- git_output(workspace, ["status", "--porcelain=v1"]),
          true <- String.trim(dirty_status) == "",
          {:ok, branch} <- git_output(workspace, ["branch", "--show-current"]),
@@ -2022,16 +2040,50 @@ defmodule SymphonyElixir.Orchestrator do
         finish_clean_pushed_review_handoff(issue, candidate, inspection)
 
       :not_ready ->
+        reconcile_clean_review_delta(issue, candidate, inspection)
+
+      {:stale, reason} ->
         Logger.info(
-          "Orchestration review guard found a clean review without a handoff certificate; dispatching certification: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
+          "Orchestration review guard found a stale handoff certificate; attempting runtime-owned review delta recertification: #{issue_context(issue)} branch=#{candidate.branch} reason=#{inspect(reason)}"
+        )
+
+        reconcile_clean_review_delta(issue, candidate, inspection)
+    end
+  end
+
+  defp reconcile_clean_review_delta(%Issue{} = issue, candidate, inspection) do
+    case HandoffController.reconcile_review_delta(issue, candidate.workspace, inspection) do
+      {:ok, _certificate} ->
+        reinspect_reconciled_review_delta(issue, candidate)
+
+      :not_ready ->
+        Logger.info(
+          "Orchestration review guard found a clean review without a certifiable prior review handoff; dispatching certification: #{issue_context(issue)} branch=#{candidate.branch} pr=#{inspection.pr_url || inspection.pr_number || "unknown"}"
         )
 
         :not_ready
 
-      {:stale, reason} ->
-        Logger.info("Orchestration review guard found a stale handoff certificate; dispatching recertification: #{issue_context(issue)} branch=#{candidate.branch} reason=#{inspect(reason)}")
+      {:blocked, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, {:review_delta_reconciliation_blocked, reason})
+        {:blocked, reason}
 
-        :not_ready
+      {:error, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, {:review_delta_reconciliation_failed, reason})
+        {:blocked, reason}
+    end
+  end
+
+  defp reinspect_reconciled_review_delta(%Issue{} = issue, candidate) do
+    case inspect_pushed_review_handoff(issue, candidate) do
+      {:ok, refreshed_inspection} ->
+        complete_inspected_orchestration_review_pending(issue, candidate, refreshed_inspection)
+
+      {:blocked, reason} ->
+        {:blocked, reason}
+
+      {:error, reason} ->
+        park_pushed_handoff_blocker(issue, candidate, {:review_delta_reinspection_failed, reason})
+        {:blocked, reason}
     end
   end
 
@@ -2286,7 +2338,7 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, workspace} <- Workspace.path_for_issue(issue),
          true <- File.dir?(workspace),
          {:ok, certificate} <- HandoffCertificate.current(issue, workspace),
-         {:ok, status} <- git_output(workspace, ["status", "--short", "--branch"]),
+         {:ok, status} <- pushed_tracking_status(workspace),
          {:ok, branch} <- git_output(workspace, ["branch", "--show-current"]),
          {:ok, head_sha} <- git_output(workspace, ["rev-parse", "HEAD"]) do
       {:ok,

@@ -37,6 +37,25 @@ defmodule SymphonyElixir.HandoffController do
 
   def process_requests(_issue, _workspace), do: :none
 
+  @spec reconcile_review_delta(Issue.t(), String.t(), map()) ::
+          :not_ready | {:ok, map()} | {:error, term()} | {:blocked, term()}
+  def reconcile_review_delta(%Issue{} = issue, workspace, inspection)
+      when is_binary(workspace) and is_map(inspection) do
+    with {:ok, _prior_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
+         {:ok, %{"mode" => "review_rework"}} <-
+           DispatchPreflight.prepare_review_delta_recovery(workspace, issue, inspection) do
+      certify_handoff(issue, workspace)
+    else
+      :not_ready -> :not_ready
+      {:ok, %{"mode" => mode}} -> {:error, {:review_delta_reconciliation_mode_mismatch, mode}}
+      {:error, _reason} = error -> error
+      {:blocked, _reason} = blocked -> blocked
+      _ -> {:error, :review_delta_reconciliation_failed}
+    end
+  end
+
+  def reconcile_review_delta(_issue, _workspace, _inspection), do: :not_ready
+
   defp process_handoff_request(issue, workspace, contract_identity) do
     case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested", contract_identity) do
       {:ok, request} ->
@@ -183,13 +202,19 @@ defmodule SymphonyElixir.HandoffController do
 
   defp review_rework_base_head(issue, workspace, certified_miu_head, preflight) do
     with {:ok, expected_base_head} <- latest_certified_review_base(issue, workspace, certified_miu_head),
-         review_base_head when is_binary(review_base_head) <- get_in(preflight, ["review", "head_sha"]),
+         review_base_head when is_binary(review_base_head) <-
+           preflight["review_delta_base_head"] || get_in(preflight, ["review", "head_sha"]),
          true <- review_base_head == expected_base_head do
       {:ok, review_base_head}
     else
-      {:stale, reason} -> {:error, {:invalid_prior_handoff_certificate, reason}}
-      false -> {:error, :review_rework_dispatch_base_mismatch}
-      _ -> {:error, :review_rework_dispatch_base_missing}
+      {:stale, reason} ->
+        {:error, {:invalid_prior_handoff_certificate, reason}}
+
+      false ->
+        {:error, :review_rework_dispatch_base_mismatch}
+
+      _ ->
+        {:error, :review_rework_dispatch_base_missing}
     end
   end
 
