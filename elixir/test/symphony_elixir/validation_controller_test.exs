@@ -854,6 +854,48 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "handoff certifies an in-scope review rework delta at the current head" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      certified_head = certificate["head_sha"]
+
+      write_review_rework_preflight!(workspace, issue)
+      commit_readme!(workspace, "Address current-head review feedback")
+      review_head = git_output!(workspace, ["rev-parse", "HEAD"])
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:ok, handoff} = HandoffController.process_requests(issue, workspace)
+      assert handoff["head_sha"] == review_head
+      assert handoff["head_sha"] != certified_head
+      assert length(handoff["validation_event_ids"]) == 2
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "handoff rejects an out-of-scope review rework delta" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      write_review_rework_preflight!(workspace, issue)
+      File.write!(Path.join(workspace, "SECRET.md"), "out of scope\n")
+      git!(workspace, ["add", "SECRET.md"])
+      git!(workspace, ["commit", "-m", "Out-of-scope review change"])
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, {:undeclared_review_rework_write, ["SECRET.md"]}} =
+               HandoffController.process_requests(issue, workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   defp workspace_and_issue(test_output, opts \\ []) do
     workspace =
       Path.join(
@@ -977,6 +1019,24 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
     on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
     on_exit(fn -> restore_env(:handoff_pull_request_runner, previous_pr_runner) end)
+  end
+
+  defp write_review_rework_preflight!(workspace, issue) do
+    {:ok, compiled} = RuntimeContract.compile(issue.description)
+    state_dir = Path.join(workspace, ".orocsy/delivery/state")
+    File.mkdir_p!(state_dir)
+
+    preflight =
+      ControllerEvidence.sign(%{
+        "mode" => "review_rework",
+        "issue_id" => issue.id,
+        "issue" => issue.identifier,
+        "branch" => compiled.contract["integration_branch"],
+        "contract_hash" => compiled.contract_hash,
+        "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
+      })
+
+    File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

@@ -6344,6 +6344,9 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Review rework execution contract"
       assert prompt =~ "do not append `review-feedback-classified` as a first action"
       assert prompt =~ "classification alone is lifecycle context"
+      assert prompt =~ "request runtime handoff certification"
+      assert prompt =~ "--type handoff.requested"
+      refute prompt =~ "commit, push the same branch, and request fresh Codex review"
       refute prompt =~ "You are an agent for this repository."
     after
       File.rm_rf(test_root)

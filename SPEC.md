@@ -56,6 +56,14 @@ precedence over later contract input. Invalid signed evidence or unsigned legacy
 preflight without an explicit migration baseline MUST fail closed. Local
 workspace `HEAD` alone MUST NOT establish that baseline.
 
+A runtime MAY certify commits after the last MIU checkpoint only for an
+authoritative, signed review-rework dispatch bound to the same issue, branch,
+contract hash, and issue revision. The complete delta from the last certified
+MIU head to the proposed handoff head MUST stay inside declared MIU write scope
+and outside denied scope. The runtime MUST run the affected MIU validations and
+final validations at that exact head before issuing handoff evidence. Other
+post-MIU commits remain uncertified and MUST block handoff.
+
 ## 2. Goals and Non-Goals
 
 ### 2.1 Goals

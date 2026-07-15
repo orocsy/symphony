@@ -3,7 +3,14 @@ defmodule SymphonyElixir.HandoffController do
   Converts an explicit worker handoff request into a runtime-owned certificate.
   """
 
-  alias SymphonyElixir.{HandoffCertificate, Linear.Issue, RuntimeContract, RuntimeRequest, ValidationController}
+  alias SymphonyElixir.{
+    DispatchPreflight,
+    HandoffCertificate,
+    Linear.Issue,
+    RuntimeContract,
+    RuntimeRequest,
+    ValidationController
+  }
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -66,8 +73,8 @@ defmodule SymphonyElixir.HandoffController do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          certificates <- ValidationController.certificates(workspace),
          :ok <- verify_miu_certificates(issue, workspace, compiled, head_sha, certificates),
-         :ok <- verify_final_head_certified(compiled, head_sha, certificates),
-         {:ok, final_events} <- ValidationController.validate_final(issue, workspace) do
+         {:ok, final_head_state} <- verify_final_head_certified(compiled, head_sha, certificates, workspace),
+         {:ok, final_events} <- validate_final_head(issue, workspace, final_head_state) do
       validation_event_ids =
         (Enum.flat_map(certificates, &Map.get(&1, "validation_event_ids", [])) ++
            Enum.map(final_events, & &1["event_id"]))
@@ -146,14 +153,36 @@ defmodule SymphonyElixir.HandoffController do
       git_ancestor?(workspace, base_head_sha, certificate_head_sha)
   end
 
-  defp verify_final_head_certified(compiled, head_sha, certificates) do
+  defp verify_final_head_certified(compiled, head_sha, certificates, workspace) do
     last_miu_id = List.last(compiled.miu_ids)
 
     case Enum.find(certificates, &(&1["miu_id"] == last_miu_id)) do
-      %{"head_sha" => ^head_sha} -> :ok
-      %{"head_sha" => certified_head} -> {:error, {:uncertified_commits_after_last_miu, certified_head, head_sha}}
-      _ -> {:error, {:missing_miu_certificate, last_miu_id}}
+      %{"head_sha" => ^head_sha} ->
+        {:ok, :certified_miu_head}
+
+      %{"head_sha" => certified_head} ->
+        case DispatchPreflight.read_authoritative(workspace) do
+          {:ok, %{"mode" => "review_rework"}} ->
+            {:ok, {:review_rework_delta, certified_head}}
+
+          {:error, reason} ->
+            {:error, {:invalid_review_rework_dispatch_preflight, reason}}
+
+          _ ->
+            {:error, {:uncertified_commits_after_last_miu, certified_head, head_sha}}
+        end
+
+      _ ->
+        {:error, {:missing_miu_certificate, last_miu_id}}
     end
+  end
+
+  defp validate_final_head(issue, workspace, :certified_miu_head) do
+    ValidationController.validate_final(issue, workspace)
+  end
+
+  defp validate_final_head(issue, workspace, {:review_rework_delta, certified_head}) do
+    ValidationController.validate_review_rework_delta(issue, workspace, certified_head)
   end
 
   defp record_request_result(workspace, request, result) do

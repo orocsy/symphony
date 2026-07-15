@@ -765,7 +765,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp review_rework_first_task(_open_corrections) do
-    "Fix only the listed current-head review feedback on the existing PR branch, then run focused validation, push, and request a fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
+    "Fix only the listed current-head review feedback on the existing PR branch, run only the contract-declared focused validation, commit and push, then request runtime handoff certification. Symphony validates the review delta and requests the fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
   end
 
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
