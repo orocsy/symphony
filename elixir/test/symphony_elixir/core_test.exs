@@ -7875,6 +7875,106 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight delegates structured dirty test-spec validation to the controller" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-dirty-test-spec-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-274-dirty-preflight",
+        identifier: "COD-274",
+        title: "Test-Spec: safe-area app chrome",
+        state: "In Progress",
+        branch_name: "orocsy/cod-274-safe-area-tests",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: test-spec
+        base_branch: main
+        integration_branch: orocsy/cod-274-safe-area-tests
+        dependencies: []
+        mius:
+          - id: COD-274-MIU-1
+            write_scope:
+              - tests/e2e/app-shell-responsive.spec.ts
+            validations:
+              - pnpm exec playwright test tests/e2e/app-shell-responsive.spec.ts
+        final_validations:
+          - pnpm exec playwright test tests/e2e/app-shell-responsive.spec.ts
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      test_file = Path.join(workspace, "tests/e2e/app-shell-responsive.spec.ts")
+      File.write!(test_file, "test('base', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "."], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      File.write!(test_file, "test.fail('expected failure', () => {})\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["first_task"] =~ "miu.completion_requested"
+      assert preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
+      assert preflight["first_task"] =~ "validation controller"
+      assert preflight["first_task"] =~ "Do not edit production source"
+
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(inbox_dir, "correction_structured_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_structured_browser",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Browser validation failed in the worker sandbox"
+        })
+      )
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = corrected_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert corrected_preflight["first_task"] =~ "Browser validation failed in the worker sandbox"
+      assert corrected_preflight["first_task"] =~ "active Runtime Contract gate"
+      assert corrected_preflight["first_task"] =~ "exact runtime event supplied by the gate"
+      assert corrected_preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps clean in-progress implementation branches in fresh implementation mode" do
     test_root =
       Path.join(
@@ -13776,6 +13876,58 @@ defmodule SymphonyElixir.CoreTest do
       refute prompt =~ "Current paths: src/lib/session.ts"
       refute prompt =~ "Target shape: resolveGuestSession()"
       assert prompt =~ "Ticket MT-202"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "prompt builder assigns structured MIU validation to the runtime controller" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-validation-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+
+      issue = %Issue{
+        identifier: "MT-CONTROLLER-VALIDATION",
+        title: "Controller-owned validation",
+        state: "In Progress",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: test-spec
+        base_branch: main
+        integration_branch: orocsy/controller-validation
+        dependencies: []
+        mius:
+          - id: MT-CONTROLLER-VALIDATION-MIU-1
+            write_scope:
+              - tests/e2e/example.spec.ts
+            validations:
+              - pnpm exec playwright test tests/e2e/example.spec.ts
+        final_validations:
+          - pnpm exec playwright test tests/e2e/example.spec.ts
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Runtime Contract execution gate:")
+      assert prompt =~ "Do not run contract-declared validation inside the Codex worker sandbox"
+      assert prompt =~ "validation controller runs it authoritatively"
+      assert prompt =~ "miu.completion_requested"
     after
       File.rm_rf(workspace)
     end

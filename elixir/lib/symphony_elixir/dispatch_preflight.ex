@@ -964,6 +964,12 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
+  defp handoff_recovery_first_task([correction | _], %{"runtime_contract_status" => "structured"}) do
+    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker; Symphony's validation controller owns authoritative validation and correction evidence."
+  end
+
   defp handoff_recovery_first_task([correction | _], _requirements) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
@@ -971,10 +977,15 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_first_task(_open_corrections, requirements) when is_map(requirements) do
-    if test_spec_issue?(requirements) do
-      "Recover the existing dirty test-spec checkpoint: inspect git status and focused dirty diffs only. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
-    else
-      handoff_recovery_first_task([], nil)
+    cond do
+      test_spec_issue?(requirements) and requirements["runtime_contract_status"] == "structured" ->
+        "Recover the existing dirty test-spec checkpoint: inspect git status and the focused dirty diff only, finish the named expected-failure marker, create one clean local micro commit, append the exact miu.completion_requested event from the Runtime Contract execution gate, and stop. Do not run contract-declared validation inside the Codex worker; Symphony's validation controller runs it authoritatively outside the worker sandbox. Do not edit production source or broaden scope."
+
+      test_spec_issue?(requirements) ->
+        "Recover the existing dirty test-spec checkpoint: inspect git status and focused dirty diffs only. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
+
+      true ->
+        handoff_recovery_first_task([], nil)
     end
   end
 
