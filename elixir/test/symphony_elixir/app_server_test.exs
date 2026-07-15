@@ -568,6 +568,108 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server gives structured handoff recovery controller-owned validation instructions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-handoff-thread-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-STRUCTURED-HANDOFF")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-structured-handoff.trace")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "issue" => "MT-STRUCTURED-HANDOFF",
+          "requirements" => %{
+            "runtime_contract_status" => "structured",
+            "ticket_type" => "test-spec",
+            "write_scope" => ["tests/e2e/example.spec.ts"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-structured-handoff.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-structured-handoff"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-structured-handoff"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-structured-handoff",
+        identifier: "MT-STRUCTURED-HANDOFF",
+        title: "Structured handoff",
+        description: "Complete the remaining structured MIU",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-STRUCTURED-HANDOFF",
+        labels: []
+      }
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Runtime Contract execution gate: finish the MIU", issue)
+
+      thread_start =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      instructions = get_in(thread_start, ["params", "developerInstructions"])
+      assert instructions =~ "Symphony structured handoff-recovery micro-worker"
+      assert instructions =~ "replaces legacy worker-side validation"
+      assert instructions =~ "Do not run contract-declared validation inside the Codex worker sandbox"
+      assert instructions =~ "append the exact `miu.completion_requested` event"
+      assert instructions =~ "validation controller runs authoritative validation"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks broad search commands in fresh implementation mode" do
     test_root =
       Path.join(

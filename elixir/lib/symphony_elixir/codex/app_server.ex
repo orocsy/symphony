@@ -451,6 +451,16 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> Map.put("developerInstructions", fresh_implementation_developer_instructions())
         |> Map.put("config", fresh_implementation_thread_config())
 
+      {:ok,
+       %{
+         "mode" => "handoff_recovery",
+         "requirements" => %{"runtime_contract_status" => "structured"}
+       }} ->
+        params
+        |> Map.put("baseInstructions", fresh_implementation_base_instructions())
+        |> Map.put("developerInstructions", structured_handoff_recovery_developer_instructions())
+        |> Map.put("config", fresh_implementation_thread_config())
+
       {:ok, %{"mode" => "integration_check"}} ->
         params
         |> Map.put("baseInstructions", integration_check_base_instructions())
@@ -609,6 +619,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
     In the first turn, complete the active structured-contract gate or the legacy scoped implementation checkpoint, or stop with a concrete blocker.
+    Never merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp structured_handoff_recovery_developer_instructions do
+    """
+    Symphony structured handoff-recovery micro-worker.
+
+    The user prompt's `Runtime Contract execution gate` is authoritative and replaces legacy worker-side validation and handoff instructions.
+    Inspect only `git status --short --branch`, the focused dirty diff, the active issue brief, and files named by the remaining MIU.
+    Finish only that MIU inside its declared write scope. Do not run contract-declared validation inside the Codex worker sandbox and do not recreate a browser or environment correction solely because worker-side validation is unavailable.
+    Create one clean local micro commit, append the exact `miu.completion_requested` event supplied by the execution gate, and stop without pushing, requesting GitHub review, or changing Linear state.
+    Symphony's validation controller runs authoritative validation after the request. If it rejects the MIU, a later bounded recovery turn receives the exact validation evidence.
+    Do not load skills, plugins, apps, MCP tools, prior session logs, historical tickets, or broad project context. Do not broaden read or write scope.
     Never merge automatically.
     """
     |> String.trim()
