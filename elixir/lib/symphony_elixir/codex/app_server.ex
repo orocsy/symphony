@@ -1089,7 +1089,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp paths_from_requirement_text(_text), do: []
 
   defp paths_from_review_rework_text(text) when is_binary(text) do
-    ~r{`([^`]+)`|(?:^|[\s,;:"'(])((?:\./)?[A-Za-z0-9_@+\-][A-Za-z0-9_\-./()\[\]@+]*\.(?:tsx|ts|jsx|js|mjs|cjs|md|json|yml|yaml|css|scss|html|svg|png))}
+    ~r{`([^`]+)`|(?:^|[\s,;:"'(])((?:\./)?[A-Za-z0-9_.@+\-][A-Za-z0-9_\-./()\[\]@+]*\.(?:tsx|ts|jsx|js|mjs|cjs|md|json|yml|yaml|css|scss|html|svg|png))}
     |> Regex.scan(text)
     |> Enum.flat_map(fn captures ->
       captures
