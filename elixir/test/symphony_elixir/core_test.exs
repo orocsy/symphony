@@ -6424,6 +6424,12 @@ defmodule SymphonyElixir.CoreTest do
       first_head = String.duplicate("a", 40)
       assert first_preflight["certification_base_sha"] == first_head
 
+      preflight_path =
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+
+      legacy_preflight = Map.delete(first_preflight, "certification_base_sha")
+      File.write!(preflight_path, Jason.encode!(legacy_preflight))
+
       Agent.update(review_head, fn _ -> String.duplicate("b", 40) end)
 
       assert {:ok, second_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
