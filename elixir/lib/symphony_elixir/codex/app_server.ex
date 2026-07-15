@@ -628,12 +628,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     """
     Symphony structured handoff-recovery micro-worker.
 
-    The user prompt's `Runtime Contract execution gate` is authoritative and replaces legacy worker-side validation and handoff instructions.
-    Inspect only `git status --short --branch`, the focused dirty diff, the active issue brief, and files named by the remaining MIU.
-    Finish only that MIU inside its declared write scope. Do not run contract-declared validation inside the Codex worker sandbox and do not recreate a browser or environment correction solely because worker-side validation is unavailable.
-    Create one clean local micro commit, append the exact `miu.completion_requested` event supplied by the execution gate, and stop without pushing, requesting GitHub review, or changing Linear state.
-    Symphony's validation controller runs authoritative validation after the request. If it rejects the MIU, a later bounded recovery turn receives the exact validation evidence.
+    The user prompt's active `Runtime Contract execution gate` or `Runtime Contract final handoff gate` is authoritative and replaces legacy worker-side validation and handoff instructions.
+    Inspect only `git status --short --branch`, the focused dirty diff, the active issue brief, and files named by the active gate.
+    For an execution gate, finish only the named MIU inside its declared write scope, create one clean local micro commit, append the exact `miu.completion_requested` event supplied by the gate, and stop without pushing.
+    For a final handoff gate, do not create another MIU commit: push the canonical branch, verify upstream equality, ensure its PR exists, append the exact `handoff.requested` event supplied by the gate, and stop.
+    Do not run contract-declared validation inside the Codex worker sandbox and do not recreate a browser or environment correction solely because worker-side validation is unavailable.
+    Symphony's validation controller runs authoritative validation after an MIU request, writes exact failure evidence into an Orocsy correction, and resolves matching MIU validation corrections after successful certification.
     Do not load skills, plugins, apps, MCP tools, prior session logs, historical tickets, or broad project context. Do not broaden read or write scope.
+    Do not request GitHub review or change Linear state yourself.
     Never merge automatically.
     """
     |> String.trim()
@@ -703,6 +705,13 @@ defmodule SymphonyElixir.Codex.AppServer do
       "fresh_implementation" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
 
+      "handoff_recovery" ->
+        if structured_handoff_recovery?(workspace) do
+          Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
+        else
+          patterns
+        end
+
       "integration_check" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
 
@@ -712,6 +721,20 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
+
+  defp structured_handoff_recovery?(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok,
+       %{
+         "mode" => "handoff_recovery",
+         "requirements" => %{"runtime_contract_status" => "structured"}
+       }} ->
+        true
+
+      _ ->
+        false
+    end
+  end
 
   defp review_rework_configured_forbidden_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case DispatchPreflight.read(workspace) do

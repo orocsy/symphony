@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ValidationController do
   Validates one MIU commit-range checkpoint and issues runtime-owned evidence.
   """
 
-  alias SymphonyElixir.{ControllerEvidence, DispatchPreflight, Linear.Issue, RuntimeContract, RuntimeRequest}
+  alias SymphonyElixir.{ControllerEvidence, DispatchPreflight, Linear.Issue, RuntimeContract, RuntimeRequest, Workspace}
 
   @authority "symphony.runtime.validation-controller"
   @attempts_path ".orocsy/delivery/state/validation-attempts.jsonl"
@@ -59,7 +59,11 @@ defmodule SymphonyElixir.ValidationController do
       end
 
     :ok = record_request_result(workspace, request, result)
-    result
+
+    case reconcile_runtime_corrections(issue, workspace, miu_id, result) do
+      :ok -> result
+      {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
+    end
   end
 
   defp process_named_miu_request(_issue, workspace, request, _miu_id) do
@@ -788,6 +792,141 @@ defmodule SymphonyElixir.ValidationController do
       end
 
     RuntimeRequest.mark_processed(workspace, request, status, attributes)
+  end
+
+  @spec reconcile_runtime_corrections(Issue.t(), String.t(), String.t(), term()) :: :ok | {:error, term()}
+  def reconcile_runtime_corrections(_issue, workspace, miu_id, {:ok, certificate}) do
+    correction_ids =
+      workspace
+      |> Workspace.open_blocking_corrections_in_workspace()
+      |> Enum.filter(&validation_correction_for_miu?(&1, miu_id))
+      |> Enum.map(& &1["correction_id"])
+      |> Enum.filter(&is_binary/1)
+
+    if correction_ids == [] do
+      :ok
+    else
+      Workspace.resolve_blocking_corrections_by_id_in_workspace(
+        workspace,
+        correction_ids,
+        "Runtime controller validation passed for #{miu_id} at #{certificate["head_sha"]}; the matching validation correction is resolved."
+      )
+    end
+  end
+
+  def reconcile_runtime_corrections(
+        issue,
+        workspace,
+        miu_id,
+        {:error, {:validation_failed, event}} = result
+      )
+      when is_map(event) do
+    head_sha = git_value(workspace, ["rev-parse", "HEAD"])
+
+    if existing_controller_validation_correction?(workspace, miu_id, head_sha) do
+      :ok
+    else
+      attrs = validation_correction_attrs(workspace, miu_id, head_sha, result)
+
+      case Workspace.create_correction_in_workspace(workspace, issue, attrs) do
+        {:ok, _correction} -> :ok
+        {:error, reason} -> {:error, {:validation_correction_write_failed, reason}}
+      end
+    end
+  end
+
+  def reconcile_runtime_corrections(_issue, _workspace, _miu_id, _result), do: :ok
+
+  defp validation_correction_attrs(workspace, miu_id, head_sha, {:error, {:validation_failed, event}})
+       when is_map(event) do
+    %{
+      source: @authority,
+      source_status: "failed",
+      summary: "#{miu_id} authoritative validation failed",
+      findings:
+        [
+          "Command: #{event["command"]}",
+          "Reason: #{event["reason_class"]}; exit code: #{event["exit_code"]}",
+          validation_output_finding(workspace, event)
+        ]
+        |> Enum.reject(&is_nil/1),
+      required_corrections: [
+        "Use the supplied command output to make the smallest in-scope fix, create a new micro commit, and request #{miu_id} certification again. Do not rerun the controller-owned validation inside the Codex worker."
+      ],
+      next_action: "retry",
+      guard: %{
+        "miu_id" => miu_id,
+        "head_sha" => head_sha,
+        "validation_event_id" => event["event_id"],
+        "bounded_log_path" => event["bounded_log_path"]
+      }
+    }
+  end
+
+  defp validation_correction_attrs(_workspace, miu_id, head_sha, result) do
+    %{
+      source: @authority,
+      source_status: "blocked",
+      summary: "#{miu_id} runtime certification did not complete",
+      findings: ["Controller result: #{inspect(result)}"],
+      required_corrections: [
+        "Resolve the exact controller result within the declared MIU scope, create a new micro commit when code changes are required, and request certification again."
+      ],
+      next_action: "retry",
+      guard: %{"miu_id" => miu_id, "head_sha" => head_sha}
+    }
+  end
+
+  defp validation_output_finding(workspace, %{"bounded_log_path" => relative_path})
+       when is_binary(relative_path) do
+    case workspace |> Path.join(relative_path) |> File.read() do
+      {:ok, output} -> "Validation output:\n#{truncate(output, 4_000)}"
+      _ -> "Validation log: #{relative_path}"
+    end
+  end
+
+  defp validation_output_finding(_workspace, _event), do: nil
+
+  defp existing_controller_validation_correction?(workspace, miu_id, head_sha) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> Enum.any?(fn correction ->
+      correction["source"] == @authority and
+        get_in(correction, ["guard", "miu_id"]) == miu_id and
+        get_in(correction, ["guard", "head_sha"]) == head_sha
+    end)
+  end
+
+  defp validation_correction_for_miu?(correction, miu_id) when is_map(correction) do
+    guard_miu_id = get_in(correction, ["guard", "miu_id"])
+    source = correction["source"] || ""
+    validation_source? = source == @authority or String.contains?(String.downcase(source), "validation")
+
+    text =
+      [
+        correction["source"],
+        correction["summary"],
+        correction["findings"],
+        correction["required_corrections"]
+      ]
+      |> List.flatten()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join(" ")
+      |> String.downcase()
+
+    validation_source? and
+      (guard_miu_id == miu_id or
+         (String.contains?(text, String.downcase(miu_id)) and
+            String.contains?(text, ["validation", "playwright", "vitest", "test"])))
+  end
+
+  defp validation_correction_for_miu?(_correction, _miu_id), do: false
+
+  defp git_value(workspace, args) do
+    case git(workspace, args) do
+      {:ok, value} -> value
+      _ -> "unknown"
+    end
   end
 
   defp resolve_executable(executable, workspace) do

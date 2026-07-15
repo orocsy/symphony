@@ -61,7 +61,11 @@ defmodule SymphonyElixir.HandoffController do
       {:ok, request} ->
         result = certify_handoff(issue, workspace)
         :ok = record_request_result(workspace, request, result)
-        result
+
+        case ValidationController.reconcile_runtime_corrections(issue, workspace, "__final__", result) do
+          :ok -> result
+          {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
+        end
 
       {:stale, request, reason} ->
         :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})

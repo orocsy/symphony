@@ -663,9 +663,40 @@ defmodule SymphonyElixir.AppServerTest do
       assert instructions =~ "replaces legacy worker-side validation"
       assert instructions =~ "Do not run contract-declared validation inside the Codex worker sandbox"
       assert instructions =~ "append the exact `miu.completion_requested` event"
+      assert instructions =~ "append the exact `handoff.requested` event"
       assert instructions =~ "validation controller runs authoritative validation"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server applies scoped command guards to structured handoff recovery" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-handoff-command-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      assert {:error, _command, pattern} =
+               AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "header" src))
+
+      assert pattern =~ "rg"
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
+    after
       File.rm_rf(test_root)
     end
   end

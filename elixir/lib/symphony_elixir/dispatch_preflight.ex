@@ -935,6 +935,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     requirements = add_review_scope_bundle_entries(requirements, if(test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])))
     open_corrections = open_correction_summaries(workspace)
     correction_active? = open_corrections != []
+    structured_contract? = requirements["runtime_contract_status"] == "structured"
     feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
@@ -945,7 +946,11 @@ defmodule SymphonyElixir.DispatchPreflight do
       "state" => issue_value(issue, :state),
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
-      "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu"),
+      "checkpoint_event" =>
+        if(structured_contract?,
+          do: "runtime-contract-gate",
+          else: if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu")
+        ),
       "first_task" => handoff_recovery_first_task(open_corrections, requirements),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
@@ -967,7 +972,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_first_task([correction | _], %{"runtime_contract_status" => "structured"}) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
-    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker; Symphony's validation controller owns authoritative validation and correction evidence."
+    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
   end
 
   defp handoff_recovery_first_task([correction | _], _requirements) do
@@ -1302,33 +1307,58 @@ defmodule SymphonyElixir.DispatchPreflight do
     open_corrections = preflight["open_corrections"] || []
     correction_active? = open_corrections != []
 
-    """
-    Runtime dispatch preflight:
+    if requirements["runtime_contract_status"] == "structured" do
+      """
+      Runtime dispatch preflight:
 
-    - Mode: handoff recovery
-    - Preflight file: `#{@preflight_path}`
-    - Branch: `#{preflight["branch"] || "unknown"}`
-    - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
-    - Reviewed head: `#{short_sha(review["head_sha"])}`
-    - Worker-required checkpoint: #{handoff_recovery_checkpoint_guidance(preflight["checkpoint_event"], correction_active?)}
-    - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
-    - First task: #{preflight["first_task"]}
-    - Open Orocsy corrections: #{format_corrections(open_corrections)}
-    - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
-    - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
-    - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
-    - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
+      - Mode: structured handoff recovery
+      - Preflight file: `#{@preflight_path}`
+      - Branch: `#{preflight["branch"] || "unknown"}`
+      - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
+      - Worker-required checkpoint: follow the active Runtime Contract gate and append only its exact event (`miu.completion_requested` for a remaining MIU or `handoff.requested` after all MIUs are certified).
+      - Runtime preflight is not worker progress and is not proof that certification, push, or review handoff is complete.
+      - First task: #{preflight["first_task"]}
+      - Open Orocsy corrections: #{format_corrections(open_corrections)}
+      - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
 
-    Handoff recovery limits:
-    - If an open Orocsy correction is listed above, it overrides any dirty validated checkpoint. Start from the exact file path named in the correction, and do not commit, push, request review, or use older validation evidence until the correction is fixed or explicitly blocked.
-    - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
-    - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
-    - If the focused diff is complete and the dirty handoff checkpoint already lists current passed validation/gate evidence for those dirty files, do not rerun the same validation command; use the recorded evidence, then commit, push the current branch, and request/update Codex review.
-    - If validation evidence is missing, stale, or the focused diff changed after evidence was recorded, run the smallest validation for the dirty files before committing.
-    - If focused validation fails and names exact in-scope files, assertions, missing columns, missing exports, or required contract symbols, make that smallest in-scope fix first, rerun the same focused validation, then continue handoff.
-    - Record an Orocsy correction and stop only when validation lacks an actionable in-scope target, a required dependency/credential is missing, permissions block the command, or the needed edit is outside the issue write scope.
-    """
-    |> String.trim()
+      Structured recovery limits:
+      - The Runtime Contract execution/final handoff gate prepended above is authoritative. Do not substitute `gate.post-miu`, `technical-miu-trace`, or a worker-created validation event.
+      - For an execution gate, inspect only the focused dirty diff and files named by the remaining MIU, complete that MIU, create its micro commit, append `miu.completion_requested`, and stop without pushing.
+      - For a final handoff gate, do not create another MIU commit. Push the canonical branch, verify upstream equality, ensure the PR exists, append `handoff.requested`, and stop.
+      - Do not run contract-declared validation inside the Codex worker. The validation controller runs it after the runtime request and writes exact failure evidence into an Orocsy correction when a fix is needed.
+      - When a matching MIU validation correction is open, use its supplied command output to make the smallest in-scope fix. Do not manually resolve it; successful controller certification resolves it.
+      - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
+      """
+      |> String.trim()
+    else
+      """
+      Runtime dispatch preflight:
+
+      - Mode: handoff recovery
+      - Preflight file: `#{@preflight_path}`
+      - Branch: `#{preflight["branch"] || "unknown"}`
+      - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
+      - Reviewed head: `#{short_sha(review["head_sha"])}`
+      - Worker-required checkpoint: #{handoff_recovery_checkpoint_guidance(preflight["checkpoint_event"], correction_active?)}
+      - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
+      - First task: #{preflight["first_task"]}
+      - Open Orocsy corrections: #{format_corrections(open_corrections)}
+      - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
+      - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
+      - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
+      - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
+
+      Handoff recovery limits:
+      - If an open Orocsy correction is listed above, it overrides any dirty validated checkpoint. Start from the exact file path named in the correction, and do not commit, push, request review, or use older validation evidence until the correction is fixed or explicitly blocked.
+      - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
+      - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
+      - If the focused diff is complete and the dirty handoff checkpoint already lists current passed validation/gate evidence for those dirty files, do not rerun the same validation command; use the recorded evidence, then commit, push the current branch, and request/update Codex review.
+      - If validation evidence is missing, stale, or the focused diff changed after evidence was recorded, run the smallest validation for the dirty files before committing.
+      - If focused validation fails and names exact in-scope files, assertions, missing columns, missing exports, or required contract symbols, make that smallest in-scope fix first, rerun the same focused validation, then continue handoff.
+      - Record an Orocsy correction and stop only when validation lacks an actionable in-scope target, a required dependency/credential is missing, permissions block the command, or the needed edit is outside the issue write scope.
+      """
+      |> String.trim()
+    end
   end
 
   defp handoff_recovery_checkpoint_guidance(checkpoint_event, true) do

@@ -7945,10 +7945,17 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
+      assert preflight["checkpoint_event"] == "runtime-contract-gate"
       assert preflight["first_task"] =~ "miu.completion_requested"
       assert preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
       assert preflight["first_task"] =~ "validation controller"
       assert preflight["first_task"] =~ "Do not edit production source"
+
+      prompt_context = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+      assert prompt_context =~ "append only its exact event"
+      assert prompt_context =~ "miu.completion_requested"
+      assert prompt_context =~ "handoff.requested"
+      refute prompt_context =~ "focused validation such as `gate.post-miu`"
 
       inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       File.mkdir_p!(inbox_dir)
@@ -7966,6 +7973,7 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, %{"mode" => "handoff_recovery"} = corrected_preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
+      assert corrected_preflight["checkpoint_event"] == "runtime-contract-gate"
       assert corrected_preflight["first_task"] =~ "Browser validation failed in the worker sandbox"
       assert corrected_preflight["first_task"] =~ "active Runtime Contract gate"
       assert corrected_preflight["first_task"] =~ "exact runtime event supplied by the gate"

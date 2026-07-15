@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.ValidationControllerTest do
-  use ExUnit.Case
+  use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.{
     ControllerEvidence,
@@ -7,7 +7,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
     HandoffController,
     Linear.Issue,
     RuntimeContract,
-    ValidationController
+    ValidationController,
+    Workspace
   }
 
   test "certifies a clean micro commit after runtime-controlled validation" do
@@ -380,6 +381,140 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert handoff["event"] == "handoff.ready"
       assert handoff["completed_mius"] == ["COD-700-MIU-1"]
       assert length(handoff["validation_event_ids"]) == 2
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "failed controller validation creates an actionable MIU correction" do
+    {workspace, issue} = workspace_and_issue("1 test, 1 failure")
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      append_event!(workspace, issue, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "miu_id" => "COD-700-MIU-1"
+      })
+
+      assert {:error, {:validation_failed, event}} =
+               ValidationController.process_requests(issue, workspace)
+
+      assert event["reason_class"] == "tests_failed"
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.validation-controller"
+      assert correction["summary"] == "COD-700-MIU-1 authoritative validation failed"
+      assert get_in(correction, ["guard", "miu_id"]) == "COD-700-MIU-1"
+      assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
+      assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "smallest in-scope fix"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "reports a controller correction write failure instead of discarding it" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:error, {:validation_correction_write_failed, {:workspace_outside_root, _, _}}} =
+               ValidationController.reconcile_runtime_corrections(
+                 issue,
+                 workspace,
+                 "COD-700-MIU-1",
+                 {:error,
+                  {:validation_failed,
+                   %{
+                     "event_id" => "validation-test",
+                     "command" => "./fake-test",
+                     "reason_class" => "tests_failed",
+                     "exit_code" => 1
+                   }}}
+               )
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "successful controller certification resolves matching MIU validation corrections" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      assert {:ok, correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "worker-validation",
+                 source_status: "blocked",
+                 summary: "COD-700-MIU-1 Playwright validation cannot launch in the worker sandbox",
+                 findings: ["Command: pnpm exec playwright test tests/e2e/example.spec.ts"],
+                 required_corrections: ["Let the runtime controller validate COD-700-MIU-1"],
+                 next_action: "retry"
+               })
+
+      assert {:ok, unrelated_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "github-review",
+                 source_status: "failed",
+                 summary: "COD-700-MIU-1 test coverage misses an unrelated product requirement",
+                 findings: ["A current-head review thread remains actionable"],
+                 required_corrections: ["Address the product review finding separately"],
+                 next_action: "retry"
+               })
+
+      append_event!(workspace, issue, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "miu_id" => "COD-700-MIU-1"
+      })
+
+      assert {:ok, certificate} = ValidationController.process_requests(issue, workspace)
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+
+      assert [open_correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert open_correction["correction_id"] == unrelated_correction["correction_id"]
+
+      resolved =
+        workspace
+        |> Path.join(get_in(correction, ["artifacts", "json"]))
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert resolved["status"] == "resolved"
+      assert resolved["resolution_summary"] =~ "Runtime controller validation passed"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "failed final controller validation creates an actionable handoff correction" do
+    script_body = """
+    #!/bin/sh
+    mkdir -p .orocsy
+    if [ -f .orocsy/final-validation ]; then
+      echo '1 test, 1 failure'
+    else
+      touch .orocsy/final-validation
+      echo '3 tests, 0 failures'
+    fi
+    """
+
+    {workspace, issue} = workspace_and_issue("unused", script_body: script_body)
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, {:validation_failed, event}} =
+               HandoffController.process_requests(issue, workspace)
+
+      assert event["miu_id"] == "__final__"
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert get_in(correction, ["guard", "miu_id"]) == "__final__"
+      assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
     after
       File.rm_rf(workspace)
     end
@@ -1034,6 +1169,10 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue}
   end
 
+  defp allow_workspace_corrections!(workspace) do
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.dirname(workspace))
+  end
+
   defp git!(workspace, args) do
     case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
       {_output, 0} -> :ok
@@ -1074,8 +1213,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
        }}
     end)
 
-    on_exit(fn -> restore_env(:handoff_remote_head_runner, previous_runner) end)
-    on_exit(fn -> restore_env(:handoff_pull_request_runner, previous_pr_runner) end)
+    on_exit(fn -> restore_application_env(:handoff_remote_head_runner, previous_runner) end)
+    on_exit(fn -> restore_application_env(:handoff_pull_request_runner, previous_pr_runner) end)
   end
 
   defp write_review_rework_preflight!(workspace, issue) do
@@ -1097,8 +1236,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
     File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
   end
 
-  defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
-  defp restore_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
+  defp restore_application_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_application_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp add_second_miu(%Issue{} = issue) do
     second_miu = """
