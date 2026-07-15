@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Workspace do
     IssueRequirements,
     PathSafety,
     PromptBuilder,
+    RuntimeContract,
     SSH,
     UnblockReport
   }
@@ -626,11 +627,11 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp issue_branch_base_names(%{description: description}) when is_binary(description) do
-    description_branch_base_names(description)
+    runtime_contract_base_names(description)
   end
 
   defp issue_branch_base_names(%{"description" => description}) when is_binary(description) do
-    description_branch_base_names(description)
+    runtime_contract_base_names(description)
   end
 
   defp issue_branch_base_names(%{base_branch: base_branch, integration_branch: integration_branch}) do
@@ -642,6 +643,14 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp issue_branch_base_names(_issue_or_identifier), do: []
+
+  defp runtime_contract_base_names(description) do
+    case RuntimeContract.compile(description) do
+      {:ok, compiled} -> [compiled.contract["base_branch"]]
+      :none -> description_branch_base_names(description)
+      {:error, _errors} -> []
+    end
+  end
 
   defp description_branch_base_names(description) do
     [
@@ -794,19 +803,36 @@ defmodule SymphonyElixir.Workspace do
     _error -> false
   end
 
-  defp issue_branch_name(%{description: description, branch_name: branch}) when is_binary(description) and is_binary(branch) do
-    description_existing_pr_branch(description) || clean_branch_name(branch)
+  defp issue_branch_name(%{description: description} = issue) when is_binary(description) do
+    runtime_contract_branch(description, fn -> legacy_issue_branch_name(issue) end)
   end
 
-  defp issue_branch_name(%{"description" => description, "branch_name" => branch})
-       when is_binary(description) and is_binary(branch) do
-    description_existing_pr_branch(description) || clean_branch_name(branch)
+  defp issue_branch_name(%{"description" => description} = issue) when is_binary(description) do
+    runtime_contract_branch(description, fn -> legacy_issue_branch_name(issue) end)
   end
 
-  defp issue_branch_name(%{branch_name: branch}) when is_binary(branch), do: clean_branch_name(branch)
-  defp issue_branch_name(%{"branch_name" => branch}) when is_binary(branch), do: clean_branch_name(branch)
-  defp issue_branch_name(%{"branch" => branch}) when is_binary(branch), do: clean_branch_name(branch)
-  defp issue_branch_name(_issue), do: ""
+  defp issue_branch_name(issue), do: legacy_issue_branch_name(issue)
+
+  defp runtime_contract_branch(description, legacy_branch) do
+    case RuntimeContract.compile(description) do
+      {:ok, compiled} -> compiled.contract["integration_branch"]
+      :none -> legacy_branch.()
+      {:error, _errors} -> ""
+    end
+  end
+
+  defp legacy_issue_branch_name(%{description: description, branch_name: branch})
+       when is_binary(description) and is_binary(branch),
+       do: description_existing_pr_branch(description) || clean_branch_name(branch)
+
+  defp legacy_issue_branch_name(%{"description" => description, "branch_name" => branch})
+       when is_binary(description) and is_binary(branch),
+       do: description_existing_pr_branch(description) || clean_branch_name(branch)
+
+  defp legacy_issue_branch_name(%{branch_name: branch}) when is_binary(branch), do: clean_branch_name(branch)
+  defp legacy_issue_branch_name(%{"branch_name" => branch}) when is_binary(branch), do: clean_branch_name(branch)
+  defp legacy_issue_branch_name(%{"branch" => branch}) when is_binary(branch), do: clean_branch_name(branch)
+  defp legacy_issue_branch_name(_issue), do: ""
 
   defp description_existing_pr_branch(description) do
     if shared_existing_branch_contract?(description) do

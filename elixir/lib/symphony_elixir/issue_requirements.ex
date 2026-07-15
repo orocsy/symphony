@@ -3,7 +3,7 @@ defmodule SymphonyElixir.IssueRequirements do
   Derives bounded, machine-readable issue requirements from tracker issues.
   """
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{Linear.Issue, RuntimeContract}
 
   @required_keys [:identifier, :write_scope, :mius, :validation]
 
@@ -14,42 +14,25 @@ defmodule SymphonyElixir.IssueRequirements do
     base_description = issue_description(issue)
     issue_brief = issue_brief_body(issue.identifier, workspace)
 
-    description =
-      base_description
-      |> maybe_append_issue_brief(issue_brief)
+    case RuntimeContract.compile(base_description) do
+      {:ok, compiled} ->
+        issue
+        |> structured_requirements(compiled, workspace)
+        |> validated_requirements()
 
-    if requirements_description?(description) do
-      read_context = section_list_all(description, "Read Context")
+      {:error, errors} ->
+        {:error, {:invalid_runtime_contract, errors}}
 
-      requirements = %{
-        "identifier" => string(issue.identifier),
-        "title" => string(issue.title),
-        "state" => string(issue.state),
-        "branch" => string(issue.branch_name),
-        "base_branch" => scalar_section(description, "Base Branch"),
-        "integration_branch" => scalar_section(description, "Integration Branch"),
-        "feature_group" => scalar_section(description, "Feature Group"),
-        "ticket_type" => scalar_section(description, "Ticket Type"),
-        "expected_test_state" => scalar_section(description, "Expected Test State"),
-        "test_activation" => scalar_section(description, "Test Activation"),
-        "project" => "",
-        "write_scope" => write_scope(description),
-        "read_context" => read_context,
-        "shared_files" => section_list_all(description, "Shared Files"),
-        "dependencies" => dependencies(description),
-        "mius" => miu_list(description),
-        "validation" => validation(description, workspace),
-        "out_of_scope" => out_of_scope(description),
-        "issue_brief" => issue_brief_reference(issue.identifier, workspace),
-        "scope_bundle" => scope_bundle(issue.identifier, base_description, issue_brief)
-      }
+      :none ->
+        description = maybe_append_issue_brief(base_description, issue_brief)
 
-      case validate(requirements) do
-        :ok -> {:ok, requirements}
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      {:error, :no_issue_requirements}
+        if requirements_description?(description) do
+          issue
+          |> legacy_requirements(description, base_description, issue_brief, workspace)
+          |> validated_requirements()
+        else
+          {:error, :no_issue_requirements}
+        end
     end
   end
 
@@ -82,6 +65,121 @@ defmodule SymphonyElixir.IssueRequirements do
 
   defp issue_description(%Issue{description: description}) when is_binary(description), do: description
   defp issue_description(_issue), do: ""
+
+  defp description_sha256(description) when is_binary(description) do
+    :crypto.hash(:sha256, description)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp structured_requirements(%Issue{} = issue, compiled, workspace) do
+    contract = compiled.contract
+
+    %{
+      "identifier" => string(issue.identifier),
+      "source_description_sha256" => description_sha256(issue_description(issue)),
+      "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+      "contract_hash" => compiled.contract_hash,
+      "runtime_contract_status" => "structured",
+      "automatic_handoff_certifiable" => true,
+      "runtime_contract" => contract,
+      "title" => string(issue.title),
+      "state" => string(issue.state),
+      "branch" => contract["integration_branch"],
+      "base_branch" => contract["base_branch"],
+      "integration_branch" => contract["integration_branch"],
+      "feature_group" => "",
+      "ticket_type" => contract["ticket_type"],
+      "expected_test_state" => nil,
+      "test_activation" => nil,
+      "project" => "",
+      "write_scope" => compiled.write_scope,
+      "read_context" => compiled.read_context,
+      "shared_files" => compiled.read_context,
+      "dependencies" => contract["dependencies"],
+      "mius" => compiled.miu_ids,
+      "validation" => %{"commands" => compiled.validations, "files" => [], "events" => [], "scenarios" => []},
+      "out_of_scope" => compiled.denied_scope,
+      "issue_brief" => issue_brief_reference(issue.identifier, workspace),
+      "scope_bundle" => structured_scope_bundle(issue.identifier, contract)
+    }
+  end
+
+  defp legacy_requirements(%Issue{} = issue, description, base_description, issue_brief, workspace) do
+    read_context = section_list_all(description, "Read Context")
+
+    %{
+      "identifier" => string(issue.identifier),
+      "source_description_sha256" => description_sha256(base_description),
+      "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+      "contract_hash" => nil,
+      "runtime_contract_status" => "legacy",
+      "automatic_handoff_certifiable" => false,
+      "runtime_contract" => nil,
+      "title" => string(issue.title),
+      "state" => string(issue.state),
+      "branch" => string(issue.branch_name),
+      "base_branch" => scalar_section(description, "Base Branch"),
+      "integration_branch" => scalar_section(description, "Integration Branch"),
+      "feature_group" => scalar_section(description, "Feature Group"),
+      "ticket_type" => scalar_section(description, "Ticket Type"),
+      "expected_test_state" => scalar_section(description, "Expected Test State"),
+      "test_activation" => scalar_section(description, "Test Activation"),
+      "project" => "",
+      "write_scope" => write_scope(description),
+      "read_context" => read_context,
+      "shared_files" => section_list_all(description, "Shared Files"),
+      "dependencies" => dependencies(description),
+      "mius" => miu_list(description),
+      "validation" => validation(description, workspace),
+      "out_of_scope" => out_of_scope(description),
+      "issue_brief" => issue_brief_reference(issue.identifier, workspace),
+      "scope_bundle" => scope_bundle(issue.identifier, base_description, issue_brief)
+    }
+  end
+
+  defp validated_requirements(requirements) when is_map(requirements) do
+    case validate(requirements) do
+      :ok -> {:ok, requirements}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp structured_scope_bundle(identifier, contract) do
+    write_scope =
+      contract["mius"]
+      |> Enum.flat_map(fn miu ->
+        Enum.map(miu["write_scope"], fn path ->
+          scope_entry(path, "runtime_contract.miu:#{miu["id"]}", "write", "contract")
+        end)
+      end)
+
+    read_context =
+      contract["mius"]
+      |> Enum.flat_map(fn miu ->
+        Enum.map(Map.get(miu, "read_context", []), fn path ->
+          scope_entry(path, "runtime_contract.miu:#{miu["id"]}", "read", "turn")
+        end)
+      end)
+
+    denied_scope =
+      contract
+      |> Map.get("denied_scope", [])
+      |> Enum.map(&scope_entry(&1, "runtime_contract.denied_scope", "read", "contract"))
+
+    %{
+      "schema_version" => 3,
+      "issue" => string(identifier),
+      "write_scope" => write_scope,
+      "read_context" => read_context,
+      "conflict_scope" => [],
+      "denied_scope" => denied_scope
+    }
+    |> refresh_scope_bundle_hash()
+  end
+
+  defp scope_entry(path, source, operation, expires) do
+    %{"path" => path, "source" => source, "operation" => operation, "expires" => expires}
+  end
 
   defp maybe_append_issue_brief(description, brief) when is_binary(description) and is_binary(brief) do
     [description, brief]

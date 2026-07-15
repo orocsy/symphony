@@ -25,7 +25,7 @@ defmodule SymphonyElixir.DispatchPreflight do
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements),
          mode <- preflight_mode(workspace, requirements, inspection),
-         :ok <- maybe_switch_to_review_head(workspace, inspection, mode) do
+         :ok <- maybe_switch_to_review_head(workspace, inspection, mode, requirements) do
       preflight =
         case mode do
           "handoff_recovery" -> handoff_recovery_preflight(workspace, issue, requirements, inspection)
@@ -199,8 +199,10 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp issue_brief_candidate_paths(_workspace, _requirements), do: []
 
-  defp maybe_switch_to_review_head(workspace, %{head_ref: branch}, mode)
-       when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] and is_binary(branch) and branch != "" do
+  defp maybe_switch_to_review_head(workspace, inspection, mode, requirements)
+       when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] do
+    branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref)
+
     if clean_worktree?(workspace) and safe_branch_name?(branch) do
       _ = git_command(workspace, ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"])
 
@@ -215,7 +217,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     :ok
   end
 
-  defp maybe_switch_to_review_head(_workspace, _inspection, _mode), do: :ok
+  defp maybe_switch_to_review_head(_workspace, _inspection, _mode, _requirements), do: :ok
 
   defp clean_worktree?(workspace) do
     case git_command(workspace, ["status", "--porcelain", "--untracked-files=all"]) do
@@ -707,7 +709,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "created_at" => now_iso8601(),
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
-      "branch" => Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
+      "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "review-feedback-classified"),
       "first_task" => review_rework_first_task(open_corrections),
@@ -791,6 +793,9 @@ defmodule SymphonyElixir.DispatchPreflight do
     review_head = Map.get(inspection, :head_ref)
 
     cond do
+      contract_branch = authoritative_contract_branch(requirements) ->
+        contract_branch
+
       clean_worktree?(workspace) and present_review_value?(review_head) ->
         review_head
 
@@ -812,7 +817,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "created_at" => now_iso8601(),
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
-      "branch" => Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name),
+      "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" => integration_check_first_task(inspection),
@@ -873,11 +878,21 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp fresh_implementation_branch(workspace, issue, requirements) do
-    current_branch(workspace) ||
+    authoritative_contract_branch(requirements) ||
+      current_branch(workspace) ||
       shared_existing_branch_from_requirements(requirements) ||
       requirements["branch"] ||
       issue_value(issue, :branch_name)
   end
+
+  defp authoritative_contract_branch(%{"runtime_contract_status" => "structured"} = requirements) do
+    case requirements["integration_branch"] do
+      branch when is_binary(branch) and branch != "" -> branch
+      _ -> nil
+    end
+  end
+
+  defp authoritative_contract_branch(_requirements), do: nil
 
   defp shared_existing_branch_from_requirements(requirements) when is_map(requirements) do
     integration_branch = requirements["integration_branch"] |> to_string()
@@ -1663,6 +1678,8 @@ defmodule SymphonyElixir.DispatchPreflight do
       "integration_branch",
       "feature_group",
       "ticket_type",
+      "runtime_contract_status",
+      "contract_hash",
       "expected_test_state",
       "test_activation",
       "write_scope",

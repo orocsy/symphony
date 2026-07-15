@@ -972,6 +972,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
 
+      expected_description_hash =
+        :crypto.hash(:sha256, issue.description)
+        |> Base.encode16(case: :lower)
+
+      assert requirements["source_description_sha256"] == expected_description_hash
       assert requirements["write_scope"] == ["src/features/swipe/SwipeExperience.tsx"]
       assert requirements["shared_files"] == ["package.json read-only context"]
       assert requirements["read_context"] == ["src/features/landing/GuestStartScreen.tsx"]
@@ -1012,6 +1017,430 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(workspace)
     end
+  end
+
+  test "structured runtime contract is the only authority-bearing scope" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-runtime-contract-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery"))
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/issue-brief.md"),
+        """
+        ## Write Scope
+        - src/should-not-be-authority.ts
+
+        ## Shared Files
+        - this explanatory sentence is not a path
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-runtime-contract",
+        identifier: "COD-266",
+        title: "Structured runtime contract",
+        state: "Rework",
+        branch_name: "orocsy/generated-child-branch",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-246-preference-miu-guest-setup-controls
+        dependencies:
+          - COD-265
+        mius:
+          - id: COD-266-MIU-1
+            write_scope:
+              - tests/integration/cards-route.test.ts
+            validations:
+              - pnpm exec vitest run --configLoader runner tests/integration/cards-route.test.ts
+          - id: COD-266-MIU-2
+            write_scope:
+              - src/app/api/cards/handler.ts
+            validations:
+              - pnpm exec vitest run --configLoader runner tests/integration/cards-route.test.ts
+        final_validations:
+          - pnpm typecheck
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+
+        ## Write Scope
+        - src/prose-must-not-expand-authority.ts
+
+        ### MIU prose
+        Detailed implementation rationale remains normal Markdown.
+        """
+      }
+
+      assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue, workspace)
+
+      assert requirements["runtime_contract_status"] == "structured"
+      assert requirements["automatic_handoff_certifiable"]
+      assert requirements["contract_hash"] =~ "sha256:"
+      assert requirements["ticket_type"] == "implementation"
+      assert requirements["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert requirements["base_branch"] == "main"
+      assert requirements["integration_branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+      assert requirements["dependencies"] == ["COD-265"]
+      assert requirements["mius"] == ["COD-266-MIU-1", "COD-266-MIU-2"]
+      assert requirements["runtime_contract"]["validation_timeout_ms"] == 900_000
+
+      assert requirements["runtime_contract"]["merge"] == %{
+               "automatic" => false,
+               "completed_state" => "Done",
+               "method" => "squash",
+               "require_ci_checks" => true
+             }
+
+      assert requirements["write_scope"] == [
+               "tests/integration/cards-route.test.ts",
+               "src/app/api/cards/handler.ts"
+             ]
+
+      assert requirements["validation"]["commands"] == [
+               "pnpm exec vitest run --configLoader runner tests/integration/cards-route.test.ts",
+               "pnpm typecheck"
+             ]
+
+      refute Enum.any?(requirements["scope_bundle"]["write_scope"], fn entry ->
+               entry["path"] in ["src/should-not-be-authority.ts", "src/prose-must-not-expand-authority.ts"]
+             end)
+
+      refute Enum.any?(requirements["scope_bundle"]["read_context"], fn entry ->
+               entry["path"] == "this explanatory sentence is not a path"
+             end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "runtime contract rejects prose shaped scope and duplicate MIU ids" do
+    issue = %Issue{
+      id: "issue-invalid-runtime-contract",
+      identifier: "COD-901",
+      title: "Invalid runtime contract",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-901
+      dependencies: []
+      denied_scope:
+        - this is not a path
+      mius:
+        - id: COD-901-MIU-1
+          write_scope:
+            - this is explanatory prose
+          validations:
+            - pnpm typecheck
+        - id: COD-901-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "duplicate_miu_id:COD-901-MIU-1" in errors
+    assert "invalid_denied_scope:this is not a path" in errors
+    assert "invalid_write_scope:COD-901-MIU-1:this is explanatory prose" in errors
+  end
+
+  test "runtime contract rejects glob metacharacters the scope matcher does not implement" do
+    issue = %Issue{
+      id: "issue-unsupported-scope-glob",
+      identifier: "COD-902",
+      title: "Unsupported scope glob",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-902
+      dependencies: []
+      mius:
+        - id: COD-902-MIU-1
+          write_scope:
+            - src/file?.ts
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_write_scope:COD-902-MIU-1:src/file?.ts" in errors
+  end
+
+  test "runtime contract rejects unbounded validation and invalid automatic merge policy" do
+    issue = %Issue{
+      id: "issue-invalid-runtime-bounds",
+      identifier: "COD-903",
+      title: "Invalid runtime bounds",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-903
+      dependencies: []
+      mius:
+        - id: COD-903-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      validation_timeout_ms: 3600000
+      review:
+        authority: github_codex
+        require_current_head: true
+      merge:
+        automatic: enabled
+        method: force
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_validation_timeout_ms:3600000" in errors
+    assert "invalid_merge_automatic" in errors
+  end
+
+  test "runtime contract rejects shell command mode and pipelines in validations" do
+    for command <- [
+          "sh -c 'echo 3 tests, 0 failures'",
+          "bash -lc 'mix test'",
+          "env -S 'sh -c echo fake-success'",
+          "pwsh -e ZQBjAGgAbwAgAGYAYQBrAGUALQBzAHUAYwBjAGUAcwBzAA==",
+          "mix test | cat"
+        ] do
+      issue = %Issue{
+        id: "issue-shell-validation",
+        identifier: "COD-907",
+        title: "Invalid shell validation",
+        state: "In Progress",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-907
+        dependencies: []
+        mius:
+          - id: COD-907-MIU-1
+            write_scope:
+              - src/app/page.tsx
+            validations:
+              - #{inspect(command)}
+        final_validations:
+          - pnpm typecheck
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:error, {:invalid_runtime_contract, errors}} =
+               SymphonyElixir.IssueRequirements.from_issue(issue)
+
+      assert Enum.any?(errors, fn error ->
+               String.starts_with?(error, "invalid_validations:COD-907-MIU-1:") and
+                 String.contains?(error, command)
+             end)
+    end
+  end
+
+  test "runtime contract rejects human review authority until routed" do
+    issue = %Issue{
+      id: "issue-human-review-runtime",
+      identifier: "COD-904",
+      title: "Human review unsupported",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-904
+      dependencies: []
+      mius:
+        - id: COD-904-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: human
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_review_authority" in errors
+  end
+
+  test "runtime contract returns errors for malformed review blocks" do
+    issue = %Issue{
+      id: "issue-malformed-review-runtime",
+      identifier: "COD-905",
+      title: "Malformed review",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-905
+      dependencies: []
+      mius:
+        - id: COD-905-MIU-1
+          write_scope:
+            - src/app/page.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review: github_codex
+      merge:
+        automatic: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_review" in errors
+    assert "automatic_merge_requires_github_codex_review" in errors
+  end
+
+  test "runtime contract returns errors for malformed MIU and scope entries" do
+    issue = %Issue{
+      id: "issue-malformed-miu-runtime",
+      identifier: "COD-906",
+      title: "Malformed MIU",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-906
+      dependencies: []
+      denied_scope:
+        - nested: value
+      mius:
+        - bad
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_miu" in errors
+    assert "invalid_miu_id" in errors
+    assert Enum.any?(errors, &String.starts_with?(&1, "invalid_denied_scope:"))
+  end
+
+  test "issue revision changes with description but not unrelated Linear metadata timestamps" do
+    description = "## Runtime Contract\n\nStable contract text."
+    first_update = ~U[2026-07-12 10:00:00Z]
+    later_update = ~U[2026-07-12 11:00:00Z]
+
+    assert SymphonyElixir.RuntimeContract.issue_revision(description, first_update) ==
+             SymphonyElixir.RuntimeContract.issue_revision(description, later_update)
+
+    refute SymphonyElixir.RuntimeContract.issue_revision(description, first_update) ==
+             SymphonyElixir.RuntimeContract.issue_revision(description <> "\nChanged.", later_update)
+  end
+
+  test "legacy markdown requirements remain runnable but cannot auto certify" do
+    issue = %Issue{
+      id: "issue-legacy-contract",
+      identifier: "COD-902",
+      title: "Legacy issue",
+      state: "In Progress",
+      description: """
+      ## Ticket Type
+      implementation
+
+      ## Write Scope
+      - src/app/page.tsx
+
+      ### MIU 1 - Legacy behavior
+
+      ## Validation
+      ```bash
+      pnpm typecheck
+      ```
+      """
+    }
+
+    assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue)
+    assert requirements["runtime_contract_status"] == "legacy"
+    refute requirements["automatic_handoff_certifiable"]
+    assert is_nil(requirements["contract_hash"])
+    assert requirements["write_scope"] == ["src/app/page.tsx"]
   end
 
   test "workspace hydration parses scope and validation commands template headings" do
@@ -1629,6 +2058,113 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {status, 0} = System.cmd("git", ["status", "--short", "--branch"], cd: workspace)
       refute String.contains?(status, "origin/main")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace checks out the structured runtime contract integration branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-contract-branch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      base_branch = "release/1.x"
+      integration_branch = "orocsy/cod-907-integration"
+      generated_branch = "orocsy/generated-linear-branch"
+
+      File.mkdir_p!(source_repo)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: source_repo)
+      File.write!(Path.join(source_repo, "README.md"), "main\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: source_repo)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Initial main"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", base_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "release base\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Release base"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", generated_branch], cd: source_repo, stderr_to_stdout: true)
+      File.write!(Path.join(source_repo, "README.md"), "generated-pr\n")
+      assert {_output, 0} = System.cmd("git", ["commit", "-am", "Generated PR head"], cd: source_repo, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["switch", "main"], cd: source_repo, stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{source_repo} . && git checkout -B main origin/main",
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/symphony"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-907",
+        identifier: "COD-907",
+        title: "Structured branch authority",
+        state: "Ready for Symphony",
+        branch_name: generated_branch,
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: #{base_branch}
+        integration_branch: #{integration_branch}
+        dependencies: []
+        mius:
+          - id: COD-907-MIU-1
+            write_scope:
+              - README.md
+            validations:
+              - mix test
+        final_validations:
+          - mix test
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == integration_branch
+      refute String.trim(current_branch) == generated_branch
+      assert File.read!(Path.join(workspace, "README.md")) == "release base\n"
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/symphony/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 907,
+                 "html_url" => "https://github.com/acme/symphony/pull/907",
+                 "head" => %{"sha" => "generated-head", "ref" => generated_branch}
+               }
+             ]}
+
+          endpoint == "repos/acme/symphony/pulls/907/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/symphony/pulls/907/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      assert preflight["branch"] == integration_branch
+      assert {current_branch, 0} = System.cmd("git", ["branch", "--show-current"], cd: workspace)
+      assert String.trim(current_branch) == integration_branch
+      assert File.read!(Path.join(workspace, "README.md")) == "release base\n"
     after
       File.rm_rf(test_root)
     end

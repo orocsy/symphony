@@ -536,6 +536,13 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Symphony fresh-MIU micro-worker"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ ".orocsy/delivery/issue-brief.md"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "technical-miu-trace"
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~
+               "Runtime Contract execution gate"
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~
+               "append `miu.completion_requested`"
+
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run `rg`, `grep`, `find`"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Never merge automatically"
 
@@ -1047,6 +1054,24 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
                AppServer.command_policy_violation_for_test(workspace, "git diff main")
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --no-renames origin/main...HEAD"
+               )
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --patch origin/main...HEAD"
+               )
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --no-renames origin/other...HEAD"
+               )
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git diff -- src/main/Button.tsx")
       assert :ok = AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "foo|bar" README.md))

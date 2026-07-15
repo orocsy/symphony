@@ -3,7 +3,16 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, DispatchPreflight, Workflow, Workspace}
+  alias SymphonyElixir.{
+    Config,
+    DispatchPreflight,
+    HandoffCertificate,
+    RuntimeContract,
+    ValidationController,
+    Workflow,
+    Workspace
+  }
+
   alias SymphonyElixir.Codex.AppServer
 
   @render_opts [strict_variables: true, strict_filters: true]
@@ -30,6 +39,7 @@ defmodule SymphonyElixir.PromptBuilder do
       |> workspace_recovery_checkpoint()
       |> maybe_clear_in_progress_checkpoint(issue, workspace)
       |> maybe_clear_clean_rework_checkpoint(issue, workspace)
+      |> maybe_clear_uncertified_pushed_checkpoint(issue, workspace)
 
     workflow = Workflow.current()
 
@@ -58,6 +68,7 @@ defmodule SymphonyElixir.PromptBuilder do
     prompt
     |> maybe_prepend_dispatch_preflight(workspace)
     |> maybe_prepend_policy_violation(opts)
+    |> maybe_prepend_runtime_contract_guidance(issue, workspace)
   end
 
   @spec workspace_recovery_checkpoint(String.t() | nil) :: String.t()
@@ -92,6 +103,63 @@ defmodule SymphonyElixir.PromptBuilder do
 
   def workspace_recovery_checkpoint(_workspace), do: ""
 
+  defp maybe_prepend_runtime_contract_guidance(prompt, issue, workspace)
+       when is_binary(prompt) and is_binary(workspace) do
+    case RuntimeContract.compile(Map.get(issue, :description)) do
+      {:ok, compiled} ->
+        certified_ids =
+          issue
+          |> ValidationController.certified_miu_ids(workspace)
+          |> MapSet.new()
+
+        guidance = runtime_contract_guidance(compiled, certified_ids)
+        guidance <> "\n\n" <> prompt
+
+      _ ->
+        prompt
+    end
+  rescue
+    _error -> prompt
+  end
+
+  defp maybe_prepend_runtime_contract_guidance(prompt, _issue, _workspace), do: prompt
+
+  defp runtime_contract_guidance(compiled, certified_ids) do
+    remaining = Enum.reject(compiled.contract["mius"], &MapSet.member?(certified_ids, &1["id"]))
+
+    case remaining do
+      [miu | _] ->
+        """
+        Runtime Contract execution gate:
+
+        - Current contract: `#{compiled.contract_hash}`.
+        - Implement only MIU `#{miu["id"]}` in this turn.
+        - Write scope: #{Enum.map_join(miu["write_scope"], ", ", &"`#{&1}`")}.
+        - Required runtime validation: #{Enum.map_join(miu["validations"], "; ", &"`#{&1}`")}.
+        - After your focused implementation and local check, create one clean local micro commit. Do not push yet.
+        - Then request runtime certification exactly once:
+          `python3 .codex/delivery/bin/orocsy.py --repo . event append --type miu.completion_requested --status requested --step #{miu["id"]}`
+        - End the turn after the request. Symphony, not the worker, runs authoritative validation and issues `miu.completed`.
+        - Do not append `gate.post-miu` as a substitute for MIU completion and do not request GitHub review yourself.
+        """
+        |> String.trim()
+
+      [] ->
+        """
+        Runtime Contract final handoff gate:
+
+        - All required MIUs are runtime-certified for contract `#{compiled.contract_hash}`.
+        - Keep the worktree clean, push the canonical integration branch, and verify local `HEAD` matches its upstream.
+        - Ensure an open pull request exists from the canonical integration branch into `#{compiled.contract["base_branch"]}`. Create it with `gh pr create` if absent; do not substitute a PR for another branch or base.
+        - Request final runtime certification exactly once:
+          `python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.requested --status requested --step final`
+        - End the turn after the request. Symphony runs final validations, issues `handoff.ready`, and requests GitHub Codex review.
+        - Do not request GitHub review or move Linear to a terminal state yourself.
+        """
+        |> String.trim()
+    end
+  end
+
   defp maybe_clear_in_progress_checkpoint(checkpoint, issue, workspace)
        when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
     if issue_in_progress?(issue) and issue_implementation?(issue) and clean_worktree?(workspace) do
@@ -115,6 +183,18 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_clear_clean_rework_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
+
+  defp maybe_clear_uncertified_pushed_checkpoint(checkpoint, issue, workspace)
+       when is_binary(checkpoint) and is_binary(workspace) do
+    if pushed_validated_handoff_checkpoint?(checkpoint) and
+         not match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace)) do
+      ""
+    else
+      checkpoint
+    end
+  end
+
+  defp maybe_clear_uncertified_pushed_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
 
   defp issue_in_progress?(%{state: state}) when is_binary(state) do
     state

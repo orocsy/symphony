@@ -74,6 +74,51 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             state = json.loads((repo / ".orocsy/delivery/state/current.json").read_text(encoding="utf-8"))
             self.assertEqual(state["last_event_id"], json.loads(events[-1])["event_id"])
 
+    def test_transition_event_append_binds_the_current_git_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.init_git_repo(repo)
+            (repo / "README.md").write_text("# Test\n", encoding="utf-8")
+            self.commit_all(repo)
+            self.run_cli(["--repo", str(repo), "init"])
+            state_path = repo / ".orocsy/delivery/state/current.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["issue_requirements"] = {
+                "contract_hash": "sha256:current-contract",
+                "issue_revision": "sha256:current-revision",
+            }
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+
+            code, _output = self.run_cli(
+                [
+                    "--repo",
+                    str(repo),
+                    "event",
+                    "append",
+                    "--type",
+                    "miu.completion_requested",
+                    "--status",
+                    "requested",
+                    "--step",
+                    "COD-700-MIU-1",
+                ],
+            )
+
+            self.assertEqual(code, 0)
+            events = (repo / ".orocsy/delivery/events/events.jsonl").read_text(encoding="utf-8").splitlines()
+            event = json.loads(events[-1])
+            self.assertEqual(event["head_sha"], head_sha)
+            self.assertEqual(event["contract_hash"], "sha256:current-contract")
+            self.assertEqual(event["issue_revision"], "sha256:current-revision")
+            self.assertEqual(event["miu_id"], "COD-700-MIU-1")
+
     def test_run_start_backfills_missing_ids_in_existing_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -712,9 +757,13 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
                 json.dumps(
                     {
                         "identifier": "COD-201",
+                        "issue_revision": "sha256:issue-revision",
+                        "contract_hash": "sha256:runtime-contract",
+                        "runtime_contract_status": "structured",
                         "title": "Add sample provider setup",
                         "state": "In Progress",
                         "branch": "orocsy/cod-201-provider-setup",
+                        "integration_branch": "orocsy/cod-201-provider-setup",
                         "project_slug": "dummy-agentic-runtime",
                         "write_scope": ["src/**", ".codex/delivery/**"],
                         "shared_files": ["package.json"],
@@ -739,6 +788,8 @@ class OrocsyRuntimeCliTests(unittest.TestCase):
             payload = json.loads(output)
             self.assertEqual(payload["state"]["issue"], "COD-201")
             self.assertEqual(payload["state"]["issue_requirements"]["branch"], "orocsy/cod-201-provider-setup")
+            self.assertEqual(payload["state"]["issue_requirements"]["contract_hash"], "sha256:runtime-contract")
+            self.assertEqual(payload["state"]["issue_requirements"]["issue_revision"], "sha256:issue-revision")
             self.assertEqual(payload["state"]["issue_requirements"]["project"], "dummy-agentic-runtime")
             self.assertIn(".orocsy/delivery/**", payload["state"]["issue_requirements"]["write_scope"])
             self.assertIn(

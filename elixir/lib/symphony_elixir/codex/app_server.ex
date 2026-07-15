@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   alias SymphonyElixir.{
     Codex.DynamicTool,
+    CommandIntent,
     Config,
     DispatchPreflight,
     PathSafety,
@@ -604,10 +605,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     If the brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
     Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction. Trace-only/read-only MIU notes are not durable progress.
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
-    In the first fresh implementation turn, stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
+    If the user prompt begins with a `Runtime Contract execution gate`, that gate replaces the legacy trace-only first-turn checkpoint: implement the named MIU, create its clean local micro commit, append `miu.completion_requested` exactly as instructed, and stop without pushing or requesting review. Otherwise, in the first fresh implementation turn stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
-    In the first turn, complete only the scoped implementation checkpoint or stop with a concrete blocker.
+    In the first turn, complete the active structured-contract gate or the legacy scoped implementation checkpoint, or stop with a concrete blocker.
     Never merge automatically.
     """
     |> String.trim()
@@ -2031,6 +2032,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
+          match == @review_rework_git_diff_base_pattern and
+              scope_audit_allowed?(command_for_patterns, workspace) ->
+            :ok
+
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -2911,7 +2916,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp fresh_implementation_checkpoint_ready?(workspace) when is_binary(workspace) do
-    technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"requirements" => %{"runtime_contract_status" => "structured"}}} ->
+        false
+
+      _ ->
+        technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
+    end
   rescue
     _error -> false
   end
@@ -3141,6 +3152,41 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp git_diff_base_branch_without_path_scope?(_command), do: false
+
+  defp scope_audit_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
+    case CommandIntent.classify(command, allowed_base_refs: scope_audit_base_refs(workspace)) do
+      {:ok, %{kind: :scope_audit}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scope_audit_allowed?(_command, _workspace), do: false
+
+  defp scope_audit_base_refs(workspace) do
+    configured =
+      case DispatchPreflight.read(workspace) do
+        {:ok, preflight} when is_map(preflight) ->
+          [
+            preflight["base_branch"],
+            get_in(preflight, ["requirements", "base_branch"]),
+            get_in(preflight, ["review", "base_ref"])
+          ]
+
+        _ ->
+          []
+      end
+
+    (["main", "master"] ++ configured)
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.flat_map(&base_ref_variants/1)
+    |> Enum.uniq()
+  end
+
+  defp base_ref_variants("origin/" <> _branch = ref), do: [ref]
+  defp base_ref_variants(ref), do: [ref, "origin/#{ref}"]
 
   defp command_text(%{} = payload) do
     payload
