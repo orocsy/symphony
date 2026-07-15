@@ -6423,18 +6423,111 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, first_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
       first_head = String.duplicate("a", 40)
       assert first_preflight["certification_base_sha"] == first_head
-
-      preflight_path =
-        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
-
-      legacy_preflight = Map.delete(first_preflight, "certification_base_sha")
-      File.write!(preflight_path, Jason.encode!(legacy_preflight))
+      assert SymphonyElixir.ControllerEvidence.valid?(first_preflight)
 
       Agent.update(review_head, fn _ -> String.duplicate("b", 40) end)
 
       assert {:ok, second_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
       assert second_preflight["certification_base_sha"] == first_head
       assert get_in(second_preflight, ["review", "head_sha"]) == String.duplicate("b", 40)
+      assert SymphonyElixir.ControllerEvidence.valid?(second_preflight)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight signs an explicit recovery certification baseline" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-explicit-certification-baseline-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      baseline = String.duplicate("a", 40)
+      review_head = String.duplicate("b", 40)
+
+      issue = %Issue{
+        id: "issue-cod-266-explicit-baseline",
+        identifier: "COD-266",
+        title: "Guest safety recovery",
+        state: "Rework",
+        branch_name: "orocsy/generated-child",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-246-preference-miu-guest-setup-controls
+        certification_base_sha: #{baseline}
+        dependencies: []
+        mius:
+          - id: COD-266-MIU-1
+            write_scope:
+              - src/app/api/cards/handler.ts
+            validations:
+              - pnpm typecheck
+        final_validations:
+          - pnpm typecheck
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{
+                   "sha" => review_head,
+                   "ref" => "orocsy/cod-246-preference-miu-guest-setup-controls"
+                 }
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      {:ok, compiled} = SymphonyElixir.RuntimeContract.compile(issue.description)
+
+      assert preflight["certification_base_sha"] == baseline
+      assert get_in(preflight, ["review", "head_sha"]) == review_head
+      assert preflight["issue_id"] == issue.id
+      assert preflight["contract_hash"] == compiled.contract_hash
+
+      assert preflight["issue_revision"] ==
+               SymphonyElixir.RuntimeContract.issue_revision(issue.description, issue.updated_at)
+
+      assert SymphonyElixir.ControllerEvidence.valid?(preflight)
     after
       File.rm_rf(test_root)
     end
@@ -6527,6 +6620,7 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert SymphonyElixir.ControllerEvidence.valid?(preflight)
       assert preflight["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
       assert get_in(preflight, ["review", "feedback_count"]) == 0
 
@@ -8657,6 +8751,8 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["checkpoint_event"] == "technical-miu-trace"
+      assert is_nil(preflight["certification_base_sha"])
+      assert SymphonyElixir.ControllerEvidence.valid?(preflight)
 
       assert get_in(preflight, ["requirements", "base_branch"]) ==
                "orocsy/feature-recipe-chat-integration"

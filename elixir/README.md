@@ -36,9 +36,11 @@ Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
 contract is the sole authority for branch, write scope, MIUs, validation, and
 review behavior. The runtime certifies one clean MIU checkpoint at a time; a
 checkpoint may contain multiple focused microcommits. Dispatch preflight
-persists the issue branch's certification baseline so a pushed recovery can
-still audit the complete MIU range instead of treating the new remote head as
-its starting point. The runtime executes declared validation itself, and issues
+persists the issue branch's certification baseline in HMAC-signed controller
+evidence bound to the current issue, branch, contract, and issue revision. A
+recovery contract may declare an exact `certification_base_sha` when migrating
+work that predates signed preflight evidence. The runtime never seeds this value
+from a clean-but-ahead local `HEAD`. It executes declared validation itself, and issues
 `handoff.ready` only after all
 MIU certificates and final validations match the current issue revision and
 pushed head, and an open pull request connects the canonical integration branch

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   alias SymphonyElixir.{
     Config,
+    ControllerEvidence,
     IssueRequirements,
     KnowledgeLedger,
     PromptBuilder,
@@ -35,6 +36,8 @@ defmodule SymphonyElixir.DispatchPreflight do
         end
         |> merge_policy_patches(workspace)
         |> merge_knowledge_ledger(workspace)
+        |> bind_controller_identity(issue, requirements)
+        |> ControllerEvidence.sign()
 
       :ok = write_preflight(workspace, preflight)
       :ok = append_preflight_event(workspace, preflight)
@@ -48,6 +51,35 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   @spec read(String.t() | nil) :: {:ok, map()} | :none | {:error, term()}
   def read(workspace) when is_binary(workspace) do
+    with {:ok, preflight} <- read_raw(workspace) do
+      {:ok,
+       preflight
+       |> drop_inactive_turn_policy_patch_entries(workspace)
+       |> merge_policy_patches(workspace)
+       |> merge_knowledge_ledger(workspace)}
+    end
+  rescue
+    error -> {:error, {:preflight_read_failed, Exception.message(error)}}
+  end
+
+  def read(_workspace), do: :none
+
+  @spec read_authoritative(String.t() | nil) :: {:ok, map()} | :none | {:error, term()}
+  def read_authoritative(workspace) when is_binary(workspace) do
+    with {:ok, preflight} <- read_raw(workspace),
+         true <- ControllerEvidence.valid?(preflight) do
+      {:ok, preflight}
+    else
+      false -> {:error, :invalid_controller_signature}
+      other -> other
+    end
+  rescue
+    error -> {:error, {:authoritative_preflight_read_failed, Exception.message(error)}}
+  end
+
+  def read_authoritative(_workspace), do: :none
+
+  defp read_raw(workspace) do
     path = Path.join(workspace, @preflight_path)
 
     cond do
@@ -56,24 +88,11 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       true ->
         case File.read(path) do
-          {:ok, body} ->
-            with {:ok, preflight} <- Jason.decode(body) do
-              {:ok,
-               preflight
-               |> drop_inactive_turn_policy_patch_entries(workspace)
-               |> merge_policy_patches(workspace)
-               |> merge_knowledge_ledger(workspace)}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
+          {:ok, body} -> Jason.decode(body)
+          {:error, reason} -> {:error, reason}
         end
     end
-  rescue
-    error -> {:error, {:preflight_read_failed, Exception.message(error)}}
   end
-
-  def read(_workspace), do: :none
 
   @spec consume_turn_policy_patches(String.t() | nil) :: :ok
   def consume_turn_policy_patches(workspace) when is_binary(workspace) do
@@ -893,28 +912,27 @@ defmodule SymphonyElixir.DispatchPreflight do
     issue_identifier = issue_value(issue, :identifier)
     branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name)
 
-    preserved_certification_base_sha(workspace, issue_identifier, branch) ||
-      Map.get(inspection, :head_sha) ||
-      current_head(workspace)
+    get_in(requirements, ["runtime_contract", "certification_base_sha"]) ||
+      preserved_certification_base_sha(workspace, issue_identifier, branch) ||
+      Map.get(inspection, :head_sha)
   end
 
   defp preserved_certification_base_sha(workspace, issue_identifier, branch) do
-    with {:ok, previous} <- read(workspace),
+    with {:ok, previous} <- read_authoritative(workspace),
          true <- previous["issue"] == issue_identifier,
          true <- previous["branch"] == branch,
-         candidate when is_binary(candidate) and candidate != "" <-
-           previous["certification_base_sha"] || get_in(previous, ["review", "head_sha"]) do
+         candidate when is_binary(candidate) and candidate != "" <- previous["certification_base_sha"] do
       candidate
     else
       _ -> nil
     end
   end
 
-  defp current_head(workspace) do
-    case git_command(workspace, ["rev-parse", "HEAD"]) do
-      {head_sha, 0} -> String.trim(head_sha)
-      _ -> nil
-    end
+  defp bind_controller_identity(preflight, issue, requirements) do
+    preflight
+    |> Map.put("issue_id", issue_value(issue, :id))
+    |> Map.put("contract_hash", requirements["contract_hash"])
+    |> Map.put("issue_revision", requirements["issue_revision"])
   end
 
   defp authoritative_contract_branch(%{"runtime_contract_status" => "structured"} = requirements) do

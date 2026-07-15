@@ -47,8 +47,12 @@ certificates, bounded validation, and opt-in automatic PR merge. These
 controller decisions must be based on durable issue/workspace/GitHub evidence;
 telemetry and dashboard projections remain observation-only and cannot by
 themselves authorize a retry, handoff, or merge. Implementations that certify
-MIU commit ranges SHOULD persist the pre-dispatch branch head across retries so
-a push cannot erase the audit baseline for preserved workspace progress.
+MIU commit ranges SHOULD persist the pre-dispatch branch head as signed
+controller evidence bound to the current issue, branch, and contract so a push
+cannot erase the audit baseline and a workspace edit cannot narrow it. A
+recovery contract MAY declare an exact immutable `certification_base_sha` when
+no prior signed baseline exists. Local workspace `HEAD` alone MUST NOT establish
+that baseline.
 
 ## 2. Goals and Non-Goals
 

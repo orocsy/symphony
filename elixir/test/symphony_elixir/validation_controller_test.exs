@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ValidationControllerTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{HandoffController, Linear.Issue, ValidationController}
+  alias SymphonyElixir.{ControllerEvidence, HandoffController, Linear.Issue, RuntimeContract, ValidationController}
 
   test "certifies a clean micro commit after runtime-controlled validation" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
@@ -30,15 +30,21 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
       File.mkdir_p!(state_dir)
+      {:ok, compiled} = RuntimeContract.compile(issue.description)
 
       File.write!(
         Path.join(state_dir, "dispatch-preflight.json"),
-        Jason.encode!(%{
-          "mode" => "review_rework",
-          "issue" => "COD-700",
-          "branch" => "orocsy/cod-700",
-          "certification_base_sha" => base_sha
-        })
+        Jason.encode!(
+          ControllerEvidence.sign(%{
+            "mode" => "review_rework",
+            "issue_id" => issue.id,
+            "issue" => issue.identifier,
+            "branch" => "orocsy/cod-700",
+            "contract_hash" => compiled.contract_hash,
+            "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+            "certification_base_sha" => base_sha
+          })
+        )
       )
 
       assert {:ok, certificate} =
@@ -46,6 +52,43 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert certificate["base_head_sha"] == base_sha
       assert certificate["changed_paths"] == ["README.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "rejects a tampered dispatch certification baseline" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      base_sha = git_output!(workspace, ["rev-parse", "main"])
+      File.write!(Path.join(workspace, "SECRET.md"), "out of scope\n")
+      git!(workspace, ["add", "SECRET.md"])
+      git!(workspace, ["commit", "-m", "Out of scope checkpoint"])
+      hidden_sha = git_output!(workspace, ["rev-parse", "HEAD"])
+      commit_readme!(workspace, "Allowed suffix")
+      {:ok, compiled} = RuntimeContract.compile(issue.description)
+
+      preflight =
+        ControllerEvidence.sign(%{
+          "mode" => "review_rework",
+          "issue_id" => issue.id,
+          "issue" => issue.identifier,
+          "branch" => "orocsy/cod-700",
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+          "certification_base_sha" => base_sha
+        })
+        |> Map.put("certification_base_sha", hidden_sha)
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
+
+      assert {:error, {:undeclared_write, changed_paths}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert Enum.sort(changed_paths) == ["README.md", "SECRET.md"]
     after
       File.rm_rf(workspace)
     end

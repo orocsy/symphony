@@ -1054,6 +1054,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         ticket_type: implementation
         base_branch: main
         integration_branch: orocsy/cod-246-preference-miu-guest-setup-controls
+        certification_base_sha: 42CE2223F6761A0F9C2D9D6CD729AFD6C660BBD5
         dependencies:
           - COD-265
         mius:
@@ -1091,6 +1092,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert requirements["branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
       assert requirements["base_branch"] == "main"
       assert requirements["integration_branch"] == "orocsy/cod-246-preference-miu-guest-setup-controls"
+
+      assert requirements["runtime_contract"]["certification_base_sha"] ==
+               "42ce2223f6761a0f9c2d9d6cd729afd6c660bbd5"
+
       assert requirements["dependencies"] == ["COD-265"]
       assert requirements["mius"] == ["COD-266-MIU-1", "COD-266-MIU-2"]
       assert requirements["runtime_contract"]["validation_timeout_ms"] == 900_000
@@ -1400,6 +1405,43 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_miu" in errors
     assert "invalid_miu_id" in errors
     assert Enum.any?(errors, &String.starts_with?(&1, "invalid_denied_scope:"))
+  end
+
+  test "runtime contract rejects malformed certification baselines" do
+    issue = %Issue{
+      id: "issue-malformed-certification-baseline",
+      identifier: "COD-908",
+      title: "Malformed certification baseline",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: implementation
+      base_branch: main
+      integration_branch: orocsy/cod-908
+      certification_base_sha: HEAD~2
+      dependencies: []
+      mius:
+        - id: COD-908-MIU-1
+          write_scope:
+            - README.md
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "invalid_certification_base_sha" in errors
   end
 
   test "issue revision changes with description but not unrelated Linear metadata timestamps" do

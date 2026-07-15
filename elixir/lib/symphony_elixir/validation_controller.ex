@@ -250,7 +250,7 @@ defmodule SymphonyElixir.ValidationController do
 
     case miu_index do
       0 ->
-        initial_certification_base_sha(workspace, compiled, head_sha)
+        initial_certification_base_sha(issue, workspace, compiled, head_sha)
 
       index when is_integer(index) and index > 0 ->
         previous_miu_id = Enum.at(compiled.miu_ids, index - 1)
@@ -268,8 +268,8 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp initial_certification_base_sha(workspace, compiled, head_sha) do
-    case dispatch_certification_base_sha(workspace, head_sha) do
+  defp initial_certification_base_sha(issue, workspace, compiled, head_sha) do
+    case dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
       {:ok, base_sha} ->
         {:ok, base_sha}
 
@@ -294,8 +294,15 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp dispatch_certification_base_sha(workspace, head_sha) do
-    with {:ok, preflight} <- DispatchPreflight.read(workspace),
+  defp dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
+    with {:ok, preflight} <- DispatchPreflight.read_authoritative(workspace),
+         true <- preflight["issue_id"] == issue.id,
+         true <- preflight["issue"] == issue.identifier,
+         true <- preflight["branch"] == compiled.contract["integration_branch"],
+         true <- preflight["contract_hash"] == compiled.contract_hash,
+         true <-
+           preflight["issue_revision"] ==
+             RuntimeContract.issue_revision(issue.description, issue.updated_at),
          base_sha when is_binary(base_sha) <- preflight["certification_base_sha"],
          true <- base_sha != "",
          true <- git_ancestor?(workspace, base_sha, head_sha) do
