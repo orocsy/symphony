@@ -1210,6 +1210,48 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_write_scope:COD-902-MIU-1:src/file?.ts" in errors
   end
 
+  test "runtime contract accepts framework route segment syntax as literal scope" do
+    issue = %Issue{
+      id: "issue-framework-route-scope",
+      identifier: "COD-902A",
+      title: "Framework route scope",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: test-spec
+      base_branch: main
+      integration_branch: orocsy/cod-902a
+      dependencies: []
+      denied_scope:
+        - src/app/recipe-chats/[chatId]/view.tsx
+        - src/app/(authenticated)/@modal/page.tsx
+      mius:
+        - id: COD-902A-MIU-1
+          write_scope:
+            - tests/app/recipe-chats/[chatId]/view.test.tsx
+          read_context:
+            - src/app/recipe-chats/[...segments]/view.tsx
+          validations:
+            - pnpm typecheck
+      final_validations:
+        - pnpm typecheck
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:ok, requirements} = SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "src/app/recipe-chats/[chatId]/view.tsx" in requirements["out_of_scope"]
+    assert "src/app/(authenticated)/@modal/page.tsx" in requirements["out_of_scope"]
+    assert "tests/app/recipe-chats/[chatId]/view.test.tsx" in requirements["write_scope"]
+  end
+
   test "runtime contract rejects unbounded validation and invalid automatic merge policy" do
     issue = %Issue{
       id: "issue-invalid-runtime-bounds",
