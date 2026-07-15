@@ -17509,6 +17509,70 @@ defmodule SymphonyElixir.CoreTest do
       events = File.read!(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
       assert events =~ ~s("tool":"codex-review-requested")
       assert events =~ "direct-pushed-review-request"
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(
+                decoded,
+                "head=acme:orocsy/feature-analytics-observability-integration"
+              ) ->
+            {:ok,
+             [
+               %{
+                 "number" => 56,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+                 "head" => %{
+                   "sha" => handoff_sha,
+                   "ref" => "orocsy/feature-analytics-observability-integration"
+                 }
+               }
+             ]}
+
+          decoded == "repos/acme/nutribuddy/pulls/56" ->
+            {:ok,
+             %{
+               "number" => 56,
+               "state" => "open",
+               "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+               "head" => %{
+                 "sha" => handoff_sha,
+                 "ref" => "orocsy/feature-analytics-observability-integration"
+               },
+               "base" => %{"ref" => "main"},
+               "mergeable" => true,
+               "mergeable_state" => "clean"
+             }}
+
+          decoded in [
+            "repos/acme/nutribuddy/pulls/56/comments",
+            "repos/acme/nutribuddy/pulls/56/reviews"
+          ] ->
+            {:ok, []}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/issues/56/comments?") ->
+            {:ok,
+             [
+               %{
+                 "body" => "@codex review",
+                 "created_at" => "2026-07-15T17:44:23Z"
+               },
+               %{
+                 "body" => "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `#{String.slice(handoff_sha, 0, 10)}`",
+                 "created_at" => "2026-07-15T17:50:50Z",
+                 "user" => %{"login" => "chatgpt-codex-connector[bot]", "type" => "Bot"}
+               }
+             ]}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      assert :not_ready = Orchestrator.handle_orchestration_review_pending_for_test(issue)
+      refute File.exists?(Path.join(workspace, ".orocsy/delivery/state/handoff-ready.json"))
     after
       File.rm_rf(test_root)
     end
