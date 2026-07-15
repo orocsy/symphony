@@ -649,7 +649,7 @@ defmodule SymphonyElixir.TokenTelemetry do
   end
 
   defp command_files(command, workspace) do
-    ~r/(?:^|[\s"'=])((?:\.\/|\/)?[A-Za-z0-9_@~.\-\/\[\]]+\.(?:ex|exs|heex|ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss|html|txt))(?=$|[\s"',:])/
+    ~r/(?:^|[\s"'=])((?:\.\/|\/)?[A-Za-z0-9_@~.\-\/()\[\]+]+\.(?:ex|exs|heex|ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss|html|txt))(?=$|[\s"',:])/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] -> [normalize_path(path, workspace)]

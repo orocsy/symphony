@@ -288,7 +288,7 @@ defmodule SymphonyElixir.ScopeAccess do
     |> String.replace(~r/\\(["'])/, "\\1")
     |> then(fn text ->
       Regex.scan(
-        ~r/(?:^|[\s"'`])(\.?\/?(?:(?:src|app|apps|packages|lib|tests|docs|design)(?:\/[A-Za-z0-9_\-.\[\]]+)*|(?:AGENTS\.md|DESIGN\.md|README\.md|deno\.json|mix\.exs|mix\.lock|next\.config\.(?:ts|js|mjs)|opennext\.js|open-next\.config\.(?:ts|js|mjs)|package\.json|pnpm-lock\.yaml|tsconfig\.json|vitest\.config\.[A-Za-z0-9]+|wrangler\.(?:toml|json|jsonc))))(?=$|[\s"'`])/,
+        ~r/(?:^|[\s"'`])(\.?\/?(?:(?:src|app|apps|packages|lib|tests|docs|design)(?:\/[A-Za-z0-9_\-.()\[\]@+]+)*|(?:AGENTS\.md|DESIGN\.md|README\.md|deno\.json|mix\.exs|mix\.lock|next\.config\.(?:ts|js|mjs)|opennext\.js|open-next\.config\.(?:ts|js|mjs)|package\.json|pnpm-lock\.yaml|tsconfig\.json|vitest\.config\.[A-Za-z0-9]+|wrangler\.(?:toml|json|jsonc))))(?=$|[\s"'`])/,
         text,
         capture: :all_but_first
       )

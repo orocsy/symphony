@@ -1894,6 +1894,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         ## Write Scope
         - docs/TECHNICAL_DESIGN.md only for the accepted-swipe contract section.
         - src/lib/schemas/swipe.ts and src/lib/schemas/recipe-chat.ts only if schema code is required.
+        - src/app/(authenticated)/@modal/page.tsx only for the framework route contract.
         - tests/unit/*contract* only if a schema-level contract test fits.
 
         ### MIU 1 - Contract
@@ -1927,6 +1928,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert policy =~ "  - docs/TECHNICAL_DESIGN.md\n"
       assert policy =~ "  - src/lib/schemas/swipe.ts\n"
       assert policy =~ "  - src/lib/schemas/recipe-chat.ts\n"
+      assert policy =~ "  - src/app/(authenticated)/@modal/page.tsx\n"
       assert policy =~ "  - tests/unit/*contract*\n"
       refute policy =~ "only for the accepted-swipe"
     after

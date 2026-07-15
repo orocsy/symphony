@@ -737,7 +737,7 @@ defmodule SymphonyElixir.IssueRequirements do
     text = value |> string() |> strip_markdown_code()
 
     matches =
-      ~r/(?:^|[\s,;:])([A-Za-z0-9._*?{}\[\]-]+(?:\/[A-Za-z0-9._*?{}\[\]-]+)+|[A-Za-z0-9._*?{}\[\]-]+\.(?:tsx|jsx|json|yaml|scss|html|exs|mjs|cjs|yml|css|ts|js|md|ex))/
+      ~r/(?:^|[\s,;:])([A-Za-z0-9._*?{}()\[\]@+-]+(?:\/[A-Za-z0-9._*?{}()\[\]@+-]+)+|[A-Za-z0-9._*?{}()\[\]@+-]+\.(?:tsx|jsx|json|yaml|scss|html|exs|mjs|cjs|yml|css|ts|js|md|ex))/
       |> Regex.scan(text, capture: :all_but_first)
       |> List.flatten()
       |> Enum.map(&String.trim_trailing(&1, ".,;:"))

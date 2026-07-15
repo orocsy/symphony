@@ -5623,7 +5623,7 @@ defmodule SymphonyElixir.AppServerTest do
               "`src/features/swipe/SwipeExperience.tsx`"
             ],
             "shared_files" => [
-              "Read-only imported type context: src/features/landing/GuestStartScreen.tsx only for the existing GuestPreferenceDraft type imported by SwipeExperience. Do not edit."
+              "Read-only route context: src/app/(authenticated)/@modal/page.tsx only for the existing modal contract. Do not edit."
             ]
           }
         })
@@ -5646,7 +5646,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-support-rg"}}}'
-            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc '\\''rg -n \\"GuestPreferenceDraft\\" src/features/landing/GuestStartScreen.tsx'\\''"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc '\\''rg -n \\"modal contract\\" \\"src/app/(authenticated)/@modal/page.tsx\\"'\\''"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
