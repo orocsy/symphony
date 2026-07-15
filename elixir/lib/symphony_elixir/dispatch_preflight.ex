@@ -28,7 +28,7 @@ defmodule SymphonyElixir.DispatchPreflight do
          mode <- preflight_mode(workspace, requirements, inspection),
          :ok <- maybe_switch_to_review_head(workspace, inspection, mode, requirements),
          {:ok, certification_base_sha} <-
-           certification_base_sha(workspace, issue, requirements, inspection) do
+           certification_base_sha(workspace, issue, requirements, inspection, mode) do
       preflight =
         case mode do
           "handoff_recovery" -> handoff_recovery_preflight(workspace, issue, requirements, inspection)
@@ -915,7 +915,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       issue_value(issue, :branch_name)
   end
 
-  defp certification_base_sha(workspace, issue, requirements, inspection) do
+  defp certification_base_sha(workspace, issue, requirements, inspection, mode) do
     issue_identifier = issue_value(issue, :identifier)
     branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name)
     explicit_base_sha = get_in(requirements, ["runtime_contract", "certification_base_sha"])
@@ -925,7 +925,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         {:ok, base_sha}
 
       :none ->
-        {:ok, explicit_base_sha || Map.get(inspection, :head_sha)}
+        {:ok, explicit_base_sha || review_rework_head_sha(inspection, mode)}
 
       {:error, :missing_controller_signature} when is_binary(explicit_base_sha) ->
         {:ok, explicit_base_sha}
@@ -934,6 +934,9 @@ defmodule SymphonyElixir.DispatchPreflight do
         {:error, {:invalid_certification_preflight, reason}}
     end
   end
+
+  defp review_rework_head_sha(inspection, "review_rework"), do: Map.get(inspection, :head_sha)
+  defp review_rework_head_sha(_inspection, _mode), do: nil
 
   defp preserved_certification_base_sha(workspace, issue_identifier, branch) do
     with {:ok, previous} <- read_authoritative(workspace),

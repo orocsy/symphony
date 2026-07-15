@@ -8367,6 +8367,7 @@ defmodule SymphonyElixir.CoreTest do
                "orocsy/feature-analytics-observability-integration"
 
       assert get_in(preflight, ["review", "head_sha"]) == head_sha
+      assert is_nil(preflight["certification_base_sha"])
 
       assert {current_branch, 0} =
                System.cmd("git", ["branch", "--show-current"],
