@@ -70,13 +70,16 @@ defmodule SymphonyElixir.DispatchPreflight do
   @spec read_authoritative(String.t() | nil) :: {:ok, map()} | :none | {:error, term()}
   def read_authoritative(workspace) when is_binary(workspace) do
     case read_raw(workspace) do
-      {:ok, %{"controller_signature" => signature} = preflight} when is_binary(signature) ->
-        if ControllerEvidence.valid?(preflight),
-          do: {:ok, preflight},
-          else: {:error, :invalid_controller_signature}
-
       {:ok, preflight} when is_map(preflight) ->
-        {:error, :missing_controller_signature}
+        case Map.fetch(preflight, "controller_signature") do
+          {:ok, _signature} ->
+            if ControllerEvidence.valid?(preflight),
+              do: {:ok, preflight},
+              else: {:error, :invalid_controller_signature}
+
+          :error ->
+            {:error, :missing_controller_signature}
+        end
 
       other ->
         other

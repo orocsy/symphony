@@ -6684,6 +6684,14 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, {:invalid_certification_preflight, :invalid_controller_signature}} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(Map.put(tampered, "controller_signature", nil))
+      )
+
+      assert {:error, {:invalid_certification_preflight, :invalid_controller_signature}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
     after
       File.rm_rf(test_root)
     end
