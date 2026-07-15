@@ -26,7 +26,9 @@ defmodule SymphonyElixir.DispatchPreflight do
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements),
          mode <- preflight_mode(workspace, requirements, inspection),
-         :ok <- maybe_switch_to_review_head(workspace, inspection, mode, requirements) do
+         :ok <- maybe_switch_to_review_head(workspace, inspection, mode, requirements),
+         {:ok, certification_base_sha} <-
+           certification_base_sha(workspace, issue, requirements, inspection) do
       preflight =
         case mode do
           "handoff_recovery" -> handoff_recovery_preflight(workspace, issue, requirements, inspection)
@@ -34,6 +36,7 @@ defmodule SymphonyElixir.DispatchPreflight do
           "integration_check" -> integration_check_preflight(workspace, issue, requirements, inspection)
           _ -> fresh_implementation_preflight(workspace, issue, requirements, inspection)
         end
+        |> Map.put("certification_base_sha", certification_base_sha)
         |> merge_policy_patches(workspace)
         |> merge_knowledge_ledger(workspace)
         |> bind_controller_identity(issue, requirements)
@@ -729,7 +732,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
-      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "review-feedback-classified"),
       "first_task" => review_rework_first_task(open_corrections),
@@ -771,7 +773,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
-      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu"),
       "first_task" => handoff_recovery_first_task(open_corrections, requirements),
@@ -839,7 +840,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name),
-      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" => integration_check_first_task(inspection),
@@ -880,7 +880,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => fresh_implementation_branch(workspace, issue, requirements),
-      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" =>
@@ -911,10 +910,21 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp certification_base_sha(workspace, issue, requirements, inspection) do
     issue_identifier = issue_value(issue, :identifier)
     branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name)
+    explicit_base_sha = get_in(requirements, ["runtime_contract", "certification_base_sha"])
 
-    get_in(requirements, ["runtime_contract", "certification_base_sha"]) ||
-      preserved_certification_base_sha(workspace, issue_identifier, branch) ||
-      Map.get(inspection, :head_sha)
+    case preserved_certification_base_sha(workspace, issue_identifier, branch) do
+      {:ok, base_sha} ->
+        {:ok, base_sha}
+
+      :none ->
+        {:ok, explicit_base_sha || Map.get(inspection, :head_sha)}
+
+      {:error, :invalid_controller_signature} when is_binary(explicit_base_sha) ->
+        {:ok, explicit_base_sha}
+
+      {:error, reason} ->
+        {:error, {:invalid_certification_preflight, reason}}
+    end
   end
 
   defp preserved_certification_base_sha(workspace, issue_identifier, branch) do
@@ -922,9 +932,11 @@ defmodule SymphonyElixir.DispatchPreflight do
          true <- previous["issue"] == issue_identifier,
          true <- previous["branch"] == branch,
          candidate when is_binary(candidate) and candidate != "" <- previous["certification_base_sha"] do
-      candidate
+      {:ok, candidate}
     else
-      _ -> nil
+      :none -> :none
+      {:error, reason} -> {:error, reason}
+      _ -> :none
     end
   end
 

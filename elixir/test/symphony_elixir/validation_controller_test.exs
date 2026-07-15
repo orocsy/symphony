@@ -85,10 +85,38 @@ defmodule SymphonyElixir.ValidationControllerTest do
       File.mkdir_p!(state_dir)
       File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
 
-      assert {:error, {:undeclared_write, changed_paths}} =
+      assert {:error, {:invalid_dispatch_preflight, :invalid_controller_signature}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+    after
+      File.rm_rf(workspace)
+    end
+  end
 
-      assert Enum.sort(changed_paths) == ["README.md", "SECRET.md"]
+  test "fails closed when a signed certification baseline is not an ancestor" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      {:ok, compiled} = RuntimeContract.compile(issue.description)
+      missing_base_sha = String.duplicate("a", 40)
+      head_sha = git_output!(workspace, ["rev-parse", "HEAD"])
+
+      preflight =
+        ControllerEvidence.sign(%{
+          "mode" => "review_rework",
+          "issue_id" => issue.id,
+          "issue" => issue.identifier,
+          "branch" => "orocsy/cod-700",
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at),
+          "certification_base_sha" => missing_base_sha
+        })
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+      File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
+
+      assert {:error, {:dispatch_certification_base_not_ancestor, ^missing_base_sha, ^head_sha}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
       File.rm_rf(workspace)
     end

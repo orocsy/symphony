@@ -275,6 +275,9 @@ defmodule SymphonyElixir.ValidationController do
 
       :none ->
         integration_certification_base_sha(workspace, compiled, head_sha)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -295,20 +298,49 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
-    with {:ok, preflight} <- DispatchPreflight.read_authoritative(workspace),
-         true <- preflight["issue_id"] == issue.id,
-         true <- preflight["issue"] == issue.identifier,
-         true <- preflight["branch"] == compiled.contract["integration_branch"],
-         true <- preflight["contract_hash"] == compiled.contract_hash,
-         true <-
-           preflight["issue_revision"] ==
-             RuntimeContract.issue_revision(issue.description, issue.updated_at),
-         base_sha when is_binary(base_sha) <- preflight["certification_base_sha"],
-         true <- base_sha != "",
-         true <- git_ancestor?(workspace, base_sha, head_sha) do
-      {:ok, base_sha}
-    else
-      _ -> :none
+    case DispatchPreflight.read_authoritative(workspace) do
+      {:ok, preflight} ->
+        validate_dispatch_certification_base(issue, workspace, compiled, head_sha, preflight)
+
+      :none ->
+        :none
+
+      {:error, reason} ->
+        {:error, {:invalid_dispatch_preflight, reason}}
+    end
+  end
+
+  defp validate_dispatch_certification_base(issue, workspace, compiled, head_sha, preflight) do
+    expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
+
+    cond do
+      preflight["issue_id"] != issue.id ->
+        {:error, :dispatch_preflight_issue_id_mismatch}
+
+      preflight["issue"] != issue.identifier ->
+        {:error, :dispatch_preflight_issue_mismatch}
+
+      preflight["branch"] != compiled.contract["integration_branch"] ->
+        {:error, :dispatch_preflight_branch_mismatch}
+
+      preflight["contract_hash"] != compiled.contract_hash ->
+        {:error, :dispatch_preflight_contract_mismatch}
+
+      preflight["issue_revision"] != expected_revision ->
+        {:error, :dispatch_preflight_issue_revision_mismatch}
+
+      is_nil(preflight["certification_base_sha"]) ->
+        :none
+
+      not is_binary(preflight["certification_base_sha"]) or
+          preflight["certification_base_sha"] == "" ->
+        {:error, :invalid_dispatch_certification_base}
+
+      not git_ancestor?(workspace, preflight["certification_base_sha"], head_sha) ->
+        {:error, {:dispatch_certification_base_not_ancestor, preflight["certification_base_sha"], head_sha}}
+
+      true ->
+        {:ok, preflight["certification_base_sha"]}
     end
   end
 

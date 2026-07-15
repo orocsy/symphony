@@ -6427,7 +6427,36 @@ defmodule SymphonyElixir.CoreTest do
 
       Agent.update(review_head, fn _ -> String.duplicate("b", 40) end)
 
-      assert {:ok, second_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      refined_issue = %{
+        issue
+        | description: """
+          ## Runtime Contract
+
+          ```yaml
+          schema_version: 1
+          ticket_type: implementation
+          base_branch: main
+          integration_branch: orocsy/cod-266
+          certification_base_sha: #{String.duplicate("c", 40)}
+          dependencies: []
+          mius:
+            - id: COD-266-MIU-1
+              write_scope:
+                - src/app/api/cards/handler.ts
+              validations:
+                - pnpm typecheck
+          final_validations:
+            - pnpm typecheck
+          review:
+            authority: github_codex
+            require_current_head: true
+          ```
+          """
+      }
+
+      assert {:ok, second_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, refined_issue)
+
       assert second_preflight["certification_base_sha"] == first_head
       assert get_in(second_preflight, ["review", "head_sha"]) == String.duplicate("b", 40)
       assert SymphonyElixir.ControllerEvidence.valid?(second_preflight)
@@ -6487,6 +6516,17 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "issue" => "COD-266",
+          "branch" => "orocsy/cod-246-preference-miu-guest-setup-controls",
+          "review" => %{"head_sha" => String.duplicate("c", 40)}
+        })
+      )
 
       Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
         cond do
@@ -6528,6 +6568,54 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.RuntimeContract.issue_revision(issue.description, issue.updated_at)
 
       assert SymphonyElixir.ControllerEvidence.valid?(preflight)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight blocks unsigned legacy baseline reseeding without an explicit contract baseline" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-unsigned-certification-baseline-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-cod-legacy-baseline",
+        identifier: "COD-LEGACY",
+        title: "Legacy recovery",
+        state: "In Progress",
+        branch_name: "orocsy/cod-legacy",
+        description: """
+        ## Write Scope
+        - README.md
+
+        ## Validation
+        ```bash
+        pnpm typecheck
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "issue" => "COD-LEGACY",
+          "branch" => "orocsy/cod-legacy",
+          "review" => %{"head_sha" => String.duplicate("a", 40)}
+        })
+      )
+
+      assert {:error, {:invalid_certification_preflight, :invalid_controller_signature}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
     after
       File.rm_rf(test_root)
     end

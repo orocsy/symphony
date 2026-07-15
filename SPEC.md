@@ -51,8 +51,10 @@ MIU commit ranges SHOULD persist the pre-dispatch branch head as signed
 controller evidence bound to the current issue, branch, and contract so a push
 cannot erase the audit baseline and a workspace edit cannot narrow it. A
 recovery contract MAY declare an exact immutable `certification_base_sha` when
-no prior signed baseline exists. Local workspace `HEAD` alone MUST NOT establish
-that baseline.
+no prior signed baseline exists. A signed same-issue, same-branch baseline takes
+precedence over later contract input. Invalid signed evidence or unsigned legacy
+preflight without an explicit migration baseline MUST fail closed. Local
+workspace `HEAD` alone MUST NOT establish that baseline.
 
 ## 2. Goals and Non-Goals
 
