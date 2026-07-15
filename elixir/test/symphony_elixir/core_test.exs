@@ -6310,6 +6310,8 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert preflight["first_task"] =~ "request a fresh Codex review directly"
+      assert preflight["first_task"] =~ "no structured Runtime Contract"
       assert get_in(preflight, ["toolchain", "executables", "npm", "available"]) in [true, false]
       assert is_list(get_in(preflight, ["toolchain", "package_scripts"]))
       assert get_in(preflight, ["review", "feedback_count"]) == 1
@@ -6344,6 +6346,10 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Review rework execution contract"
       assert prompt =~ "do not append `review-feedback-classified` as a first action"
       assert prompt =~ "classification alone is lifecycle context"
+      assert prompt =~ "request runtime handoff certification"
+      assert prompt =~ "--type handoff.requested"
+      assert prompt =~ "legacy issue with no Runtime Contract gate"
+      refute prompt =~ "commit, push the same branch, and request fresh Codex review"
       refute prompt =~ "You are an agent for this repository."
     after
       File.rm_rf(test_root)

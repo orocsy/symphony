@@ -98,7 +98,9 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
-         true <- not paths_denied?(changed_paths, compiled.denied_scope) || {:error, {:denied_scope_write, changed_paths}},
+         true <-
+           not paths_denied?(changed_paths, compiled.denied_scope) ||
+             {:error, {:denied_scope_write, changed_paths}},
          {:ok, validation_events} <- run_validations(issue, workspace, compiled, miu, head_sha),
          {:ok, ^head_sha} <- unchanged_head(workspace, head_sha),
          true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
@@ -193,6 +195,46 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   def validate_final(_issue, _workspace), do: {:error, :invalid_final_validation_request}
+
+  @spec validate_review_rework_delta(Issue.t(), String.t(), String.t()) ::
+          {:ok, [map()]} | {:error, term()} | {:blocked, term()}
+  def validate_review_rework_delta(%Issue{} = issue, workspace, certified_head_sha)
+      when is_binary(workspace) and is_binary(certified_head_sha) do
+    with {:ok, compiled} <- structured_contract(issue),
+         :ok <- validate_review_rework_preflight(issue, workspace, compiled, certified_head_sha),
+         {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
+         true <- branch == compiled.contract["integration_branch"] || {:error, :canonical_branch_mismatch},
+         true <- clean_worktree?(workspace) || {:error, :dirty_worktree},
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         true <- certified_head_sha != head_sha || {:error, :empty_review_rework_delta},
+         true <- git_ancestor?(workspace, certified_head_sha, head_sha) || {:error, :review_rework_base_not_ancestor},
+         {:ok, changed_paths} <- changed_paths_across_commits(workspace, certified_head_sha, head_sha),
+         true <- changed_paths != [] || {:error, :empty_review_rework_delta},
+         true <-
+           not paths_denied?(changed_paths, compiled.denied_scope) ||
+             {:error, {:denied_scope_write, changed_paths}},
+         {:ok, validations} <- review_rework_validations(compiled, changed_paths),
+         {:ok, events} <-
+           run_validations(
+             issue,
+             workspace,
+             compiled,
+             %{"id" => "__review_rework__", "validations" => validations},
+             head_sha
+           ),
+         {:ok, ^head_sha} <- unchanged_head(workspace, head_sha),
+         true <- clean_worktree?(workspace) || {:error, :validation_left_dirty_worktree} do
+      {:ok, events}
+    else
+      false -> {:error, :review_rework_validation_precondition_failed}
+      {:error, _reason} = error -> error
+      {:blocked, _reason} = blocked -> blocked
+      _ -> {:error, :invalid_review_rework_validation_request}
+    end
+  end
+
+  def validate_review_rework_delta(_issue, _workspace, _certified_head_sha),
+    do: {:error, :invalid_review_rework_validation_request}
 
   defp structured_contract(%Issue{} = issue) do
     case RuntimeContract.compile(issue.description) do
@@ -361,6 +403,25 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
+  defp changed_paths_across_commits(workspace, base_head_sha, head_sha) do
+    case git(workspace, [
+           "log",
+           "--format=",
+           "--name-only",
+           "--no-renames",
+           "-m",
+           "#{base_head_sha}..#{head_sha}",
+           "--"
+         ]) do
+      {:ok, output} ->
+        paths = output |> String.split("\n", trim: true) |> Enum.uniq() |> Enum.sort()
+        {:ok, paths}
+
+      error ->
+        error
+    end
+  end
+
   defp paths_allowed?(changed_paths, allowed_scope) do
     Enum.all?(changed_paths, fn path ->
       Enum.any?(allowed_scope, &path_matches_scope?(path, &1))
@@ -378,6 +439,67 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp path_matches_scope?(_path, _scope), do: false
+
+  defp review_rework_validations(compiled, changed_paths) do
+    mius = compiled.contract["mius"]
+    allowed_scope = Enum.flat_map(mius, & &1["write_scope"])
+
+    if paths_allowed?(changed_paths, allowed_scope) do
+      affected_validations =
+        mius
+        |> Enum.filter(fn miu ->
+          Enum.any?(changed_paths, fn path ->
+            Enum.any?(miu["write_scope"], &path_matches_scope?(path, &1))
+          end)
+        end)
+        |> Enum.flat_map(& &1["validations"])
+
+      {:ok, Enum.uniq(affected_validations ++ compiled.contract["final_validations"])}
+    else
+      undeclared_paths =
+        Enum.reject(changed_paths, fn path ->
+          Enum.any?(allowed_scope, &path_matches_scope?(path, &1))
+        end)
+
+      {:error, {:undeclared_review_rework_write, undeclared_paths}}
+    end
+  end
+
+  defp validate_review_rework_preflight(issue, workspace, compiled, certified_head_sha) do
+    expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
+
+    case DispatchPreflight.read_authoritative(workspace) do
+      {:ok, preflight} ->
+        cond do
+          preflight["mode"] != "review_rework" ->
+            {:error, :review_rework_dispatch_preflight_required}
+
+          preflight["issue_id"] != issue.id or preflight["issue"] != issue.identifier ->
+            {:error, :review_rework_dispatch_issue_mismatch}
+
+          preflight["branch"] != compiled.contract["integration_branch"] ->
+            {:error, :review_rework_dispatch_branch_mismatch}
+
+          preflight["contract_hash"] != compiled.contract_hash ->
+            {:error, :review_rework_dispatch_contract_mismatch}
+
+          preflight["issue_revision"] != expected_revision ->
+            {:error, :review_rework_dispatch_issue_revision_mismatch}
+
+          get_in(preflight, ["review", "head_sha"]) != certified_head_sha ->
+            {:error, :review_rework_dispatch_base_mismatch}
+
+          true ->
+            :ok
+        end
+
+      :none ->
+        {:error, :review_rework_dispatch_preflight_required}
+
+      {:error, reason} ->
+        {:error, {:invalid_review_rework_dispatch_preflight, reason}}
+    end
+  end
 
   defp glob_regex(scope) do
     scope

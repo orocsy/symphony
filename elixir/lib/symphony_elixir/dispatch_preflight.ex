@@ -742,7 +742,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "review-feedback-classified"),
-      "first_task" => review_rework_first_task(open_corrections),
+      "first_task" => review_rework_first_task(open_corrections, requirements),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
@@ -758,14 +758,18 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
-  defp review_rework_first_task([correction | _]) do
+  defp review_rework_first_task([correction | _], _requirements) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
     "Resolve the open Orocsy correction before the review shortcut: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue PR review handoff. Do not append review-feedback-classified while an open correction remains."
   end
 
-  defp review_rework_first_task(_open_corrections) do
-    "Fix only the listed current-head review feedback on the existing PR branch, then run focused validation, push, and request a fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
+  defp review_rework_first_task(_open_corrections, %{"runtime_contract_status" => "structured"}) do
+    "Fix only the listed current-head review feedback on the existing PR branch, run only the contract-declared focused validation, commit and push, then request runtime handoff certification. Symphony validates the review delta and requests the fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
+  end
+
+  defp review_rework_first_task(_open_corrections, _requirements) do
+    "Fix only the listed current-head review feedback on the existing PR branch, run focused validation, commit and push, then request a fresh Codex review directly. This legacy issue has no structured Runtime Contract for runtime handoff certification. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
   end
 
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
