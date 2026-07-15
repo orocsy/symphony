@@ -938,9 +938,12 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp preserved_certification_base_sha(workspace, issue_identifier, branch) do
     with {:ok, previous} <- read_authoritative(workspace),
          true <- previous["issue"] == issue_identifier,
-         true <- previous["branch"] == branch,
-         candidate when is_binary(candidate) and candidate != "" <- previous["certification_base_sha"] do
-      {:ok, candidate}
+         true <- previous["branch"] == branch do
+      case previous["certification_base_sha"] do
+        nil -> {:ok, nil}
+        candidate when is_binary(candidate) and candidate != "" -> {:ok, candidate}
+        _ -> {:error, :invalid_certification_base}
+      end
     else
       :none -> :none
       {:error, reason} -> {:error, reason}

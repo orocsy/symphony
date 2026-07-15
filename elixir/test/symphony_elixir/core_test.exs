@@ -6465,6 +6465,71 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight preserves a signed nil baseline across contract refinements" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-nil-certification-baseline-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-cod-signed-nil-baseline",
+        identifier: "COD-NIL",
+        title: "Signed nil baseline",
+        state: "In Progress",
+        branch_name: "orocsy/cod-nil",
+        description: """
+        ## Write Scope
+        - README.md
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert {:ok, first_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      assert is_nil(first_preflight["certification_base_sha"])
+      assert SymphonyElixir.ControllerEvidence.valid?(first_preflight)
+
+      refined_issue = %{
+        issue
+        | description: """
+          ## Runtime Contract
+
+          ```yaml
+          schema_version: 1
+          ticket_type: implementation
+          base_branch: main
+          integration_branch: orocsy/cod-nil
+          certification_base_sha: #{String.duplicate("a", 40)}
+          dependencies: []
+          mius:
+            - id: COD-NIL-MIU-1
+              write_scope:
+                - README.md
+              validations:
+                - pnpm typecheck
+          final_validations:
+            - pnpm typecheck
+          review:
+            authority: github_codex
+            require_current_head: true
+          ```
+          """
+      }
+
+      assert {:ok, second_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, refined_issue)
+
+      assert is_nil(second_preflight["certification_base_sha"])
+      assert SymphonyElixir.ControllerEvidence.valid?(second_preflight)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight signs an explicit recovery certification baseline" do
     test_root =
       Path.join(
