@@ -46,7 +46,9 @@ contract. The Elixir implementation supports runtime-owned MIU and handoff
 certificates, bounded validation, and opt-in automatic PR merge. These
 controller decisions must be based on durable issue/workspace/GitHub evidence;
 telemetry and dashboard projections remain observation-only and cannot by
-themselves authorize a retry, handoff, or merge.
+themselves authorize a retry, handoff, or merge. Implementations that certify
+MIU commit ranges SHOULD persist the pre-dispatch branch head across retries so
+a push cannot erase the audit baseline for preserved workspace progress.
 
 ## 2. Goals and Non-Goals
 

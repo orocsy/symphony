@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.ValidationController do
   @moduledoc """
-  Validates one micro-commit checkpoint and issues runtime-owned MIU evidence.
+  Validates one MIU commit-range checkpoint and issues runtime-owned evidence.
   """
 
-  alias SymphonyElixir.{ControllerEvidence, Linear.Issue, RuntimeContract, RuntimeRequest}
+  alias SymphonyElixir.{ControllerEvidence, DispatchPreflight, Linear.Issue, RuntimeContract, RuntimeRequest}
 
   @authority "symphony.runtime.validation-controller"
   @attempts_path ".orocsy/delivery/state/validation-attempts.jsonl"
@@ -269,6 +269,16 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp initial_certification_base_sha(workspace, compiled, head_sha) do
+    case dispatch_certification_base_sha(workspace, head_sha) do
+      {:ok, base_sha} ->
+        {:ok, base_sha}
+
+      :none ->
+        integration_certification_base_sha(workspace, compiled, head_sha)
+    end
+  end
+
+  defp integration_certification_base_sha(workspace, compiled, head_sha) do
     integration_ref = "refs/remotes/origin/#{compiled.contract["integration_branch"]}"
 
     case git(workspace, ["rev-parse", "--verify", integration_ref]) do
@@ -281,6 +291,17 @@ defmodule SymphonyElixir.ValidationController do
 
       {:error, _reason} ->
         base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
+    end
+  end
+
+  defp dispatch_certification_base_sha(workspace, head_sha) do
+    with {:ok, preflight} <- DispatchPreflight.read(workspace),
+         base_sha when is_binary(base_sha) <- preflight["certification_base_sha"],
+         true <- base_sha != "",
+         true <- git_ancestor?(workspace, base_sha, head_sha) do
+      {:ok, base_sha}
+    else
+      _ -> :none
     end
   end
 

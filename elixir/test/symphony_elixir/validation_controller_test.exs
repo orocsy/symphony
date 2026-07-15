@@ -20,6 +20,37 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "certifies pushed review rework from the preserved dispatch baseline" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      base_sha = git_output!(workspace, ["rev-parse", "main"])
+      git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
+      git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
+
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "COD-700",
+          "branch" => "orocsy/cod-700",
+          "certification_base_sha" => base_sha
+        })
+      )
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["base_head_sha"] == base_sha
+      assert certificate["changed_paths"] == ["README.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "ignores untracked runtime ledger files during cleanliness checks" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures", exclude_orocsy?: false)
 

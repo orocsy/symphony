@@ -710,6 +710,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["branch"] || issue_value(issue, :branch_name),
+      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "review-feedback-classified"),
       "first_task" => review_rework_first_task(open_corrections),
@@ -751,6 +752,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
+      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu"),
       "first_task" => handoff_recovery_first_task(open_corrections, requirements),
@@ -818,6 +820,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name),
+      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" => integration_check_first_task(inspection),
@@ -858,6 +861,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "issue" => issue_value(issue, :identifier),
       "state" => issue_value(issue, :state),
       "branch" => fresh_implementation_branch(workspace, issue, requirements),
+      "certification_base_sha" => certification_base_sha(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
       "first_task" =>
@@ -883,6 +887,34 @@ defmodule SymphonyElixir.DispatchPreflight do
       shared_existing_branch_from_requirements(requirements) ||
       requirements["branch"] ||
       issue_value(issue, :branch_name)
+  end
+
+  defp certification_base_sha(workspace, issue, requirements, inspection) do
+    issue_identifier = issue_value(issue, :identifier)
+    branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name)
+
+    preserved_certification_base_sha(workspace, issue_identifier, branch) ||
+      Map.get(inspection, :head_sha) ||
+      current_head(workspace)
+  end
+
+  defp preserved_certification_base_sha(workspace, issue_identifier, branch) do
+    with {:ok, previous} <- read(workspace),
+         true <- previous["issue"] == issue_identifier,
+         true <- previous["branch"] == branch,
+         candidate when is_binary(candidate) and candidate != "" <-
+           previous["certification_base_sha"] || get_in(previous, ["review", "head_sha"]) do
+      candidate
+    else
+      _ -> nil
+    end
+  end
+
+  defp current_head(workspace) do
+    case git_command(workspace, ["rev-parse", "HEAD"]) do
+      {head_sha, 0} -> String.trim(head_sha)
+      _ -> nil
+    end
   end
 
   defp authoritative_contract_branch(%{"runtime_contract_status" => "structured"} = requirements) do

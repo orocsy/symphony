@@ -34,8 +34,12 @@ feedback.
 
 Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
 contract is the sole authority for branch, write scope, MIUs, validation, and
-review behavior. The runtime certifies one clean micro-commit at a time,
-executes declared validation itself, and issues `handoff.ready` only after all
+review behavior. The runtime certifies one clean MIU checkpoint at a time; a
+checkpoint may contain multiple focused microcommits. Dispatch preflight
+persists the issue branch's certification baseline so a pushed recovery can
+still audit the complete MIU range instead of treating the new remote head as
+its starting point. The runtime executes declared validation itself, and issues
+`handoff.ready` only after all
 MIU certificates and final validations match the current issue revision and
 pushed head, and an open pull request connects the canonical integration branch
 to the contract base. Worker-authored generic gate events cannot imply completion.

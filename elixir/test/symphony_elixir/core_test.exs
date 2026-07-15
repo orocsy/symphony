@@ -6350,6 +6350,90 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight preserves the original review certification baseline across retries" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-baseline-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue = %Issue{
+        id: "issue-cod-266-preflight-baseline",
+        identifier: "COD-266",
+        title: "Guest safety review rework",
+        state: "Rework",
+        branch_name: "orocsy/cod-266",
+        description: """
+        ## Write Scope
+        - src/app/api/cards/handler.ts
+
+        ### MIU 1 - Preserve guest safety
+        Keep allergy filtering active.
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {:ok, review_head} = Agent.start_link(fn -> String.duplicate("a", 40) end)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        head_sha = Agent.get(review_head, & &1)
+
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 103,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103",
+                 "head" => %{"sha" => head_sha, "ref" => "orocsy/cod-266"}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Preserve allergy filtering.",
+                 "commit_id" => head_sha,
+                 "path" => "src/app/api/cards/handler.ts",
+                 "line" => 133,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/103#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/103/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, first_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      first_head = String.duplicate("a", 40)
+      assert first_preflight["certification_base_sha"] == first_head
+
+      Agent.update(review_head, fn _ -> String.duplicate("b", 40) end)
+
+      assert {:ok, second_preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+      assert second_preflight["certification_base_sha"] == first_head
+      assert get_in(second_preflight, ["review", "head_sha"]) == String.duplicate("b", 40)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps test-spec child tickets out of shared PR review rework" do
     test_root =
       Path.join(
