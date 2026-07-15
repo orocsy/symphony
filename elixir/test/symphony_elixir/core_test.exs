@@ -6310,6 +6310,8 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["checkpoint_event"] == "review-feedback-classified"
+      assert preflight["first_task"] =~ "request a fresh Codex review directly"
+      assert preflight["first_task"] =~ "no structured Runtime Contract"
       assert get_in(preflight, ["toolchain", "executables", "npm", "available"]) in [true, false]
       assert is_list(get_in(preflight, ["toolchain", "package_scripts"]))
       assert get_in(preflight, ["review", "feedback_count"]) == 1

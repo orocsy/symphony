@@ -409,6 +409,7 @@ defmodule SymphonyElixir.ValidationController do
            "--format=",
            "--name-only",
            "--no-renames",
+           "-m",
            "#{base_head_sha}..#{head_sha}",
            "--"
          ]) do

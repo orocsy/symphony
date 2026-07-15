@@ -581,7 +581,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Before spending broad analysis tokens, either edit a scoped code/test file or write an explicit Orocsy blocker/correction.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
-    In the first turn, complete the scoped fix, contract-declared focused validation, commit, push, and runtime handoff request, or stop with a concrete blocker.
+    In the first turn, complete the scoped fix, contract-declared focused validation, commit, push, and the structured runtime handoff or legacy direct review request described above, or stop with a concrete blocker.
     Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review.
     Never merge automatically.
     """
