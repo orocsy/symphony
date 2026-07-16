@@ -7973,11 +7973,46 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, %{"mode" => "handoff_recovery"} = corrected_preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
-      assert corrected_preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert corrected_preflight["checkpoint_event"] == "correction-scoped-fix"
       assert corrected_preflight["first_task"] =~ "Browser validation failed in the worker sandbox"
-      assert corrected_preflight["first_task"] =~ "active Runtime Contract gate"
-      assert corrected_preflight["first_task"] =~ "exact runtime event supplied by the gate"
-      assert corrected_preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
+      assert corrected_preflight["first_task"] =~ "run focused validation"
+      refute corrected_preflight["first_task"] =~ "active Runtime Contract gate"
+
+      File.write!(
+        Path.join(inbox_dir, "correction_structured_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_structured_browser",
+          "status" => "resolved",
+          "next_action" => "retry",
+          "resolved_at" => "2026-07-16T12:00:00Z",
+          "summary" => "Browser validation failed in the worker sandbox"
+        })
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_controller_validation.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_controller_validation",
+          "source" => "symphony.runtime.validation-controller",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Controller validation failed",
+          "guard" => %{"miu_id" => "COD-274-MIU-1"}
+        })
+      )
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = controller_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert controller_preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert controller_preflight["first_task"] =~ "active Runtime Contract gate"
+      assert controller_preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
+
+      assert [controller_correction] = controller_preflight["open_corrections"]
+      assert controller_correction["source"] == "symphony.runtime.validation-controller"
+      assert controller_correction["next_action"] == "retry"
+      assert controller_correction["guard"] == %{"miu_id" => "COD-274-MIU-1"}
     after
       File.rm_rf(test_root)
     end

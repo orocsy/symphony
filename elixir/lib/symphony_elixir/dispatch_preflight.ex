@@ -999,6 +999,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     open_corrections = open_correction_summaries(workspace)
     correction_active? = open_corrections != []
     structured_contract? = requirements["runtime_contract_status"] == "structured"
+    controller_validation_active? = Enum.any?(open_corrections, &retryable_controller_validation_correction?/1)
     feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
@@ -1010,10 +1011,12 @@ defmodule SymphonyElixir.DispatchPreflight do
       "branch" => handoff_recovery_branch(workspace, issue, requirements, inspection),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" =>
-        if(structured_contract?,
-          do: "runtime-contract-gate",
-          else: if(correction_active?, do: "correction-scoped-fix", else: "gate.post-miu")
-        ),
+        cond do
+          structured_contract? and controller_validation_active? -> "runtime-contract-gate"
+          correction_active? -> "correction-scoped-fix"
+          structured_contract? -> "runtime-contract-gate"
+          true -> "gate.post-miu"
+        end,
       "first_task" => handoff_recovery_first_task(open_corrections, requirements),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
@@ -1033,15 +1036,17 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_first_task([correction | _], %{"runtime_contract_status" => "structured"}) do
-    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+    if retryable_controller_validation_correction?(correction) do
+      summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
-    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
+      "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
+    else
+      handoff_recovery_correction_task(correction)
+    end
   end
 
   defp handoff_recovery_first_task([correction | _], _requirements) do
-    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
-
-    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
+    handoff_recovery_correction_task(correction)
   end
 
   defp handoff_recovery_first_task(_open_corrections, requirements) when is_map(requirements) do
@@ -1059,6 +1064,12 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp handoff_recovery_first_task(_open_corrections, _requirements) do
     "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
+  end
+
+  defp handoff_recovery_correction_task(correction) do
+    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
   end
 
   defp handoff_recovery_branch(workspace, issue, requirements, inspection) do
@@ -2136,7 +2147,10 @@ defmodule SymphonyElixir.DispatchPreflight do
       "summary" => compact_feedback_body(correction["summary"]),
       "findings" => compact_correction_list(correction["findings"]),
       "required_corrections" => compact_correction_list(correction["required_corrections"]),
-      "artifacts" => correction["artifacts"]
+      "artifacts" => correction["artifacts"],
+      "source" => correction["source"],
+      "next_action" => correction["next_action"],
+      "guard" => correction["guard"]
     }
     |> Enum.reject(fn {_key, value} -> blank?(value) or value == [] or value == %{} end)
     |> Map.new()
