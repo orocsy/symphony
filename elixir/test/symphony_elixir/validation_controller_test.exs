@@ -172,6 +172,27 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "parses Playwright success summary" do
+    {workspace, issue} = workspace_and_issue("Running 1 test using 1 worker\n  1 passed (29.1s)")
+
+    issue = %{
+      issue
+      | description:
+          String.replace(
+            issue.description,
+            "- ./fake-test",
+            "- pnpm exec playwright test tests/e2e/example.spec.ts"
+          )
+    }
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert length(certificate["validation_event_ids"]) == 1
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "treats zero-test Python unittest output as a failed test validation" do
     {workspace, issue} = workspace_and_issue("Ran 0 tests in 0.001s")
 

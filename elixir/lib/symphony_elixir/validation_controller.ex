@@ -679,6 +679,17 @@ defmodule SymphonyElixir.ValidationController do
 
           %{"collected" => passed + failed, "passed" => passed, "failed" => failed}
 
+        match = Regex.run(~r/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?\s+\([\d.]+s\)/i, output, capture: :all_but_first) ->
+          [passed, failed] =
+            match
+            |> then(fn
+              [passed] -> [passed, "0"]
+              [passed, failed] -> [passed, failed]
+            end)
+            |> Enum.map(&String.to_integer/1)
+
+          %{"collected" => passed + failed, "passed" => passed, "failed" => failed}
+
         true ->
           nil
       end
