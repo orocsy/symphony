@@ -837,6 +837,32 @@ defmodule SymphonyElixir.ValidationController do
 
   def reconcile_runtime_corrections(_issue, _workspace, _miu_id, _result), do: :ok
 
+  defp validation_correction_attrs(workspace, "__final__", head_sha, {:error, {:validation_failed, event}})
+       when is_map(event) do
+    %{
+      source: @authority,
+      source_status: "blocked",
+      summary: "Final authoritative validation failed",
+      findings:
+        [
+          "Command: #{event["command"]}",
+          "Reason: #{event["reason_class"]}; exit code: #{event["exit_code"]}",
+          validation_output_finding(workspace, event)
+        ]
+        |> Enum.reject(&is_nil/1),
+      required_corrections: [
+        "Do not create a post-certification commit. An operator must either repair the validation environment and request final handoff again at the same head, or add an explicit repair MIU to the Runtime Contract before any code change."
+      ],
+      next_action: "block",
+      guard: %{
+        "miu_id" => "__final__",
+        "head_sha" => head_sha,
+        "validation_event_id" => event["event_id"],
+        "bounded_log_path" => event["bounded_log_path"]
+      }
+    }
+  end
+
   defp validation_correction_attrs(workspace, miu_id, head_sha, {:error, {:validation_failed, event}})
        when is_map(event) do
     %{

@@ -514,7 +514,11 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert event["miu_id"] == "__final__"
       assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
       assert get_in(correction, ["guard", "miu_id"]) == "__final__"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
       assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
+      assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "Do not create a post-certification commit"))
+      refute Enum.any?(correction["required_corrections"], &String.contains?(&1, "new micro commit"))
     after
       File.rm_rf(workspace)
     end
