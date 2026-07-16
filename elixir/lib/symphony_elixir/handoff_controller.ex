@@ -61,8 +61,9 @@ defmodule SymphonyElixir.HandoffController do
       {:ok, request} ->
         result = certify_handoff(issue, workspace)
         :ok = record_request_result(workspace, request, result)
+        correction_scope = validation_correction_scope(result, workspace)
 
-        case ValidationController.reconcile_runtime_corrections(issue, workspace, "__final__", result) do
+        case ValidationController.reconcile_runtime_corrections(issue, workspace, correction_scope, result) do
           :ok -> result
           {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
         end
@@ -73,6 +74,17 @@ defmodule SymphonyElixir.HandoffController do
 
       :none ->
         :none
+    end
+  end
+
+  defp validation_correction_scope({:error, {:validation_failed, %{"miu_id" => miu_id}}}, _workspace)
+       when is_binary(miu_id) and miu_id != "",
+       do: miu_id
+
+  defp validation_correction_scope(_result, workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} -> "__review_rework__"
+      _ -> "__final__"
     end
   end
 

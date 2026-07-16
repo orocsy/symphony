@@ -378,6 +378,12 @@ defmodule SymphonyElixir.DispatchPreflight do
       scoped_review_feedback?(inspection, requirements) ->
         "review_rework"
 
+      retryable_review_rework_validation_correction?(workspace) ->
+        "review_rework"
+
+      retryable_miu_validation_correction?(workspace) ->
+        "handoff_recovery"
+
       in_progress_implementation_continuation?(workspace, requirements) ->
         "fresh_implementation"
 
@@ -445,7 +451,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     if not scoped_review_feedback?(inspection, requirements) do
       case HandoffCertificate.latest_signed_head(struct_issue(issue), workspace) do
         {:ok, signed_head} -> Map.put(preflight, "review_delta_base_head", signed_head)
-        _ -> preflight
+        _ -> maybe_preserve_review_delta_base(preflight, workspace, issue, requirements)
       end
     else
       preflight
@@ -454,6 +460,32 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp maybe_bind_review_delta_base(preflight, _workspace, _issue, _requirements, _inspection, _mode),
     do: preflight
+
+  defp maybe_preserve_review_delta_base(preflight, workspace, issue, requirements) do
+    issue_id = issue_value(issue, :id)
+    contract_hash = requirements["contract_hash"]
+    issue_revision = requirements["issue_revision"]
+
+    case read_authoritative(workspace) do
+      {:ok,
+       %{
+         "mode" => "review_rework",
+         "issue_id" => ^issue_id,
+         "contract_hash" => ^contract_hash,
+         "issue_revision" => ^issue_revision
+       } = prior_preflight} ->
+        case prior_preflight["review_delta_base_head"] || get_in(prior_preflight, ["review", "head_sha"]) do
+          base_head when is_binary(base_head) and base_head != "" ->
+            Map.put(preflight, "review_delta_base_head", base_head)
+
+          _ ->
+            preflight
+        end
+
+      _ ->
+        preflight
+    end
+  end
 
   defp normalize_state(value) when is_binary(value), do: value |> String.trim() |> String.downcase()
   defp normalize_state(_value), do: ""
@@ -503,6 +535,37 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp in_progress_implementation_continuation?(_workspace, _requirements), do: false
+
+  defp retryable_review_rework_validation_correction?(workspace) when is_binary(workspace) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> Enum.any?(fn correction ->
+      retryable_controller_validation_correction?(correction) and
+        get_in(correction, ["guard", "miu_id"]) == "__review_rework__"
+    end)
+  end
+
+  defp retryable_review_rework_validation_correction?(_workspace), do: false
+
+  defp retryable_miu_validation_correction?(workspace) when is_binary(workspace) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> Enum.any?(fn correction ->
+      miu_id = get_in(correction, ["guard", "miu_id"])
+
+      retryable_controller_validation_correction?(correction) and
+        is_binary(miu_id) and miu_id not in ["", "__review_rework__", "__final__"]
+    end)
+  end
+
+  defp retryable_miu_validation_correction?(_workspace), do: false
+
+  defp retryable_controller_validation_correction?(correction) when is_map(correction) do
+    correction["source"] == "symphony.runtime.validation-controller" and
+      correction["next_action"] == "retry"
+  end
+
+  defp retryable_controller_validation_correction?(_correction), do: false
 
   defp implementation_issue?(requirements) when is_map(requirements) do
     requirements

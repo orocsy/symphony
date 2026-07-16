@@ -3,6 +3,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
   alias SymphonyElixir.{
     ControllerEvidence,
+    DispatchPreflight,
     HandoffCertificate,
     HandoffController,
     Linear.Issue,
@@ -408,6 +409,11 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert get_in(correction, ["guard", "miu_id"]) == "COD-700-MIU-1"
       assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
       assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "smallest in-scope fix"))
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               DispatchPreflight.prepare(workspace, issue)
+
+      assert Enum.any?(preflight["open_corrections"], &(&1["correction_id"] == correction["correction_id"]))
     after
       File.rm_rf(workspace)
     end
@@ -454,7 +460,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert {:ok, unrelated_correction} =
                Workspace.create_correction_in_workspace(workspace, issue, %{
-                 source: "github-review",
+                 source: "business-validation",
                  source_status: "failed",
                  summary: "COD-700-MIU-1 test coverage misses an unrelated product requirement",
                  findings: ["A current-head review thread remains actionable"],
@@ -519,6 +525,77 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
       assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "Do not create a post-certification commit"))
       refute Enum.any?(correction["required_corrections"], &String.contains?(&1, "new micro commit"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "failed review-rework validation remains retryable through handoff recovery" do
+    script_body = """
+    #!/bin/sh
+    if [ -f .orocsy/review-validation-fail ]; then
+      echo '1 test, 1 failure'
+    else
+      echo '3 tests, 0 failures'
+    fi
+    """
+
+    {workspace, issue} = workspace_and_issue("unused", script_body: script_body)
+
+    try do
+      allow_workspace_corrections!(workspace)
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      File.touch!(Path.join(workspace, ".orocsy/review-validation-fail"))
+      write_review_rework_preflight!(workspace, issue)
+      commit_readme!(workspace, "Address current-head review feedback")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, {:validation_failed, event}} = HandoffController.process_requests(issue, workspace)
+      assert event["miu_id"] == "__review_rework__"
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert get_in(correction, ["guard", "miu_id"]) == "__review_rework__"
+      assert correction["next_action"] == "retry"
+      assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "handoff.requested"))
+      refute Enum.any?(correction["required_corrections"], &String.contains?(&1, "post-certification"))
+
+      assert {:ok, %{"mode" => "review_rework"}} = DispatchPreflight.prepare(workspace, issue)
+
+      File.rm!(Path.join(workspace, ".orocsy/review-validation-fail"))
+      commit_readme!(workspace, "Correct review validation failure")
+      git!(workspace, ["push"])
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:ok, handoff} = HandoffController.process_requests(issue, workspace)
+      assert handoff["event"] == "handoff.ready"
+      assert Workspace.open_blocking_corrections_in_workspace(workspace) == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "writes UTF-8-safe correction output when truncation splits a multibyte character" do
+    output = String.duplicate("a", 3_999) <> "é 1 test, 1 failure"
+    {workspace, issue} = workspace_and_issue(output)
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      append_event!(workspace, issue, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "miu_id" => "COD-700-MIU-1"
+      })
+
+      assert {:error, {:validation_failed, _event}} =
+               ValidationController.process_requests(issue, workspace)
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      finding = Enum.find(correction["findings"], &String.starts_with?(&1, "Validation output:"))
+      assert String.valid?(finding)
+      assert finding =~ "...[truncated]"
     after
       File.rm_rf(workspace)
     end

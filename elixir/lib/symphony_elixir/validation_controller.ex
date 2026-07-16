@@ -863,6 +863,32 @@ defmodule SymphonyElixir.ValidationController do
     }
   end
 
+  defp validation_correction_attrs(workspace, "__review_rework__", head_sha, {:error, {:validation_failed, event}})
+       when is_map(event) do
+    %{
+      source: @authority,
+      source_status: "failed",
+      summary: "Review-rework authoritative validation failed",
+      findings:
+        [
+          "Command: #{event["command"]}",
+          "Reason: #{event["reason_class"]}; exit code: #{event["exit_code"]}",
+          validation_output_finding(workspace, event)
+        ]
+        |> Enum.reject(&is_nil/1),
+      required_corrections: [
+        "Use the supplied command output to make the smallest scoped review fix, create and push a new review-rework commit, append handoff.requested, and stop. Do not rerun the controller-owned validation inside the Codex worker."
+      ],
+      next_action: "retry",
+      guard: %{
+        "miu_id" => "__review_rework__",
+        "head_sha" => head_sha,
+        "validation_event_id" => event["event_id"],
+        "bounded_log_path" => event["bounded_log_path"]
+      }
+    }
+  end
+
   defp validation_correction_attrs(workspace, miu_id, head_sha, {:error, {:validation_failed, event}})
        when is_map(event) do
     %{
@@ -926,7 +952,6 @@ defmodule SymphonyElixir.ValidationController do
   defp validation_correction_for_miu?(correction, miu_id) when is_map(correction) do
     guard_miu_id = get_in(correction, ["guard", "miu_id"])
     source = correction["source"] || ""
-    validation_source? = source == @authority or String.contains?(String.downcase(source), "validation")
 
     text =
       [
@@ -940,10 +965,11 @@ defmodule SymphonyElixir.ValidationController do
       |> Enum.join(" ")
       |> String.downcase()
 
-    validation_source? and
-      (guard_miu_id == miu_id or
-         (String.contains?(text, String.downcase(miu_id)) and
-            String.contains?(text, ["validation", "playwright", "vitest", "test"])))
+    (source == @authority and guard_miu_id == miu_id) or
+      (source == "worker-validation" and
+         (guard_miu_id == miu_id or
+            (String.contains?(text, String.downcase(miu_id)) and
+               String.contains?(text, ["validation", "playwright", "vitest", "test"]))))
   end
 
   defp validation_correction_for_miu?(_correction, _miu_id), do: false
@@ -1097,8 +1123,22 @@ defmodule SymphonyElixir.ValidationController do
 
   defp safe_id(value), do: String.replace(to_string(value), ~r/[^A-Za-z0-9_.-]/, "_")
 
-  defp truncate(value, max_bytes) when byte_size(value) <= max_bytes, do: value
-  defp truncate(value, max_bytes), do: binary_part(value, 0, max_bytes) <> "\n...[truncated]\n"
+  defp truncate(value, max_bytes) do
+    value = String.replace_invalid(value)
+
+    if byte_size(value) <= max_bytes do
+      value
+    else
+      utf8_prefix(value, max_bytes) <> "\n...[truncated]\n"
+    end
+  end
+
+  defp utf8_prefix(_value, max_bytes) when max_bytes <= 0, do: ""
+
+  defp utf8_prefix(value, max_bytes) do
+    prefix = binary_part(value, 0, max_bytes)
+    if String.valid?(prefix), do: prefix, else: utf8_prefix(value, max_bytes - 1)
+  end
 
   defp clean_worktree?(workspace) do
     case git(workspace, ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).orocsy/"]) do
