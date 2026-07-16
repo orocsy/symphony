@@ -20364,6 +20364,53 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner reconciles a pending certified transition before opening another worker" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-transition-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "miu.completion_requested",
+        "event_id" => "request-survived-interruption",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    issue = %Issue{
+      id: "issue-pending-transition-recovery",
+      identifier: "MT-PENDING-TRANSITION",
+      title: "Recover pending transition",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+
+    processor = fn ^workspace, ^issue, issue_state_fetcher ->
+      send(test_pid, {:pending_transition_reconciled, issue_state_fetcher})
+      {{:ok, %{"event" => "miu.completed"}}, :none}
+    end
+
+    try do
+      assert {:stop, {{:ok, %{"event" => "miu.completed"}}, :none}} =
+               AgentRunner.reconcile_pending_runtime_transition_for_test(
+                 workspace,
+                 issue,
+                 runtime_transition_processor: processor
+               )
+
+      assert_receive {:pending_transition_reconciled, issue_state_fetcher}
+      assert is_function(issue_state_fetcher, 1)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "agent runner degrades remote review inspection failures to no feedback" do
     write_workflow_file!(Workflow.workflow_file_path(),
       review_monitor_enabled: true,
