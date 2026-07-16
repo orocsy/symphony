@@ -14638,6 +14638,67 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "controller review validation correction keeps validation in the runtime" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-review-validation-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.dirname(workspace))
+
+    try do
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(inbox)
+      File.mkdir_p!(state_dir)
+
+      correction = %{
+        "correction_id" => "correction_controller_review_validation",
+        "source" => "symphony.runtime.validation-controller",
+        "status" => "open",
+        "next_action" => "retry",
+        "created_at" => "2026-07-16T12:00:00Z",
+        "resolved_at" => nil,
+        "summary" => "Review-rework authoritative validation failed",
+        "findings" => ["Declared write scope: src/example.ts"],
+        "required_corrections" => ["Fix src/example.ts and request controller handoff."],
+        "guard" => %{"miu_id" => "__review_rework__"}
+      }
+
+      File.write!(
+        Path.join(inbox, "correction_controller_review_validation.json"),
+        Jason.encode!(correction)
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-205",
+          "open_corrections" => [correction]
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-205",
+        title: "Retry controller review validation",
+        description: "Structured review correction",
+        state: "Rework",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert prompt =~ "Controller-owned review validation correction contract:"
+      assert prompt =~ "Do not rerun controller-owned validation inside the Codex worker"
+      assert prompt =~ "append the exact `handoff.requested` event"
+      refute prompt =~ "run focused validation, record the evidence, resolve the correction"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "review rework command policy covers design document correction paths" do
     workflow_prompt = "Ticket {{ issue.identifier }}"
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)

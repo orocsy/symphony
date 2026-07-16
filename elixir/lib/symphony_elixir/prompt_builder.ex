@@ -723,6 +723,27 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp open_correction_micro_prompt(preflight) do
+    if controller_review_validation_correction?(preflight) do
+      controller_review_validation_correction_micro_prompt()
+    else
+      standard_open_correction_micro_prompt(preflight)
+    end
+  end
+
+  defp controller_review_validation_correction_micro_prompt do
+    """
+    Controller-owned review validation correction contract:
+
+    - Use the supplied controller command output and declared write-scope paths to make the smallest review fix.
+    - Do not rerun controller-owned validation inside the Codex worker and do not resolve the correction manually.
+    - Create and push one scoped review-rework commit, append the exact `handoff.requested` event from the Runtime Contract final gate, and stop.
+    - Symphony's validation controller reruns authoritative validation and resolves the matching correction only after certification passes.
+    - If no code/test change can address the supplied output, record one precise blocker and stop without retrying validation.
+    """
+    |> String.trim()
+  end
+
+  defp standard_open_correction_micro_prompt(preflight) do
     checkpoint_event = correction_checkpoint_event(preflight)
 
     """
@@ -739,6 +760,17 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     |> String.trim()
   end
+
+  defp controller_review_validation_correction?(%{"open_corrections" => corrections})
+       when is_list(corrections) do
+    Enum.any?(corrections, fn correction ->
+      correction["source"] == "symphony.runtime.validation-controller" and
+        correction["next_action"] == "retry" and
+        get_in(correction, ["guard", "miu_id"]) == "__review_rework__"
+    end)
+  end
+
+  defp controller_review_validation_correction?(_preflight), do: false
 
   defp maybe_prepend_policy_violation(prompt, opts) when is_binary(prompt) do
     case Keyword.get(opts, :policy_violation) do

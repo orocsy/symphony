@@ -44,7 +44,9 @@ defmodule SymphonyElixir.HandoffController do
     with {:ok, _prior_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
          {:ok, %{"mode" => "review_rework"}} <-
            DispatchPreflight.prepare_review_delta_recovery(workspace, issue, inspection) do
-      certify_handoff(issue, workspace)
+      issue
+      |> certify_handoff(workspace)
+      |> reconcile_handoff_result(issue, workspace)
     else
       :not_ready -> :not_ready
       {:ok, %{"mode" => mode}} -> {:error, {:review_delta_reconciliation_mode_mismatch, mode}}
@@ -61,12 +63,7 @@ defmodule SymphonyElixir.HandoffController do
       {:ok, request} ->
         result = certify_handoff(issue, workspace)
         :ok = record_request_result(workspace, request, result)
-        correction_scope = validation_correction_scope(result, workspace)
-
-        case ValidationController.reconcile_runtime_corrections(issue, workspace, correction_scope, result) do
-          :ok -> result
-          {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
-        end
+        reconcile_handoff_result(result, issue, workspace)
 
       {:stale, request, reason} ->
         :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})
@@ -85,6 +82,15 @@ defmodule SymphonyElixir.HandoffController do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => "review_rework"}} -> "__review_rework__"
       _ -> "__final__"
+    end
+  end
+
+  defp reconcile_handoff_result(result, issue, workspace) do
+    correction_scope = validation_correction_scope(result, workspace)
+
+    case ValidationController.reconcile_runtime_corrections(issue, workspace, correction_scope, result) do
+      :ok -> result
+      {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
     end
   end
 

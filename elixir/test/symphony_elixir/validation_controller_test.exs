@@ -175,16 +175,6 @@ defmodule SymphonyElixir.ValidationControllerTest do
   test "parses Playwright success summary" do
     {workspace, issue} = workspace_and_issue("Running 1 test using 1 worker\n  1 passed (29.1s)")
 
-    issue = %{
-      issue
-      | description:
-          String.replace(
-            issue.description,
-            "- ./fake-test",
-            "- pnpm exec playwright test tests/e2e/example.spec.ts"
-          )
-    }
-
     try do
       assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
       assert length(certificate["validation_event_ids"]) == 1
@@ -429,12 +419,48 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert correction["summary"] == "COD-700-MIU-1 authoritative validation failed"
       assert get_in(correction, ["guard", "miu_id"]) == "COD-700-MIU-1"
       assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
+      assert Enum.any?(correction["findings"], &String.contains?(&1, "Declared write scope: README.md"))
       assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "smallest in-scope fix"))
 
       assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
                DispatchPreflight.prepare(workspace, issue)
 
       assert Enum.any?(preflight["open_corrections"], &(&1["correction_id"] == correction["correction_id"]))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "exhausted validation budget replaces retry guidance with a durable block" do
+    {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      for repair <- 0..2 do
+        if repair > 0, do: commit_readme!(workspace, "Repair #{repair}")
+
+        append_event!(workspace, issue, %{
+          "event" => "miu.completion_requested",
+          "status" => "requested",
+          "miu_id" => "COD-700-MIU-1"
+        })
+
+        if repair < 2 do
+          assert {:error, {:validation_failed, _event}} =
+                   ValidationController.process_requests(issue, workspace)
+        else
+          assert {:blocked, {:product_fix_budget_exhausted, "COD-700-MIU-1"}} =
+                   ValidationController.process_requests(issue, workspace)
+        end
+      end
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.validation-controller"
+      assert correction["source_status"] == "blocked"
+      assert correction["next_action"] == "block"
+      assert get_in(correction, ["guard", "reason_class"]) == "product_fix_budget_exhausted"
+      assert Enum.any?(correction["findings"], &String.contains?(&1, "Declared write scope: README.md"))
     after
       File.rm_rf(workspace)
     end
@@ -582,7 +608,11 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "handoff.requested"))
       refute Enum.any?(correction["required_corrections"], &String.contains?(&1, "post-certification"))
 
-      assert {:ok, %{"mode" => "review_rework"}} = DispatchPreflight.prepare(workspace, issue)
+      assert {:ok, %{"mode" => "review_rework"} = preflight} = DispatchPreflight.prepare(workspace, issue)
+
+      assert Enum.any?(preflight["open_corrections"], fn open_correction ->
+               open_correction["correction_id"] == correction["correction_id"]
+             end)
 
       File.rm!(Path.join(workspace, ".orocsy/review-validation-fail"))
       commit_readme!(workspace, "Correct review validation failure")
@@ -592,6 +622,48 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert {:ok, handoff} = HandoffController.process_requests(issue, workspace)
       assert handoff["event"] == "handoff.ready"
       assert Workspace.open_blocking_corrections_in_workspace(workspace) == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "automatic review-delta validation failure creates a retryable controller correction" do
+    script_body = """
+    #!/bin/sh
+    if [ -f .orocsy/review-validation-fail ]; then
+      echo '1 test, 1 failure'
+    else
+      echo '3 tests, 0 failures'
+    fi
+    """
+
+    {workspace, issue} = workspace_and_issue("unused", script_body: script_body)
+
+    try do
+      allow_workspace_corrections!(workspace)
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+      assert {:ok, _handoff} = HandoffController.process_requests(issue, workspace)
+
+      issue = %{issue | state: "Rework"}
+      File.touch!(Path.join(workspace, ".orocsy/review-validation-fail"))
+      commit_readme!(workspace, "Address automatic review feedback")
+      review_head = git_output!(workspace, ["rev-parse", "HEAD"])
+      git!(workspace, ["push"])
+
+      assert {:error, {:validation_failed, event}} =
+               HandoffController.reconcile_review_delta(issue, workspace, %{
+                 head_sha: review_head,
+                 head_ref: "orocsy/cod-700",
+                 feedback: []
+               })
+
+      assert event["miu_id"] == "__review_rework__"
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["next_action"] == "retry"
+      assert get_in(correction, ["guard", "miu_id"]) == "__review_rework__"
+      assert Enum.any?(correction["findings"], &String.contains?(&1, "Declared write scope: README.md"))
     after
       File.rm_rf(workspace)
     end
