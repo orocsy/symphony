@@ -15,23 +15,20 @@ defmodule SymphonyElixir.HandoffController do
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
   def process_requests(%Issue{} = issue, workspace) when is_binary(workspace) do
-    case HandoffCertificate.current(issue, workspace) do
-      {:ok, certificate} ->
-        {:ok, certificate}
+    case structured_contract(issue) do
+      {:ok, compiled} ->
+        contract_identity = %{
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
+        }
 
-      _ ->
-        case structured_contract(issue) do
-          {:ok, compiled} ->
-            contract_identity = %{
-              "contract_hash" => compiled.contract_hash,
-              "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
-            }
-
-            process_handoff_request(issue, workspace, contract_identity)
-
-          {:error, reason} = error ->
-            process_invalid_contract_request(workspace, reason, error)
+        case process_handoff_request(issue, workspace, contract_identity) do
+          :none -> current_handoff_certificate(issue, workspace)
+          result -> result
         end
+
+      {:error, reason} = error ->
+        process_invalid_contract_request(workspace, reason, error)
     end
   end
 
@@ -61,7 +58,11 @@ defmodule SymphonyElixir.HandoffController do
   defp process_handoff_request(issue, workspace, contract_identity) do
     case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested", contract_identity) do
       {:ok, request} ->
-        result = certify_handoff(issue, workspace)
+        result =
+          case HandoffCertificate.current(issue, workspace) do
+            {:ok, certificate} -> {:ok, certificate}
+            _ -> certify_handoff(issue, workspace)
+          end
 
         case reconcile_handoff_result(result, issue, workspace) do
           ^result ->
@@ -78,6 +79,13 @@ defmodule SymphonyElixir.HandoffController do
 
       :none ->
         :none
+    end
+  end
+
+  defp current_handoff_certificate(issue, workspace) do
+    case HandoffCertificate.current(issue, workspace) do
+      {:ok, certificate} -> {:ok, certificate}
+      _ -> :none
     end
   end
 

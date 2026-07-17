@@ -670,7 +670,7 @@ defmodule SymphonyElixir.ValidationController do
           [failed, passed] = Enum.map(match, fn value -> if value == "", do: 0, else: String.to_integer(value) end)
           %{"collected" => passed + failed, "passed" => passed, "failed" => failed}
 
-        match = Regex.run(~r/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?\s+in\s+[\d.]+s/i, output, capture: :all_but_first) ->
+        match = Regex.run(~r/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?\s+in\s+[\d.]+[sm]/i, output, capture: :all_but_first) ->
           [passed, failed] =
             match
             |> then(fn
@@ -681,7 +681,7 @@ defmodule SymphonyElixir.ValidationController do
 
           %{"collected" => passed + failed, "passed" => passed, "failed" => failed}
 
-        match = Regex.run(~r/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?\s+\([\d.]+s\)/i, output, capture: :all_but_first) ->
+        match = Regex.run(~r/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?\s+\([\d.]+[sm]\)/i, output, capture: :all_but_first) ->
           [passed, failed] =
             match
             |> then(fn
@@ -866,6 +866,23 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
+  def reconcile_runtime_corrections(issue, workspace, miu_id, {:error, _reason} = result) do
+    head_sha = git_value(workspace, ["rev-parse", "HEAD"])
+
+    if existing_controller_validation_correction?(workspace, miu_id, head_sha) do
+      :ok
+    else
+      case Workspace.create_correction_in_workspace(
+             workspace,
+             issue,
+             validation_correction_attrs(issue, workspace, miu_id, head_sha, result)
+           ) do
+        {:ok, _correction} -> :ok
+        {:error, reason} -> {:error, {:validation_correction_write_failed, reason}}
+      end
+    end
+  end
+
   def reconcile_runtime_corrections(_issue, _workspace, _miu_id, _result), do: :ok
 
   defp validation_correction_attrs(_issue, workspace, "__final__", head_sha, {:error, {:validation_failed, event}})
@@ -945,6 +962,22 @@ defmodule SymphonyElixir.ValidationController do
         "validation_event_id" => event["event_id"],
         "bounded_log_path" => event["bounded_log_path"]
       }
+    }
+  end
+
+  defp validation_correction_attrs(issue, _workspace, "__final__", head_sha, result) do
+    %{
+      source: @authority,
+      source_status: "blocked",
+      summary: "Final runtime certification did not complete",
+      findings:
+        ["Controller result: #{inspect(result)}", correction_scope_finding(issue, "__final__")]
+        |> Enum.reject(&is_nil/1),
+      required_corrections: [
+        "Do not create a post-certification commit. An operator must correct the certificate or environment at the same head, or revise the Runtime Contract with an explicit repair MIU."
+      ],
+      next_action: "block",
+      guard: %{"miu_id" => "__final__", "head_sha" => head_sha}
     }
   end
 

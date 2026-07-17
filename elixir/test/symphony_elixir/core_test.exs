@@ -8013,6 +8013,29 @@ defmodule SymphonyElixir.CoreTest do
       assert controller_correction["source"] == "symphony.runtime.validation-controller"
       assert controller_correction["next_action"] == "retry"
       assert controller_correction["guard"] == %{"miu_id" => "COD-274-MIU-1"}
+
+      for index <- 1..5 do
+        File.write!(
+          Path.join(inbox_dir, "correction_zzzz_generic_#{index}.json"),
+          Jason.encode!(%{
+            "correction_id" => "correction_zzzz_generic_#{index}",
+            "status" => "open",
+            "next_action" => "retry",
+            "summary" => "Newer generic correction #{index}"
+          })
+        )
+      end
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = generic_first_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert generic_first_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert generic_first_preflight["first_task"] =~ "Newer generic correction"
+      assert length(generic_first_preflight["open_corrections"]) == 6
+
+      assert Enum.any?(generic_first_preflight["open_corrections"], fn correction ->
+               correction["source"] == "symphony.runtime.validation-controller"
+             end)
     after
       File.rm_rf(test_root)
     end
@@ -20441,6 +20464,49 @@ defmodule SymphonyElixir.CoreTest do
 
       assert_receive {:pending_transition_reconciled, issue_state_fetcher}
       assert is_function(issue_state_fetcher, 1)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "agent runner stops when startup transition controllers error or block" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-transition-stop-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "miu.completion_requested",
+        "event_id" => "request-controller-stop",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    issue = %Issue{id: "issue-controller-stop", identifier: "MT-CONTROLLER-STOP", state: "In Progress"}
+
+    try do
+      error_result = {{:error, :correction_write_failed}, :none}
+
+      assert {:stop, ^error_result} =
+               AgentRunner.reconcile_pending_runtime_transition_for_test(
+                 workspace,
+                 issue,
+                 runtime_transition_processor: fn _, _, _ -> error_result end
+               )
+
+      blocked_result = {{:blocked, :retry_budget_exhausted}, :none}
+
+      assert {:stop, ^blocked_result} =
+               AgentRunner.reconcile_pending_runtime_transition_for_test(
+                 workspace,
+                 issue,
+                 runtime_transition_processor: fn _, _, _ -> blocked_result end
+               )
     after
       File.rm_rf(workspace)
     end

@@ -952,7 +952,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp review_rework_preflight(workspace, issue, requirements, inspection) do
     feedback = review_feedback_for_requirements(inspection, requirements)
     requirements = add_review_scope_bundle_entries(requirements, feedback)
-    open_corrections = open_correction_summaries(workspace)
+    all_open_corrections = all_open_correction_summaries(workspace)
+    open_corrections = Enum.take(all_open_corrections, 5)
     correction_active? = open_corrections != []
 
     %{
@@ -996,10 +997,16 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
     requirements = add_review_scope_bundle_entries(requirements, if(test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])))
-    open_corrections = open_correction_summaries(workspace)
+    all_open_corrections = all_open_correction_summaries(workspace)
+    open_corrections = handoff_recovery_correction_summaries(all_open_corrections)
     correction_active? = open_corrections != []
     structured_contract? = requirements["runtime_contract_status"] == "structured"
-    controller_validation_active? = Enum.any?(open_corrections, &retryable_controller_validation_correction?/1)
+
+    first_correction_controller_owned? =
+      all_open_corrections
+      |> List.first()
+      |> retryable_controller_validation_correction?()
+
     feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
@@ -1012,12 +1019,12 @@ defmodule SymphonyElixir.DispatchPreflight do
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" =>
         cond do
-          structured_contract? and controller_validation_active? -> "runtime-contract-gate"
+          structured_contract? and first_correction_controller_owned? -> "runtime-contract-gate"
           correction_active? -> "correction-scoped-fix"
           structured_contract? -> "runtime-contract-gate"
           true -> "gate.post-miu"
         end,
-      "first_task" => handoff_recovery_first_task(open_corrections, requirements),
+      "first_task" => handoff_recovery_first_task(all_open_corrections, requirements),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
@@ -1064,6 +1071,15 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp handoff_recovery_first_task(_open_corrections, _requirements) do
     "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
+  end
+
+  defp handoff_recovery_correction_summaries(all_open_corrections) do
+    visible = Enum.take(all_open_corrections, 5)
+
+    case Enum.find(all_open_corrections, &retryable_controller_validation_correction?/1) do
+      nil -> visible
+      controller_correction -> Enum.uniq_by(visible ++ [controller_correction], & &1["correction_id"])
+    end
   end
 
   defp handoff_recovery_correction_task(correction) do
@@ -2131,16 +2147,15 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp compact_feedback_body(_body), do: nil
 
-  defp open_correction_summaries(workspace) when is_binary(workspace) do
+  defp all_open_correction_summaries(workspace) when is_binary(workspace) do
     workspace
     |> Workspace.open_blocking_corrections_in_workspace()
-    |> Enum.take(5)
     |> Enum.map(&open_correction_summary/1)
   rescue
     _error -> []
   end
 
-  defp open_correction_summaries(_workspace), do: []
+  defp all_open_correction_summaries(_workspace), do: []
 
   defp open_correction_summary(%{} = correction) do
     %{

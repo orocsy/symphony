@@ -720,6 +720,7 @@ defmodule SymphonyElixir.AppServerTest do
         Path.join(preflight_dir, "dispatch-preflight.json"),
         Jason.encode!(%{
           "mode" => "handoff_recovery",
+          "checkpoint_event" => "runtime-contract-gate",
           "requirements" => %{"runtime_contract_status" => "structured"}
         })
       )
@@ -729,6 +730,27 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert pattern =~ "rg"
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
+
+      base_params = %{
+        "baseInstructions" => "base instructions",
+        "developerInstructions" => "generic correction instructions",
+        "config" => %{}
+      }
+
+      runtime_gate_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert runtime_gate_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "correction-scoped-fix",
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      correction_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert correction_params["developerInstructions"] == "generic correction instructions"
     after
       File.rm_rf(test_root)
     end

@@ -454,6 +454,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:ok,
        %{
          "mode" => "handoff_recovery",
+         "checkpoint_event" => "runtime-contract-gate",
          "requirements" => %{"runtime_contract_status" => "structured"}
        }} ->
         params
@@ -695,6 +696,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       patterns = effective_forbidden_command_patterns_for(workspace)
       forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
     end
+
+    def worker_thread_overrides_for_test(params, workspace),
+      do: maybe_put_worker_thread_overrides(params, workspace)
   end
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do

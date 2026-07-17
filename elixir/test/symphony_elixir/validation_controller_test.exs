@@ -183,6 +183,17 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "parses Playwright success summary with a minute duration" do
+    {workspace, issue} = workspace_and_issue("77 passed (1.2m)")
+
+    try do
+      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert length(certificate["validation_event_ids"]) == 1
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "treats zero-test Python unittest output as a failed test validation" do
     {workspace, issue} = workspace_and_issue("Ran 0 tests in 0.001s")
 
@@ -398,6 +409,28 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "a pending handoff request is reconciled after a certificate already exists" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+      assert {:ok, handoff} = HandoffController.process_requests(issue, workspace)
+
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+      assert {:ok, ^handoff} = HandoffController.process_requests(issue, workspace)
+
+      assert 2 ==
+               Enum.count(events(workspace), fn event ->
+                 event["event"] == "runtime.request.processed" and
+                   event["request_event"] == "handoff.requested"
+               end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "failed controller validation creates an actionable MIU correction" do
     {workspace, issue} = workspace_and_issue("1 test, 1 failure")
 
@@ -426,6 +459,53 @@ defmodule SymphonyElixir.ValidationControllerTest do
                DispatchPreflight.prepare(workspace, issue)
 
       assert Enum.any?(preflight["open_corrections"], &(&1["correction_id"] == correction["correction_id"]))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pre-validation certification errors create durable controller corrections" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      assert :ok =
+               ValidationController.reconcile_runtime_corrections(
+                 issue,
+                 workspace,
+                 "COD-700-MIU-1",
+                 {:error, {:undeclared_miu_write, ["SECRET.md"]}}
+               )
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["source"] == "symphony.runtime.validation-controller"
+      assert correction["next_action"] == "retry"
+      assert correction["summary"] == "COD-700-MIU-1 runtime certification did not complete"
+      assert Enum.any?(correction["findings"], &String.contains?(&1, "undeclared_miu_write"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pre-validation final certification errors block post-certificate commits" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      allow_workspace_corrections!(workspace)
+
+      assert :ok =
+               ValidationController.reconcile_runtime_corrections(
+                 issue,
+                 workspace,
+                 "__final__",
+                 {:error, :uncertified_commit_after_last_miu}
+               )
+
+      assert [correction] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert correction["next_action"] == "block"
+      assert correction["summary"] == "Final runtime certification did not complete"
+      assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "Do not create a post-certification commit"))
     after
       File.rm_rf(workspace)
     end
@@ -1183,6 +1263,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
+      allow_workspace_corrections!(workspace)
       assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
       git!(workspace, ["remote", "add", "origin", "https://example.test/orocsy/symphony.git"])
       git!(workspace, ["update-ref", "refs/remotes/origin/orocsy/cod-700", "HEAD"])
@@ -1204,6 +1285,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
+      allow_workspace_corrections!(workspace)
       assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
       File.write!(Path.join(workspace, "README.md"), "# Test\n\nImplemented.\n\nUncertified.\n")
@@ -1247,6 +1329,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
+      allow_workspace_corrections!(workspace)
       assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
       write_review_rework_preflight!(workspace, issue)
@@ -1267,6 +1350,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
+      allow_workspace_corrections!(workspace)
       assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
       write_review_rework_preflight!(workspace, issue)
@@ -1293,6 +1377,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
+      allow_workspace_corrections!(workspace)
       assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
       write_review_rework_preflight!(workspace, issue)

@@ -785,6 +785,10 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp runtime_transition_stop?({{:ok, certificate}, _handoff_result}) when is_map(certificate), do: true
   defp runtime_transition_stop?({_validation_result, {:ok, certificate}}) when is_map(certificate), do: true
+  defp runtime_transition_stop?({{:error, _reason}, _handoff_result}), do: true
+  defp runtime_transition_stop?({_validation_result, {:error, _reason}}), do: true
+  defp runtime_transition_stop?({{:blocked, _reason}, _handoff_result}), do: true
+  defp runtime_transition_stop?({_validation_result, {:blocked, _reason}}), do: true
   defp runtime_transition_stop?(_result), do: false
 
   defp maybe_record_controller_block(workspace, issue, controller, {:blocked, reason}) do
