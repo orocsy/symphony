@@ -590,6 +590,7 @@ defmodule SymphonyElixir.AppServerTest do
         Jason.encode!(%{
           "mode" => "handoff_recovery",
           "issue" => "MT-STRUCTURED-HANDOFF",
+          "checkpoint_event" => "runtime-contract-gate",
           "requirements" => %{
             "runtime_contract_status" => "structured",
             "ticket_type" => "test-spec",
@@ -668,6 +669,38 @@ defmodule SymphonyElixir.AppServerTest do
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
+    end
+  end
+
+  test "structured generic correction recovery preserves correction-scoped instructions" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-generic-correction-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Fix and resolve the generic correction",
+          "open_corrections" => [%{"correction_id" => "correction-generic"}],
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+      assert prompt =~ "`correction-scoped-fix`"
+      assert prompt =~ "open Orocsy correction"
+      refute prompt =~ "follow the active Runtime Contract gate"
+      refute prompt =~ "append only its exact event"
+    after
+      File.rm_rf(workspace)
     end
   end
 

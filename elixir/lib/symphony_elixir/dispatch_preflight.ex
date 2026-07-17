@@ -375,14 +375,14 @@ defmodule SymphonyElixir.DispatchPreflight do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
+      retryable_miu_validation_correction?(workspace) ->
+        "handoff_recovery"
+
       scoped_review_feedback?(inspection, requirements) ->
         "review_rework"
 
       retryable_review_rework_validation_correction?(workspace) ->
         "review_rework"
-
-      retryable_miu_validation_correction?(workspace) ->
-        "handoff_recovery"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
         "fresh_implementation"
@@ -1381,7 +1381,8 @@ defmodule SymphonyElixir.DispatchPreflight do
     open_corrections = preflight["open_corrections"] || []
     correction_active? = open_corrections != []
 
-    if requirements["runtime_contract_status"] == "structured" do
+    if requirements["runtime_contract_status"] == "structured" and
+         preflight["checkpoint_event"] == "runtime-contract-gate" do
       """
       Runtime dispatch preflight:
 

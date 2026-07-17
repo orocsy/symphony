@@ -58,11 +58,13 @@ defmodule SymphonyElixir.ValidationController do
         :none -> certify_miu(issue, workspace, miu_id)
       end
 
-    :ok = record_request_result(workspace, request, result)
-
     case reconcile_runtime_corrections(issue, workspace, miu_id, result) do
-      :ok -> result
-      {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
+      :ok ->
+        :ok = record_request_result(workspace, request, result)
+        result
+
+      {:error, reason} ->
+        {:error, {:runtime_correction_reconciliation_failed, reason, result}}
     end
   end
 

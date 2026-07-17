@@ -62,8 +62,15 @@ defmodule SymphonyElixir.HandoffController do
     case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested", contract_identity) do
       {:ok, request} ->
         result = certify_handoff(issue, workspace)
-        :ok = record_request_result(workspace, request, result)
-        reconcile_handoff_result(result, issue, workspace)
+
+        case reconcile_handoff_result(result, issue, workspace) do
+          ^result ->
+            :ok = record_request_result(workspace, request, result)
+            result
+
+          {:error, _reason} = error ->
+            error
+        end
 
       {:stale, request, reason} ->
         :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})

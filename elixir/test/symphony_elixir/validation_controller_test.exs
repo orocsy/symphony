@@ -431,6 +431,27 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "does not consume a MIU request when correction reconciliation fails" do
+    {workspace, issue} = workspace_and_issue("1 test, 1 failure")
+
+    try do
+      append_event!(workspace, issue, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "miu_id" => "COD-700-MIU-1"
+      })
+
+      assert {:error, {:runtime_correction_reconciliation_failed, _reason, {:error, {:validation_failed, _event}}}} =
+               ValidationController.process_requests(issue, workspace)
+
+      refute Enum.any?(events(workspace), fn event ->
+               event["event"] == "runtime.request.processed"
+             end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "exhausted validation budget replaces retry guidance with a durable block" do
     {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
 
@@ -572,6 +593,36 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
       assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "Do not create a post-certification commit"))
       refute Enum.any?(correction["required_corrections"], &String.contains?(&1, "new micro commit"))
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not consume a handoff request when correction reconciliation fails" do
+    script_body = """
+    #!/bin/sh
+    mkdir -p .orocsy
+    if [ -f .orocsy/final-validation ]; then
+      echo '1 test, 1 failure'
+    else
+      touch .orocsy/final-validation
+      echo '3 tests, 0 failures'
+    fi
+    """
+
+    {workspace, issue} = workspace_and_issue("unused", script_body: script_body)
+
+    try do
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      push_to_local_origin!(workspace)
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:error, {:runtime_correction_reconciliation_failed, _reason, {:error, {:validation_failed, _event}}}} =
+               HandoffController.process_requests(issue, workspace)
+
+      refute Enum.any?(events(workspace), fn event ->
+               event["event"] == "runtime.request.processed"
+             end)
     after
       File.rm_rf(workspace)
     end
