@@ -7202,16 +7202,38 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "dispatch preflight adds chromium guidance for playwright chrome sandbox corrections" do
-    workspace =
+  test "dispatch prompt routes playwright sandbox corrections to the runtime validation controller" do
+    test_root =
       Path.join(
         System.tmp_dir!(),
         "symphony-elixir-playwright-chromium-guidance-#{System.unique_integer([:positive])}"
       )
 
     try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "COD-261")
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       File.mkdir_p!(state_dir)
+      File.mkdir_p!(inbox_dir)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      File.write!(
+        Path.join(inbox_dir, "correction_20260626155312_21719ed6.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260626155312_21719ed6",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "COD-261 focused Playwright validation still blocked by local Chrome launch sandbox",
+          "findings" => [
+            "Playwright browserType.launch failed because Chrome exited SIGABRT."
+          ],
+          "required_corrections" => [
+            "Retry validation in an environment where Chrome/Playwright can launch."
+          ]
+        })
+      )
 
       File.write!(
         Path.join(state_dir, "dispatch-preflight.json"),
@@ -7220,6 +7242,7 @@ defmodule SymphonyElixir.CoreTest do
           "branch" => "orocsy/cod-261",
           "checkpoint_event" => "correction-scoped-fix",
           "first_task" => "Resolve the open Orocsy correction before dirty handoff recovery.",
+          "requirements" => %{"runtime_contract_status" => "structured"},
           "toolchain" => %{
             "package_manager" => "pnpm",
             "executables" => %{
@@ -7232,27 +7255,18 @@ defmodule SymphonyElixir.CoreTest do
             "pr_url" => "https://github.com/acme/nutribuddy/pull/101",
             "head_sha" => "5e9fd54fa8"
           },
-          "open_corrections" => [
-            %{
-              "correction_id" => "correction_20260626155312_21719ed6",
-              "summary" => "COD-261 focused Playwright validation still blocked by local Chrome launch sandbox",
-              "findings" => [
-                "Playwright browserType.launch failed because Chrome exited SIGABRT."
-              ],
-              "required_corrections" => [
-                "Retry validation in an environment where Chrome/Playwright can launch."
-              ]
-            }
-          ]
+          "open_corrections" => []
         })
       )
 
       prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
 
       assert prompt =~ "Validation command guidance:"
-      assert prompt =~ "PLAYWRIGHT_CHANNEL=chromium PLAYWRIGHT_BROWSERS_PATH=0"
-      assert prompt =~ "--workers=1"
-      assert prompt =~ "do not rerun the Chrome-default command"
+      assert prompt =~ "do not rerun Playwright"
+      assert prompt =~ "Runtime Contract final handoff gate"
+      assert prompt =~ "validation controller run Playwright outside the worker sandbox"
+      assert prompt =~ "Open Orocsy corrections:"
+      refute prompt =~ "PLAYWRIGHT_CHANNEL"
 
       File.write!(
         Path.join(state_dir, "dispatch-preflight.json"),
@@ -7260,7 +7274,8 @@ defmodule SymphonyElixir.CoreTest do
           "mode" => "review_rework",
           "branch" => "orocsy/cod-261",
           "checkpoint_event" => "correction-scoped-fix",
-          "first_task" => "Resolve the open Orocsy correction before the review shortcut.",
+          "first_task" => "Fix current-head review feedback before the stale preflight sees a correction.",
+          "requirements" => %{"runtime_contract_status" => "structured"},
           "toolchain" => %{
             "package_manager" => "pnpm",
             "executables" => %{
@@ -7274,29 +7289,66 @@ defmodule SymphonyElixir.CoreTest do
             "head_sha" => "5e9fd54fa8",
             "feedback" => []
           },
-          "open_corrections" => [
-            %{
-              "correction_id" => "correction_20260626155312_21719ed6",
-              "summary" => "COD-261 focused Playwright validation still blocked by local Chrome launch sandbox",
-              "findings" => [
-                "Playwright browserType.launch failed because Chrome exited SIGABRT."
-              ],
-              "required_corrections" => [
-                "Retry validation in an environment where Chrome/Playwright can launch."
-              ]
-            }
-          ]
+          "open_corrections" => []
         })
       )
 
       review_prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
 
       assert review_prompt =~ "Validation command guidance:"
-      assert review_prompt =~ "PLAYWRIGHT_CHANNEL=chromium PLAYWRIGHT_BROWSERS_PATH=0"
-      assert review_prompt =~ "--workers=1"
-      assert review_prompt =~ "do not rerun the Chrome-default command"
+      assert review_prompt =~ "do not rerun Playwright"
+      assert review_prompt =~ "Runtime Contract final handoff gate"
+      assert review_prompt =~ "validation controller run Playwright outside the worker sandbox"
+      assert review_prompt =~ "Worker-required checkpoint: `correction-scoped-fix`"
+      assert review_prompt =~ "First task: Resolve the open Orocsy correction"
+      assert review_prompt =~ "without worker-side validation"
+      assert review_prompt =~ "append handoff.requested"
+      refute review_prompt =~ "Fix current-head review feedback before the stale preflight"
+      refute review_prompt =~ "PLAYWRIGHT_CHANNEL"
+
+      assert {:ok, live_review_preflight} = SymphonyElixir.DispatchPreflight.read_for_prompt(workspace)
+      refute live_review_preflight["first_task"] =~ "run focused validation"
+
+      issue = %Issue{
+        id: "issue-cod-261-live-browser-correction",
+        identifier: "COD-261",
+        title: "Live browser correction",
+        description: "Structured review correction prompt",
+        state: "Rework",
+        url: "https://example.org/issues/COD-261",
+        labels: []
+      }
+
+      production_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert production_prompt =~ "Runtime correction dispatch preflight:"
+      assert production_prompt =~ "Validation command guidance:"
+      assert production_prompt =~ "do not rerun Playwright"
+      assert production_prompt =~ "Worker-required checkpoint: `correction-scoped-fix`"
+      assert production_prompt =~ "resolve this non-controller correction"
+      assert production_prompt =~ "without worker-side validation"
+      refute production_prompt =~ "PLAYWRIGHT_CHANNEL"
+
+      large_finding = String.duplicate("validation-output-", 2_000)
+
+      Enum.each(1..6, fn index ->
+        File.write!(
+          Path.join(inbox_dir, "correction_2026062615531#{index}_extra.json"),
+          Jason.encode!(%{
+            "correction_id" => "correction-extra-#{index}",
+            "status" => "open",
+            "next_action" => "retry",
+            "summary" => "Extra correction #{index}",
+            "findings" => [large_finding],
+            "created_at" => "2026-06-26T15:53:1#{index}Z"
+          })
+        )
+      end)
+
+      assert {:ok, bounded_preflight} = SymphonyElixir.DispatchPreflight.read_for_prompt(workspace)
+      assert length(bounded_preflight["open_corrections"]) == 5
+      refute SymphonyElixir.DispatchPreflight.prompt_context(workspace) =~ large_finding
     after
-      File.rm_rf(workspace)
+      File.rm_rf(test_root)
     end
   end
 

@@ -396,7 +396,7 @@ defmodule SymphonyElixir.PromptBuilder do
   defp compact_issue_description(_description), do: "unknown"
 
   defp maybe_prepend_dispatch_preflight(prompt, workspace) do
-    case DispatchPreflight.read(workspace) do
+    case DispatchPreflight.read_for_prompt(workspace) do
       {:ok, %{"mode" => "review_rework"} = preflight} ->
         if open_blocking_corrections(workspace) == [] do
           checkpoint = review_rework_handoff_checkpoint(workspace)
@@ -452,13 +452,16 @@ defmodule SymphonyElixir.PromptBuilder do
     Review rework execution contract:
 
     - Treat this as a bounded PR review fix, not a fresh implementation turn.
+    - If this prompt includes a `Runtime Contract final handoff gate`, that gate is authoritative and replaces every worker-side validation instruction below. Make the scoped review fix, commit and push it, append `handoff.requested`, and stop. Do not run Playwright or other contract-declared validation inside the Codex worker sandbox; Symphony's validation controller validates the review delta outside that sandbox.
     - Before using a dirty/local handoff checkpoint, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`.
       If guidance or dispatch preflight reports any open Orocsy correction, that
-      correction overrides review-rework shortcuts: read only the exact named
-      code/test file, make the smallest in-scope fix or record a scoped blocker,
-      run focused validation, and resolve the correction only after evidence is
-      recorded. Do not append `review-feedback-classified`, retry browser
-      validation-only, commit, push, or request review while any correction is open.
+      correction defines the scoped fix. For a structured Runtime Contract final
+      handoff, make that fix and explicitly resolve a worker/guidance correction
+      before committing and pushing without worker-side validation; only a
+      controller-owned review validation correction stays open for controller
+      reconciliation. For a legacy ticket, run focused validation and resolve the
+      correction only after evidence is recorded. Do not append
+      `review-feedback-classified` or retry browser validation-only.
     - If a dirty/local handoff checkpoint appears above, follow that checkpoint first: inspect only the focused local diff and run the smallest contract-declared validation needed for that diff. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit and push, then follow the structured-versus-legacy handoff rule below.
     - If no open correction and no dirty/local handoff checkpoint appears above, do not append `review-feedback-classified` as a first action. The current-head review feedback is already in this prompt; start from the listed review feedback path, read one short `sed -n` range around that path only, then make the smallest in-scope edit or record a scoped blocker.
     - Do not read workflow docs, issue briefs, previous Codex session JSONL, broad CSS, or unrelated components before the first code/test edit unless the listed feedback path is one of those files.
@@ -466,7 +469,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - Do not run `sed`, `cat`, `head`, `tail`, or `nl` on files outside the listed feedback path before the first code/test edit.
     - In this turn, either make the scoped edit and focused test update, or write an explicit Orocsy blocker/correction. Do not stop after analysis.
     - If validation, git push, GitHub, Linear, PATH, auth, or approval fails, record the exact command/failure and next action in an Orocsy blocker/correction before stopping.
-    - After a code/test edit, run only validation declared by the active issue contract, then commit and push the same branch. If this prompt includes a `Runtime Contract final handoff gate`, request final runtime certification with `python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.requested --status requested --step final` and end the turn; Symphony validates the review delta and requests fresh Codex review. For a legacy issue with no Runtime Contract gate, preserve the direct fallback: request review with `gh pr comment <pr-number> --body '@codex review'` after the focused validation and push.
+    - After a code/test edit on a structured issue with a `Runtime Contract final handoff gate`, commit and push without worker-side validation, request final runtime certification with `python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.requested --status requested --step final`, and end the turn. Symphony validates the review delta and requests fresh Codex review. For a legacy issue with no Runtime Contract gate, run only its declared focused validation, then preserve the direct fallback: request review with `gh pr comment <pr-number> --body '@codex review'` after the focused validation and push.
     - Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review; Symphony's review monitor owns review/rework transitions after the new review result exists.
     - If the listed feedback is already resolved or outdated at the current head, record that classification, update the handoff state, and stop without editing.
     """
@@ -562,6 +565,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - Worker-required checkpoint: `#{correction_checkpoint_event(preflight)}` after the first scoped code/test edit or a scoped blocker.
     - First task: #{preflight["first_task"] || "Resolve the open Orocsy correction."}
     - Open Orocsy corrections: #{format_prompt_corrections(open_corrections)}
+    - Validation command guidance: #{preflight["validation_command_guidance"] || "Record one concrete blocker and stop if validation cannot run."}
     - Runtime preflight is not worker progress and is not proof that review classification, validation, push, or handoff is complete.
 
     Current-head review feedback is intentionally omitted in open-correction mode. The correction and inlined issue brief are the only first-turn scope.
@@ -745,6 +749,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp standard_open_correction_micro_prompt(preflight) do
     checkpoint_event = correction_checkpoint_event(preflight)
+    correction_handoff = standard_correction_handoff_guidance(preflight)
 
     """
     Open correction execution contract:
@@ -753,12 +758,20 @@ defmodule SymphonyElixir.PromptBuilder do
     - Before the first edit, read only the exact source files named by the correction and the inlined issue brief. Do not read test files first unless a source file is missing a required local type or helper.
     - Make the smallest in-scope source edit or record a scoped blocker. Do not stop after analysis and do not spend the first turn reading every allowed file.
     - Immediately after the first scoped code/test edit, append the `#{checkpoint_event}` durable event exactly as specified above.
-    - After the checkpoint, update the exact test files named by the correction/brief, then run only the focused validation, record the evidence, resolve the correction, and continue the PR review handoff (commit, push the same branch, request fresh review, update Linear).
+    - After the checkpoint: #{correction_handoff}
     - Do not run `git log`, base-branch `git diff`, `git diff --stat`, `rg`, `grep`, `find`, `ls`, `gh api`, shell pipelines, or chained shell commands; the runtime denies them in this mode and the needed context is already inlined above.
     - If validation, git push, GitHub, Linear, PATH, auth, or approval fails, record the exact command/failure and next action in an Orocsy blocker/correction before stopping.
     - Never move the issue to a terminal Linear state from this mode; a fresh review request is not proof of a clean review.
     """
     |> String.trim()
+  end
+
+  defp standard_correction_handoff_guidance(%{"requirements" => %{"runtime_contract_status" => "structured"}}) do
+    "resolve this non-controller correction with the scoped-fix evidence, commit and push without worker-side validation, append the Runtime Contract `handoff.requested` event, and stop so Symphony's validation controller validates the review delta"
+  end
+
+  defp standard_correction_handoff_guidance(_preflight) do
+    "update the exact test files named by the correction/brief, run only the focused validation, record the evidence, resolve the correction, and continue the legacy PR review handoff"
   end
 
   defp controller_review_validation_correction?(%{"open_corrections" => corrections})

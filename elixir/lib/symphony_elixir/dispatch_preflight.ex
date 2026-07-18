@@ -156,7 +156,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   @spec prompt_context(String.t() | nil) :: String.t()
   def prompt_context(workspace) do
-    case read(workspace) do
+    case read_for_prompt(workspace) do
       {:ok, %{"mode" => "review_rework"} = preflight} ->
         review_prompt_context(preflight)
 
@@ -173,6 +173,56 @@ defmodule SymphonyElixir.DispatchPreflight do
         ""
     end
   end
+
+  @spec read_for_prompt(String.t() | nil) :: {:ok, map()} | {:error, term()} | :none
+  def read_for_prompt(workspace) do
+    case read(workspace) do
+      {:ok, preflight} -> {:ok, with_live_corrections(preflight, workspace)}
+      other -> other
+    end
+  end
+
+  defp with_live_corrections(preflight, workspace) do
+    live_corrections = all_open_correction_summaries(workspace)
+    visible_corrections = Enum.take(live_corrections, 5)
+
+    preflight
+    |> Map.put("open_corrections", visible_corrections)
+    |> Map.put("validation_command_guidance", validation_guidance(preflight["toolchain"], visible_corrections))
+    |> refresh_correction_derived_fields(live_corrections)
+  end
+
+  defp refresh_correction_derived_fields(%{"mode" => "review_rework"} = preflight, corrections) do
+    requirements = preflight["requirements"] || %{}
+    visible_corrections = Enum.take(corrections, 5)
+
+    preflight
+    |> Map.put("checkpoint_event", if(corrections == [], do: "review-feedback-classified", else: "correction-scoped-fix"))
+    |> Map.put("open_corrections", visible_corrections)
+    |> Map.put("first_task", review_rework_first_task(corrections, requirements))
+  end
+
+  defp refresh_correction_derived_fields(%{"mode" => "handoff_recovery"} = preflight, corrections) do
+    requirements = preflight["requirements"] || %{}
+    visible_corrections = handoff_recovery_correction_summaries(corrections)
+    structured? = requirements["runtime_contract_status"] == "structured"
+    controller_owned? = corrections |> List.first() |> retryable_controller_validation_correction?()
+
+    checkpoint_event =
+      cond do
+        structured? and controller_owned? -> "runtime-contract-gate"
+        visible_corrections != [] -> "correction-scoped-fix"
+        structured? -> "runtime-contract-gate"
+        true -> "gate.post-miu"
+      end
+
+    preflight
+    |> Map.put("open_corrections", visible_corrections)
+    |> Map.put("checkpoint_event", checkpoint_event)
+    |> Map.put("first_task", handoff_recovery_first_task(corrections, requirements))
+  end
+
+  defp refresh_correction_derived_fields(preflight, _corrections), do: preflight
 
   defp ensure_dirs(workspace) do
     File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
@@ -992,6 +1042,16 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
+  defp review_rework_first_task([correction | _], %{"runtime_contract_status" => "structured"}) do
+    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+    if retryable_controller_validation_correction?(correction) do
+      "Use the controller-owned correction before the review shortcut: #{summary}. Make only the named in-scope fix; do not rerun validation or resolve the correction inside the worker. Commit and push the scoped delta, append handoff.requested, and stop so Symphony's validation controller can validate and reconcile it."
+    else
+      "Resolve the open Orocsy correction before the review shortcut: #{summary}. Make only the named in-scope fix without worker-side validation, resolve the worker/guidance correction with scoped-fix evidence, commit and push the delta, append handoff.requested, and stop so Symphony's validation controller can validate it. Do not append review-feedback-classified while any correction remains."
+    end
+  end
+
   defp review_rework_first_task([correction | _], _requirements) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
@@ -999,7 +1059,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp review_rework_first_task(_open_corrections, %{"runtime_contract_status" => "structured"}) do
-    "Fix only the listed current-head review feedback on the existing PR branch, run only the contract-declared focused validation, commit and push, then request runtime handoff certification. Symphony validates the review delta and requests the fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
+    "Fix only the listed current-head review feedback on the existing PR branch, commit and push the scoped delta without running contract validation inside the Codex worker sandbox, then request runtime handoff certification. Symphony's validation controller validates the review delta and requests the fresh Codex review. Do not move Linear to Done; review/rework transitions belong to Symphony's review monitor."
   end
 
   defp review_rework_first_task(_open_corrections, _requirements) do
@@ -1350,7 +1410,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     - Open Orocsy corrections: #{format_corrections(open_corrections)}
     - Target feedback file(s): #{format_inline_items(feedback_paths(feedback))}
     - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
-    - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
+    - Validation command guidance: #{preflight["validation_command_guidance"] || validation_guidance(preflight["toolchain"], open_corrections)}
 
     Current-head review feedback:
     #{format_items(feedback)}
@@ -1448,7 +1508,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
       - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
       - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
-      - Validation command guidance: #{validation_guidance(preflight["toolchain"], open_corrections)}
+      - Validation command guidance: #{preflight["validation_command_guidance"] || validation_guidance(preflight["toolchain"], open_corrections)}
 
       Handoff recovery limits:
       - If an open Orocsy correction is listed above, it overrides any dirty validated checkpoint. Start from the exact file path named in the correction, and do not commit, push, request review, or use older validation evidence until the correction is fixed or explicitly blocked.
@@ -1620,7 +1680,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     if String.contains?(text, ["playwright", "chrome", "chromium"]) and
          String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"]) do
-      "For Playwright browser validation blocked by local Chrome/sandbox or missing Chromium, do not rerun the Chrome-default command. Prefix the focused command with `PLAYWRIGHT_CHANNEL=chromium PLAYWRIGHT_BROWSERS_PATH=0` and keep `--workers=1`; if the local browser is still missing, record that blocker instead of opening repeated Chrome sessions."
+      "For Playwright browser validation blocked by the Codex worker sandbox, do not rerun Playwright or seek browser escalation inside the worker. When the prompt includes a `Runtime Contract final handoff gate`, commit and push the scoped fix, append `handoff.requested`, and let Symphony's validation controller run Playwright outside the worker sandbox. For a legacy ticket without that gate, record one concrete environment blocker and stop."
     else
       ""
     end

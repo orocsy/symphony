@@ -673,15 +673,31 @@ defmodule SymphonyElixir.AppServerTest do
   end
 
   test "structured generic correction recovery preserves correction-scoped instructions" do
-    workspace =
+    test_root =
       Path.join(
         System.tmp_dir!(),
         "symphony-elixir-generic-correction-prompt-#{System.unique_integer([:positive])}"
       )
 
     try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-GENERIC-CORRECTION")
       state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       File.mkdir_p!(state_dir)
+      File.mkdir_p!(inbox_dir)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      File.write!(
+        Path.join(inbox_dir, "correction_generic.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction-generic",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Fix and resolve the generic correction"
+        })
+      )
 
       File.write!(
         Path.join(state_dir, "dispatch-preflight.json"),
@@ -700,7 +716,7 @@ defmodule SymphonyElixir.AppServerTest do
       refute prompt =~ "follow the active Runtime Contract gate"
       refute prompt =~ "append only its exact event"
     after
-      File.rm_rf(workspace)
+      File.rm_rf(test_root)
     end
   end
 
@@ -714,7 +730,11 @@ defmodule SymphonyElixir.AppServerTest do
     try do
       workspace = Path.join(test_root, "workspace")
       preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
 
       File.write!(
         Path.join(preflight_dir, "dispatch-preflight.json"),
@@ -741,16 +761,20 @@ defmodule SymphonyElixir.AppServerTest do
       assert runtime_gate_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
 
       File.write!(
-        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Path.join(inbox_dir, "correction_live.json"),
         Jason.encode!(%{
-          "mode" => "handoff_recovery",
-          "checkpoint_event" => "correction-scoped-fix",
-          "requirements" => %{"runtime_contract_status" => "structured"}
+          "correction_id" => "correction-live",
+          "status" => "open",
+          "next_action" => "retry",
+          "source" => "symphony.review-rework-worker",
+          "summary" => "Resolve the live correction before handoff"
         })
       )
 
       correction_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
-      assert correction_params["developerInstructions"] == "generic correction instructions"
+      assert correction_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
+      assert correction_params["developerInstructions"] =~ "correction is the first task"
+      refute correction_params["developerInstructions"] == "generic correction instructions"
     after
       File.rm_rf(test_root)
     end
@@ -4348,7 +4372,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server blocks chrome-default playwright retry for browser launch corrections" do
+  test "app server routes playwright retries to the runtime controller after browser launch corrections" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -4444,7 +4468,154 @@ defmodule SymphonyElixir.AppServerTest do
       assert command ==
                "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"
 
-      assert pattern == "playwright_chrome_sandbox_correction_requires_chromium_channel"
+      assert pattern == "playwright_browser_correction_requires_runtime_controller_handoff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows correction creation that quotes a blocked playwright command" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-playwright-correction-record-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD",
+          "branch" => "orocsy/mt-review-playwright-correction-record",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_20260626160144_0a19a053.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260626160144_0a19a053",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Focused Playwright validation blocked by local Chrome launch sandbox",
+          "findings" => ["Google Chrome exited SIGABRT."],
+          "required_corrections" => ["Retry with the safe Chromium channel."]
+        })
+      )
+
+      quoted_correction_command =
+        ~S|/bin/zsh -lc "python3 .codex/delivery/bin/orocsy.py --repo . inbox create --source worker --status blocked --summary \"Browser blocked\" --finding \"Command: pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts --workers=1 failed with SIGABRT\" --required-correction \"Use the runtime controller\" --next-action escalate --json"|
+
+      quoted_correction_notification =
+        Jason.encode!(%{
+          "method" => "codex/event/exec_command_begin",
+          "params" => %{"msg" => %{"command" => quoted_correction_command}}
+        })
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-playwright-correction-record"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-playwright-correction-record"}}}'
+            printf '%s\\n' '#{quoted_correction_notification}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-playwright-correction-record",
+        identifier: "MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD",
+        title: "Review rework Playwright correction record",
+        description: "Correction prose must not be classified as command execution",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Record the concrete blocker", issue)
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      equals_correction_command =
+        ~S|python3 .codex/delivery/bin/orocsy.py --repo . inbox create --source=worker --status=blocked --summary="Browser blocked" --finding="Command: pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts --workers=1 failed with SIGABRT" --required-correction="Use the runtime controller" --next-action=escalate --json|
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, equals_correction_command)
+
+      substitution_command =
+        ~S|/bin/zsh -lc "python3 .codex/delivery/bin/orocsy.py --repo . inbox create --source worker --status blocked --summary \"Browser blocked\" --finding \"$(pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts --workers=1)\" --required-correction \"Use the runtime controller\" --next-action escalate --json"|
+
+      substitution_notification =
+        Jason.encode!(%{
+          "method" => "codex/event/exec_command_begin",
+          "params" => %{"msg" => %{"command" => substitution_command}}
+        })
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-playwright-substitution"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-playwright-substitution"}}}'
+            printf '%s\\n' '#{substitution_notification}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      assert {:error, {:forbidden_command, ^substitution_command, pattern}} =
+               AppServer.run(workspace, "Attempt a substituted blocker", issue)
+
+      assert pattern == "delivery_inbox_metadata_command_substitution"
     after
       File.rm_rf(test_root)
     end
