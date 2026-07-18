@@ -7998,6 +7998,12 @@ defmodule SymphonyElixir.CoreTest do
           "next_action" => "retry",
           "resolved_at" => nil,
           "summary" => "Controller validation failed",
+          "findings" => [
+            "Command: pnpm exec vitest run tests/unit/app-shell.test.ts",
+            "Reason: command_failed; exit code: 1",
+            "Declared write scope: tests/unit/app-shell.test.ts",
+            "Validation output:\nFAIL app shell > owns exactly one responsive screen slot\nError: Expect test to fail"
+          ],
           "guard" => %{"miu_id" => "COD-274-MIU-1"}
         })
       )
@@ -8013,6 +8019,13 @@ defmodule SymphonyElixir.CoreTest do
       assert controller_correction["source"] == "symphony.runtime.validation-controller"
       assert controller_correction["next_action"] == "retry"
       assert controller_correction["guard"] == %{"miu_id" => "COD-274-MIU-1"}
+      assert length(controller_correction["findings"]) == 4
+      assert List.last(controller_correction["findings"]) =~ "Expect test to fail"
+
+      controller_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert controller_prompt =~ "Validation output:"
+      assert controller_prompt =~ "owns exactly one responsive screen slot"
+      assert controller_prompt =~ "Expect test to fail"
 
       for index <- 1..5 do
         File.write!(

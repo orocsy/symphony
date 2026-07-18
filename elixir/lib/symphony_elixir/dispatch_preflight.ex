@@ -2175,7 +2175,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp compact_correction_list(values) when is_list(values) do
     values
     |> Enum.flat_map(&correction_string_values/1)
-    |> Enum.take(3)
+    |> Enum.take(4)
     |> Enum.map(&compact_feedback_body/1)
     |> Enum.reject(&blank?/1)
   end
