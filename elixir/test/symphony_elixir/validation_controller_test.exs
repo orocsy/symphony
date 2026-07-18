@@ -1325,6 +1325,87 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "review rework preflight binds the latest signed handoff before current-head feedback" do
+    {workspace, initial_issue} = workspace_and_issue("3 tests, 0 failures")
+    issue = %{initial_issue | state: "Rework"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: Path.dirname(workspace),
+        review_monitor_enabled: true,
+        review_monitor_repo: "test/symphony"
+      )
+
+      assert {:ok, miu_certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      push_to_local_origin!(workspace)
+
+      assert {:ok, handoff} =
+               HandoffCertificate.issue(issue, workspace,
+                 completed_mius: ["COD-700-MIU-1"],
+                 validation_event_ids: miu_certificate["validation_event_ids"]
+               )
+
+      signed_head = handoff["head_sha"]
+      commit_readme!(workspace, "Address current-head review feedback")
+      git!(workspace, ["push"])
+      review_head = git_output!(workspace, ["rev-parse", "HEAD"])
+      refute review_head == signed_head
+
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/test/symphony/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 700,
+                 "html_url" => "https://github.com/test/symphony/pull/700",
+                 "head" => %{"sha" => review_head, "ref" => "orocsy/cod-700"}
+               }
+             ]}
+
+          decoded == "repos/test/symphony/pulls/700/comments" ->
+            send(parent, :review_feedback_inspected)
+
+            {:ok,
+             [
+               %{
+                 "body" => "Preserve the in-scope README contract.",
+                 "commit_id" => review_head,
+                 "path" => "README.md",
+                 "line" => 3,
+                 "html_url" => "https://github.com/test/symphony/pull/700#discussion"
+               }
+             ]}
+
+          decoded == "repos/test/symphony/pulls/700/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+               DispatchPreflight.prepare(workspace, issue)
+
+      assert_receive :review_feedback_inspected
+      assert get_in(preflight, ["review", "head_sha"]) == review_head
+      assert preflight["review_delta_base_head"] == signed_head
+
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+      assert {:ok, updated_handoff} = HandoffController.process_requests(issue, workspace)
+      assert updated_handoff["head_sha"] == review_head
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "handoff rejects an out-of-scope review rework delta" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 

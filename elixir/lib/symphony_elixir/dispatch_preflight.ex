@@ -509,20 +509,25 @@ defmodule SymphonyElixir.DispatchPreflight do
          inspection,
          "review_rework"
        ) do
-    if not scoped_review_feedback?(inspection, requirements) do
-      case HandoffCertificate.latest_signed_head(struct_issue(issue), workspace) do
-        {:ok, signed_head} -> Map.put(preflight, "review_delta_base_head", signed_head)
-        _ -> maybe_preserve_review_delta_base(preflight, workspace, issue, requirements)
-      end
-    else
-      preflight
+    current_head = review_or_workspace_head(workspace, inspection)
+
+    case HandoffCertificate.latest_signed_head(struct_issue(issue), workspace) do
+      {:ok, signed_head} ->
+        if valid_review_delta_base?(workspace, signed_head, current_head) do
+          Map.put(preflight, "review_delta_base_head", signed_head)
+        else
+          maybe_preserve_review_delta_base(preflight, workspace, issue, requirements, current_head)
+        end
+
+      _ ->
+        maybe_preserve_review_delta_base(preflight, workspace, issue, requirements, current_head)
     end
   end
 
   defp maybe_bind_review_delta_base(preflight, _workspace, _issue, _requirements, _inspection, _mode),
     do: preflight
 
-  defp maybe_preserve_review_delta_base(preflight, workspace, issue, requirements) do
+  defp maybe_preserve_review_delta_base(preflight, workspace, issue, requirements, current_head) do
     issue_id = issue_value(issue, :id)
     contract_hash = requirements["contract_hash"]
     issue_revision = requirements["issue_revision"]
@@ -536,8 +541,14 @@ defmodule SymphonyElixir.DispatchPreflight do
          "issue_revision" => ^issue_revision
        } = prior_preflight} ->
         case prior_preflight["review_delta_base_head"] || get_in(prior_preflight, ["review", "head_sha"]) do
-          base_head when is_binary(base_head) and base_head != "" ->
-            Map.put(preflight, "review_delta_base_head", base_head)
+          base_head
+          when is_binary(base_head) and base_head != "" and is_binary(current_head) and
+                 current_head != "" ->
+            if valid_review_delta_base?(workspace, base_head, current_head) do
+              Map.put(preflight, "review_delta_base_head", base_head)
+            else
+              preflight
+            end
 
           _ ->
             preflight
@@ -545,6 +556,26 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       _ ->
         preflight
+    end
+  end
+
+  defp review_or_workspace_head(workspace, inspection) do
+    review_head = Map.get(inspection, :head_sha) || Map.get(inspection, "head_sha")
+
+    if is_binary(review_head) and review_head != "" do
+      review_head
+    else
+      case git_command(workspace, ["rev-parse", "HEAD"]) do
+        {head, 0} -> String.trim(head)
+        _ -> nil
+      end
+    end
+  end
+
+  defp valid_review_delta_base?(workspace, base_head, current_head) do
+    case git_command(workspace, ["merge-base", "--is-ancestor", base_head, current_head]) do
+      {_output, 0} -> true
+      _ -> false
     end
   end
 
