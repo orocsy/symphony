@@ -201,6 +201,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       issue
       |> struct_issue()
       |> maybe_append_issue_brief_description(workspace, requirements)
+      |> maybe_bind_authoritative_review_branch(requirements)
 
     monitor = Config.settings!().review_monitor
 
@@ -213,6 +214,16 @@ defmodule SymphonyElixir.DispatchPreflight do
           {:ok, inspection} -> {:ok, inspection}
           {:error, reason} -> {:ok, review_inspection_failed(reason)}
         end
+    end
+  end
+
+  defp maybe_bind_authoritative_review_branch(%Issue{} = issue, requirements) do
+    case authoritative_contract_branch(requirements) do
+      branch when is_binary(branch) and branch != "" ->
+        %{issue | branch_name: branch, description: ""}
+
+      _ ->
+        issue
     end
   end
 

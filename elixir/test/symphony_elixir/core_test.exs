@@ -6356,6 +6356,115 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight inspects only the authoritative contract branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-contract-review-branch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      contract_branch = "orocsy/cod-274-contract-branch"
+      stale_tracker_branch = "orocsy/cod-274-stale-tracker-branch"
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-cod-274-contract-review-branch",
+          identifier: "COD-274",
+          title: "Desktop shell review rework",
+          state: "Rework",
+          branch_name: contract_branch,
+          description: "Fix current review feedback on the existing PR."
+        })
+        |> Map.put(:branch_name, stale_tracker_branch)
+        |> Map.update!(:description, fn description ->
+          description <> "\n## Review Branch\n#{stale_tracker_branch}\n"
+        end)
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:#{contract_branch}") ->
+            {:ok,
+             [
+               %{
+                 "number" => 110,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/110",
+                 "head" => %{
+                   "sha" => "118a18d424313e5e21d898cccd40b4a560157ce2",
+                   "ref" => contract_branch
+                 }
+               }
+             ]}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:#{stale_tracker_branch}") ->
+            {:ok,
+             [
+               %{
+                 "number" => 111,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/111",
+                 "head" => %{
+                   "sha" => "218a18d424313e5e21d898cccd40b4a560157ce2",
+                   "ref" => stale_tracker_branch
+                 }
+               }
+             ]}
+
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/110/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/110/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/111/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Feedback from the stale PR must be ignored.",
+                 "commit_id" => "218a18d424313e5e21d898cccd40b4a560157ce2",
+                 "path" => "README.md",
+                 "line" => 113,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/111#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/111/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["requirements", "integration_branch"]) == contract_branch
+      assert get_in(preflight, ["review", "pr_number"]) == 110
+      assert preflight["branch"] == contract_branch
+      assert get_in(preflight, ["review", "feedback"]) == []
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight preserves the original review certification baseline across retries" do
     test_root =
       Path.join(
