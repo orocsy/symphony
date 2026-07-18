@@ -438,7 +438,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_put_worker_thread_overrides(params, workspace) when is_binary(workspace) do
-    case DispatchPreflight.read(workspace) do
+    case DispatchPreflight.read_for_prompt(workspace) do
       {:ok, %{"mode" => "review_rework"}} ->
         params
         |> Map.put("baseInstructions", review_rework_base_instructions())
@@ -454,7 +454,6 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:ok,
        %{
          "mode" => "handoff_recovery",
-         "checkpoint_event" => "runtime-contract-gate",
          "requirements" => %{"runtime_contract_status" => "structured"}
        }} ->
         params
@@ -574,9 +573,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     Symphony review-rework micro-worker.
 
     This thread exists only to resolve current-head PR review feedback already named in the user prompt.
+    If the prompt includes a `Runtime Contract final handoff gate`, that gate is authoritative: after the scoped review edit, commit and push without running contract-declared validation inside the Codex worker sandbox, append the exact `handoff.requested` event, and stop. Symphony's validation controller runs the review-delta validation outside the worker sandbox.
     Do not load Codex skills, plugins, apps, MCP tools, broad project docs, prior session JSONL, or unrelated issue history.
     Do not refetch GitHub or Linear review text when the prompt already includes the current-head feedback body.
-    Before a dirty/local handoff shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`. If guidance or the dispatch preflight reports any open Orocsy correction, that correction is the first task: read only the exact named code/test file, make the smallest in-scope fix or record a scoped blocker, run focused validation, and resolve the correction only after evidence is recorded. Do not append `review-feedback-classified`, run validation-only retries, commit, push, or request review while any open correction remains.
+    Before a dirty/local handoff shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`. If guidance or the dispatch preflight reports any open Orocsy correction, that correction defines the first scoped fix. Under a Runtime Contract final handoff, explicitly resolve a worker/guidance correction after the scoped fix, then commit and push without worker-side validation and append `handoff.requested`; only a controller-owned review validation correction remains open for controller reconciliation. For a legacy issue, run focused validation and resolve the correction only after evidence is recorded. Do not append `review-feedback-classified` or run validation-only browser retries.
     Exception: when the open correction source is `symphony.runtime.validation-controller` and its guard MIU is `__review_rework__`, do not rerun validation or resolve the correction manually. Use the supplied output to make the smallest scoped fix, commit and push it, append the Runtime Contract `handoff.requested` event, and stop so the controller can validate and resolve it.
     When guidance reports no open corrections and there is no dirty/local handoff checkpoint, do not append `review-feedback-classified` as a standalone first action. The supplied current-head feedback is already classified enough to begin; read only the referenced in-scope file range, then make the scoped fix or record an explicit blocker.
     Do not run broad rg, grep, find, ls, git ls-files, mutating gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
@@ -584,7 +584,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     For implementation-child review rework, shared-file or owned-by-other notes are not automatically readable. Read only write-scope files plus shared files explicitly labeled read-only/context/support; never read files listed as out of scope or owned by another ticket.
     After durable local handoff progress, read-only GitHub PR/review inspection via `gh api --method GET` or read-only PR GraphQL is allowed only to confirm current PR review state.
     If the prompt includes a `Runtime Contract final handoff gate`, do not post `@codex review` yourself. After the scoped commit is pushed, request final runtime certification with the exact `handoff.requested` command supplied by that contract; Symphony issues `handoff.ready` and posts the fresh review request. For a legacy issue with no Runtime Contract gate, request review directly with `gh pr comment <pr-number> --body '@codex review'` after focused validation and push.
-    If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first: inspect only the focused local diff and run contract-declared focused validation. If validation names exact in-scope files/assertions, make that smallest repair before committing; otherwise commit and push, then follow the same structured-versus-legacy handoff rule above. Leave Linear state transitions to Symphony's review monitor.
+    If the prompt starts with a dirty/local handoff checkpoint, follow that checkpoint first. For a structured Runtime Contract final handoff, inspect only the focused local diff, commit and push it without worker-side validation, then append `handoff.requested`. For a legacy issue, run its contract-declared focused validation before committing; then follow the same structured-versus-legacy handoff rule above. Leave Linear state transitions to Symphony's review monitor.
     Run only validation commands declared by the active issue/runtime contract; do not add a full suite as an extra review-rework gate. For declared Vitest validation, use `--configLoader runner` to avoid Vite writing startup temp files into symlinked `node_modules/.vite-temp`. If the issue brief names a focused test, run the exact `pnpm exec vitest run --configLoader runner <test-file>` command. If the declared full-suite command is `pnpm test` and `package.json` has `"test": "vitest run"`, run `pnpm test -- --configLoader runner` instead and record it as satisfying `pnpm test`. Do not run `pnpm test <test-file>` and do not probe or request approval for `node_modules/.vite-temp`.
     Start from the feedback file listed in the prompt. Read a short range around that target file only, then edit only directly related code/tests or record a blocker.
     If the issue brief names an exact write-scope file that does not exist yet, create that exact file; do not try alternate app roots such as `app/`, `apps/web/`, or `packages/web/`.
@@ -593,7 +593,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Before spending broad analysis tokens, either edit a scoped code/test file or write an explicit Orocsy blocker/correction.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
-    In the first turn, complete the scoped fix, contract-declared focused validation, commit, push, and the structured runtime handoff or legacy direct review request described above, or stop with a concrete blocker.
+    In the first turn, complete the scoped fix and either the controller-owned structured runtime handoff or the legacy direct review request with worker validation described above, or stop with a concrete blocker.
     Never move a review-rework issue to `Done`, `Closed`, or another terminal Linear state. A fresh review request is not proof of a clean review.
     Never merge automatically.
     """
@@ -631,6 +631,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Symphony structured handoff-recovery micro-worker.
 
     The user prompt's active `Runtime Contract execution gate` or `Runtime Contract final handoff gate` is authoritative and replaces legacy worker-side validation and handoff instructions.
+    If the prompt reports an open Orocsy correction, that correction is the first task even when the persisted preflight previously named a Runtime Contract gate. Make only the correction's scoped fix. Resolve a worker/guidance correction with scoped-fix evidence before handoff; leave a controller-owned validation correction open for controller reconciliation.
     Inspect only `git status --short --branch`, the focused dirty diff, the active issue brief, and files named by the active gate.
     For an execution gate, finish only the named MIU inside its declared write scope, create one clean local micro commit, append the exact `miu.completion_requested` event supplied by the gate, and stop without pushing.
     For a final handoff gate, do not create another MIU commit: push the canonical branch, verify upstream equality, ensure its PR exists, append the exact `handoff.requested` event supplied by the gate, and stop.
@@ -2071,11 +2072,14 @@ defmodule SymphonyElixir.Codex.AppServer do
       is_nil(command) ->
         :ok
 
+      delivery_inbox_command_substitution?(command) ->
+        {:error, command, "delivery_inbox_metadata_command_substitution"}
+
       open_correction_blocks_review_classification?(command_for_patterns, workspace) ->
         {:error, command, "open_correction_requires_scoped_fix_before_review_feedback_classified"}
 
       unsafe_playwright_correction_validation?(command_for_patterns, workspace) ->
-        {:error, command, "playwright_chrome_sandbox_correction_requires_chromium_channel"}
+        {:error, command, "playwright_browser_correction_requires_runtime_controller_handoff"}
 
       symlinked_vitest_full_test_command?(command_for_patterns, workspace) ->
         {:error, command, "symlinked_vitest_full_test_requires_configLoader_runner"}
@@ -2205,11 +2209,19 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp open_correction_blocks_review_classification?(_command, _workspace), do: false
 
+  defp delivery_inbox_command_substitution?(command) when is_binary(command) do
+    normalized = unescape_shell_argument_quotes(command)
+
+    delivery_inbox_create_command?(normalized) and
+      shell_command_substitution?(normalized)
+  end
+
+  defp delivery_inbox_command_substitution?(_command), do: false
+
   defp unsafe_playwright_correction_validation?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
     playwright_test_command?(command) and
-      open_playwright_browser_correction?(workspace) and
-      not safe_playwright_chromium_command?(command)
+      open_playwright_browser_correction?(workspace)
   rescue
     _error -> false
   end
@@ -2224,19 +2236,6 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp playwright_test_command?(_command), do: false
-
-  defp safe_playwright_chromium_command?(command) when is_binary(command) do
-    normalized =
-      command
-      |> unescape_shell_argument_quotes()
-      |> String.replace(~r/\s+/, " ")
-      |> String.downcase()
-
-    String.contains?(normalized, "playwright_channel=chromium") and
-      (String.contains?(normalized, "--workers=1") or String.contains?(normalized, "--workers 1"))
-  end
-
-  defp safe_playwright_chromium_command?(_command), do: false
 
   defp open_playwright_browser_correction?(workspace) when is_binary(workspace) do
     workspace
@@ -2727,24 +2726,58 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp integration_check_allowed_ref_names(_preflight), do: MapSet.new()
 
   defp command_for_forbidden_patterns(command) when is_binary(command) do
-    if delivery_event_append_command?(command) do
-      redact_delivery_event_append_metadata(command)
-    else
-      command
+    normalized_command = unescape_shell_argument_quotes(command)
+
+    cond do
+      shell_command_substitution?(normalized_command) ->
+        normalized_command
+
+      delivery_event_append_command?(normalized_command) ->
+        redact_delivery_event_append_metadata(normalized_command)
+
+      delivery_inbox_create_command?(normalized_command) ->
+        redact_delivery_inbox_create_metadata(normalized_command)
+
+      true ->
+        normalized_command
     end
   end
 
   defp command_for_forbidden_patterns(command), do: command
+
+  defp shell_command_substitution?(command) when is_binary(command) do
+    String.contains?(command, "$(") or String.contains?(command, "`")
+  end
+
+  defp shell_command_substitution?(_command), do: false
 
   defp delivery_event_append_command?(command) when is_binary(command) do
     String.contains?(command, ".codex/delivery/bin/orocsy.py") and
       String.contains?(command, " event append")
   end
 
+  defp delivery_inbox_create_command?(command) when is_binary(command) do
+    String.contains?(command, ".codex/delivery/bin/orocsy.py") and
+      String.contains?(command, " inbox create")
+  end
+
   defp redact_delivery_event_append_metadata(command) when is_binary(command) do
     ["command", "summary", "message", "details", "detail", "body"]
     |> Enum.reduce(command, fn flag, acc ->
       acc
+      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
+    end)
+  end
+
+  defp redact_delivery_inbox_create_metadata(command) when is_binary(command) do
+    ["summary", "finding", "required-correction"]
+    |> Enum.reduce(command, fn flag, acc ->
+      acc
+      |> String.replace(~r/(--#{flag}=)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}=)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}=)[^\s]+/, "\\1<redacted>")
       |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
       |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
       |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
