@@ -451,6 +451,17 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> Map.put("developerInstructions", fresh_implementation_developer_instructions())
         |> Map.put("config", fresh_implementation_thread_config())
 
+      {:ok,
+       %{
+         "mode" => "handoff_recovery",
+         "checkpoint_event" => "runtime-contract-gate",
+         "requirements" => %{"runtime_contract_status" => "structured"}
+       }} ->
+        params
+        |> Map.put("baseInstructions", fresh_implementation_base_instructions())
+        |> Map.put("developerInstructions", structured_handoff_recovery_developer_instructions())
+        |> Map.put("config", fresh_implementation_thread_config())
+
       {:ok, %{"mode" => "integration_check"}} ->
         params
         |> Map.put("baseInstructions", integration_check_base_instructions())
@@ -566,6 +577,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Do not load Codex skills, plugins, apps, MCP tools, broad project docs, prior session JSONL, or unrelated issue history.
     Do not refetch GitHub or Linear review text when the prompt already includes the current-head feedback body.
     Before a dirty/local handoff shortcut, run `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py symphony guidance --workspace . --json`. If guidance or the dispatch preflight reports any open Orocsy correction, that correction is the first task: read only the exact named code/test file, make the smallest in-scope fix or record a scoped blocker, run focused validation, and resolve the correction only after evidence is recorded. Do not append `review-feedback-classified`, run validation-only retries, commit, push, or request review while any open correction remains.
+    Exception: when the open correction source is `symphony.runtime.validation-controller` and its guard MIU is `__review_rework__`, do not rerun validation or resolve the correction manually. Use the supplied output to make the smallest scoped fix, commit and push it, append the Runtime Contract `handoff.requested` event, and stop so the controller can validate and resolve it.
     When guidance reports no open corrections and there is no dirty/local handoff checkpoint, do not append `review-feedback-classified` as a standalone first action. The supplied current-head feedback is already classified enough to begin; read only the referenced in-scope file range, then make the scoped fix or record an explicit blocker.
     Do not run broad rg, grep, find, ls, git ls-files, mutating gh api, shell pipelines, or chained shell commands in review-rework mode; use the supplied feedback body, dirty diff, and short sed ranges.
     If current-head feedback or an Orocsy correction names exact files and a symbol lookup is truly needed after the active checkpoint, use only bounded `rg -n "literal" <exact named file...>` over those named files. Never use grep, recursive flags, or bare directories such as `src`, `app`, `lib`, or `tests`.
@@ -605,10 +617,27 @@ defmodule SymphonyElixir.Codex.AppServer do
     If the brief names an exact test file, use that path; do not invent colocated sibling tests such as `src/.../*.test.ts`.
     Before any wider context read, either make the first scoped code/test/doc edit and append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"`, or record a blocker/correction. Trace-only/read-only MIU notes are not durable progress.
     For docs-only or contract tickets, edit the declared contract section first; do not search the whole document to rediscover the section if the issue brief names the target section.
-    If the user prompt begins with a `Runtime Contract execution gate`, that gate replaces the legacy trace-only first-turn checkpoint: implement the named MIU, create its clean local micro commit, append `miu.completion_requested` exactly as instructed, and stop without pushing or requesting review. Otherwise, in the first fresh implementation turn stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
+    If the user prompt begins with a `Runtime Contract execution gate`, that gate replaces all legacy validation and handoff instructions: implement the named MIU, do not run contract-declared validation inside the Codex worker sandbox, create its clean local micro commit, append `miu.completion_requested` exactly as instructed, and stop without pushing or requesting review. Symphony's validation controller runs authoritative validation after the request. Otherwise, in the first fresh implementation turn stop after the scoped edit and `technical-miu-trace`; do not validate, commit, push, create/update a PR, request Codex review, or update Linear in that same first turn. A later dirty handoff-recovery turn owns focused validation, evidence, commit, push, PR review request, and Linear handoff.
     If validation, git push, GitHub, Linear, PATH, auth, network/provider access, or approval/input fails, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
     Do not use a plain `event append --type validation.blocker` as the only blocker record; create an Orocsy inbox correction when stopping for a blocker.
     In the first turn, complete the active structured-contract gate or the legacy scoped implementation checkpoint, or stop with a concrete blocker.
+    Never merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp structured_handoff_recovery_developer_instructions do
+    """
+    Symphony structured handoff-recovery micro-worker.
+
+    The user prompt's active `Runtime Contract execution gate` or `Runtime Contract final handoff gate` is authoritative and replaces legacy worker-side validation and handoff instructions.
+    Inspect only `git status --short --branch`, the focused dirty diff, the active issue brief, and files named by the active gate.
+    For an execution gate, finish only the named MIU inside its declared write scope, create one clean local micro commit, append the exact `miu.completion_requested` event supplied by the gate, and stop without pushing.
+    For a final handoff gate, do not create another MIU commit: push the canonical branch, verify upstream equality, ensure its PR exists, append the exact `handoff.requested` event supplied by the gate, and stop.
+    Do not run contract-declared validation inside the Codex worker sandbox and do not recreate a browser or environment correction solely because worker-side validation is unavailable.
+    Symphony's validation controller runs authoritative validation after an MIU request, writes exact failure evidence into an Orocsy correction, and resolves matching MIU validation corrections after successful certification.
+    Do not load skills, plugins, apps, MCP tools, prior session logs, historical tickets, or broad project context. Do not broaden read or write scope.
+    Do not request GitHub review or change Linear state yourself.
     Never merge automatically.
     """
     |> String.trim()
@@ -667,6 +696,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       patterns = effective_forbidden_command_patterns_for(workspace)
       forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
     end
+
+    def worker_thread_overrides_for_test(params, workspace),
+      do: maybe_put_worker_thread_overrides(params, workspace)
   end
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
@@ -678,6 +710,13 @@ defmodule SymphonyElixir.Codex.AppServer do
       "fresh_implementation" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
 
+      "handoff_recovery" ->
+        if structured_handoff_recovery?(workspace) do
+          Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
+        else
+          patterns
+        end
+
       "integration_check" ->
         Enum.uniq(patterns ++ @fresh_implementation_forbidden_command_patterns)
 
@@ -687,6 +726,20 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp effective_forbidden_command_patterns(_workspace, patterns), do: patterns
+
+  defp structured_handoff_recovery?(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok,
+       %{
+         "mode" => "handoff_recovery",
+         "requirements" => %{"runtime_contract_status" => "structured"}
+       }} ->
+        true
+
+      _ ->
+        false
+    end
+  end
 
   defp review_rework_configured_forbidden_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case DispatchPreflight.read(workspace) do

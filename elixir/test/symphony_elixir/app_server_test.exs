@@ -568,6 +568,194 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server gives structured handoff recovery controller-owned validation instructions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-handoff-thread-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-STRUCTURED-HANDOFF")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-structured-handoff.trace")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "issue" => "MT-STRUCTURED-HANDOFF",
+          "checkpoint_event" => "runtime-contract-gate",
+          "requirements" => %{
+            "runtime_contract_status" => "structured",
+            "ticket_type" => "test-spec",
+            "write_scope" => ["tests/e2e/example.spec.ts"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-structured-handoff.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-structured-handoff"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-structured-handoff"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-structured-handoff",
+        identifier: "MT-STRUCTURED-HANDOFF",
+        title: "Structured handoff",
+        description: "Complete the remaining structured MIU",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-STRUCTURED-HANDOFF",
+        labels: []
+      }
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Runtime Contract execution gate: finish the MIU", issue)
+
+      thread_start =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      instructions = get_in(thread_start, ["params", "developerInstructions"])
+      assert instructions =~ "Symphony structured handoff-recovery micro-worker"
+      assert instructions =~ "replaces legacy worker-side validation"
+      assert instructions =~ "Do not run contract-declared validation inside the Codex worker sandbox"
+      assert instructions =~ "append the exact `miu.completion_requested` event"
+      assert instructions =~ "append the exact `handoff.requested` event"
+      assert instructions =~ "validation controller runs authoritative validation"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "structured generic correction recovery preserves correction-scoped instructions" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-generic-correction-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Fix and resolve the generic correction",
+          "open_corrections" => [%{"correction_id" => "correction-generic"}],
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+      assert prompt =~ "`correction-scoped-fix`"
+      assert prompt =~ "open Orocsy correction"
+      refute prompt =~ "follow the active Runtime Contract gate"
+      refute prompt =~ "append only its exact event"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "app server applies scoped command guards to structured handoff recovery" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-handoff-command-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "runtime-contract-gate",
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      assert {:error, _command, pattern} =
+               AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "header" src))
+
+      assert pattern =~ "rg"
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
+
+      base_params = %{
+        "baseInstructions" => "base instructions",
+        "developerInstructions" => "generic correction instructions",
+        "config" => %{}
+      }
+
+      runtime_gate_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert runtime_gate_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "correction-scoped-fix",
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      correction_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert correction_params["developerInstructions"] == "generic correction instructions"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks broad search commands in fresh implementation mode" do
     test_root =
       Path.join(

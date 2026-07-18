@@ -7875,6 +7875,172 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight delegates structured dirty test-spec validation to the controller" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-dirty-test-spec-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-274-dirty-preflight",
+        identifier: "COD-274",
+        title: "Test-Spec: safe-area app chrome",
+        state: "In Progress",
+        branch_name: "orocsy/cod-274-safe-area-tests",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: test-spec
+        base_branch: main
+        integration_branch: orocsy/cod-274-safe-area-tests
+        dependencies: []
+        mius:
+          - id: COD-274-MIU-1
+            write_scope:
+              - tests/e2e/app-shell-responsive.spec.ts
+            validations:
+              - pnpm exec playwright test tests/e2e/app-shell-responsive.spec.ts
+        final_validations:
+          - pnpm exec playwright test tests/e2e/app-shell-responsive.spec.ts
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.email", "symphony@example.test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      {_output, 0} =
+        System.cmd("git", ["config", "user.name", "Symphony Test"],
+          cd: workspace,
+          stderr_to_stdout: true
+        )
+
+      File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      test_file = Path.join(workspace, "tests/e2e/app-shell-responsive.spec.ts")
+      File.write!(test_file, "test('base', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "."], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      File.write!(test_file, "test.fail('expected failure', () => {})\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert preflight["first_task"] =~ "miu.completion_requested"
+      assert preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
+      assert preflight["first_task"] =~ "validation controller"
+      assert preflight["first_task"] =~ "Do not edit production source"
+
+      prompt_context = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+      assert prompt_context =~ "append only its exact event"
+      assert prompt_context =~ "miu.completion_requested"
+      assert prompt_context =~ "handoff.requested"
+      refute prompt_context =~ "focused validation such as `gate.post-miu`"
+
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(inbox_dir, "correction_structured_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_structured_browser",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Browser validation failed in the worker sandbox"
+        })
+      )
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = corrected_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert corrected_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert corrected_preflight["first_task"] =~ "Browser validation failed in the worker sandbox"
+      assert corrected_preflight["first_task"] =~ "run focused validation"
+      refute corrected_preflight["first_task"] =~ "active Runtime Contract gate"
+
+      File.write!(
+        Path.join(inbox_dir, "correction_structured_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_structured_browser",
+          "status" => "resolved",
+          "next_action" => "retry",
+          "resolved_at" => "2026-07-16T12:00:00Z",
+          "summary" => "Browser validation failed in the worker sandbox"
+        })
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_controller_validation.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_controller_validation",
+          "source" => "symphony.runtime.validation-controller",
+          "status" => "open",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Controller validation failed",
+          "guard" => %{"miu_id" => "COD-274-MIU-1"}
+        })
+      )
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = controller_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert controller_preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert controller_preflight["first_task"] =~ "active Runtime Contract gate"
+      assert controller_preflight["first_task"] =~ "Do not run contract-declared validation inside the Codex worker"
+
+      assert [controller_correction] = controller_preflight["open_corrections"]
+      assert controller_correction["source"] == "symphony.runtime.validation-controller"
+      assert controller_correction["next_action"] == "retry"
+      assert controller_correction["guard"] == %{"miu_id" => "COD-274-MIU-1"}
+
+      for index <- 1..5 do
+        File.write!(
+          Path.join(inbox_dir, "correction_zzzz_generic_#{index}.json"),
+          Jason.encode!(%{
+            "correction_id" => "correction_zzzz_generic_#{index}",
+            "status" => "open",
+            "next_action" => "retry",
+            "summary" => "Newer generic correction #{index}"
+          })
+        )
+      end
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = generic_first_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert generic_first_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert generic_first_preflight["first_task"] =~ "Newer generic correction"
+      assert length(generic_first_preflight["open_corrections"]) == 6
+
+      assert Enum.any?(generic_first_preflight["open_corrections"], fn correction ->
+               correction["source"] == "symphony.runtime.validation-controller"
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps clean in-progress implementation branches in fresh implementation mode" do
     test_root =
       Path.join(
@@ -13781,6 +13947,58 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder assigns structured MIU validation to the runtime controller" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-validation-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace)
+
+      issue = %Issue{
+        identifier: "MT-CONTROLLER-VALIDATION",
+        title: "Controller-owned validation",
+        state: "In Progress",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: test-spec
+        base_branch: main
+        integration_branch: orocsy/controller-validation
+        dependencies: []
+        mius:
+          - id: MT-CONTROLLER-VALIDATION-MIU-1
+            write_scope:
+              - tests/e2e/example.spec.ts
+            validations:
+              - pnpm exec playwright test tests/e2e/example.spec.ts
+        final_validations:
+          - pnpm exec playwright test tests/e2e/example.spec.ts
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+
+      assert String.starts_with?(prompt, "Runtime Contract execution gate:")
+      assert prompt =~ "Do not run contract-declared validation inside the Codex worker sandbox"
+      assert prompt =~ "validation controller runs it authoritatively"
+      assert prompt =~ "miu.completion_requested"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "prompt builder caps long Linear descriptions in rendered prompts" do
     workflow_prompt = """
     Ticket {{ issue.identifier }}
@@ -14473,6 +14691,67 @@ defmodule SymphonyElixir.CoreTest do
                "If a dirty/local handoff checkpoint appears above, follow that checkpoint first"
 
       refute prompt =~ "inspect the focused local diff and local commits"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "controller review validation correction keeps validation in the runtime" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-review-validation-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: Path.dirname(workspace))
+
+    try do
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(inbox)
+      File.mkdir_p!(state_dir)
+
+      correction = %{
+        "correction_id" => "correction_controller_review_validation",
+        "source" => "symphony.runtime.validation-controller",
+        "status" => "open",
+        "next_action" => "retry",
+        "created_at" => "2026-07-16T12:00:00Z",
+        "resolved_at" => nil,
+        "summary" => "Review-rework authoritative validation failed",
+        "findings" => ["Declared write scope: src/example.ts"],
+        "required_corrections" => ["Fix src/example.ts and request controller handoff."],
+        "guard" => %{"miu_id" => "__review_rework__"}
+      }
+
+      File.write!(
+        Path.join(inbox, "correction_controller_review_validation.json"),
+        Jason.encode!(correction)
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-205",
+          "open_corrections" => [correction]
+        })
+      )
+
+      issue = %Issue{
+        identifier: "MT-205",
+        title: "Retry controller review validation",
+        description: "Structured review correction",
+        state: "Rework",
+        labels: []
+      }
+
+      prompt = PromptBuilder.build_prompt(issue, attempt: 2, workspace: workspace)
+
+      assert prompt =~ "Controller-owned review validation correction contract:"
+      assert prompt =~ "Do not rerun controller-owned validation inside the Codex worker"
+      assert prompt =~ "append the exact `handoff.requested` event"
+      refute prompt =~ "run focused validation, record the evidence, resolve the correction"
     after
       File.rm_rf(workspace)
     end
@@ -20138,6 +20417,96 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.current_issue_for_runtime_transition_for_test(workspace, stale_issue, fetcher)
 
       assert_receive :runtime_transition_issue_refreshed
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "agent runner reconciles a pending certified transition before opening another worker" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-transition-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "miu.completion_requested",
+        "event_id" => "request-survived-interruption",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    issue = %Issue{
+      id: "issue-pending-transition-recovery",
+      identifier: "MT-PENDING-TRANSITION",
+      title: "Recover pending transition",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+
+    processor = fn ^workspace, ^issue, issue_state_fetcher ->
+      send(test_pid, {:pending_transition_reconciled, issue_state_fetcher})
+      {{:ok, %{"event" => "miu.completed"}}, :none}
+    end
+
+    try do
+      assert {:stop, {{:ok, %{"event" => "miu.completed"}}, :none}} =
+               AgentRunner.reconcile_pending_runtime_transition_for_test(
+                 workspace,
+                 issue,
+                 runtime_transition_processor: processor
+               )
+
+      assert_receive {:pending_transition_reconciled, issue_state_fetcher}
+      assert is_function(issue_state_fetcher, 1)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "agent runner stops when startup transition controllers error or block" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-transition-stop-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "miu.completion_requested",
+        "event_id" => "request-controller-stop",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    issue = %Issue{id: "issue-controller-stop", identifier: "MT-CONTROLLER-STOP", state: "In Progress"}
+
+    try do
+      error_result = {{:error, :correction_write_failed}, :none}
+
+      assert {:stop, ^error_result} =
+               AgentRunner.reconcile_pending_runtime_transition_for_test(
+                 workspace,
+                 issue,
+                 runtime_transition_processor: fn _, _, _ -> error_result end
+               )
+
+      blocked_result = {{:blocked, :retry_budget_exhausted}, :none}
+
+      assert {:stop, ^blocked_result} =
+               AgentRunner.reconcile_pending_runtime_transition_for_test(
+                 workspace,
+                 issue,
+                 runtime_transition_processor: fn _, _, _ -> blocked_result end
+               )
     after
       File.rm_rf(workspace)
     end

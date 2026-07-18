@@ -15,23 +15,20 @@ defmodule SymphonyElixir.HandoffController do
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
   def process_requests(%Issue{} = issue, workspace) when is_binary(workspace) do
-    case HandoffCertificate.current(issue, workspace) do
-      {:ok, certificate} ->
-        {:ok, certificate}
+    case structured_contract(issue) do
+      {:ok, compiled} ->
+        contract_identity = %{
+          "contract_hash" => compiled.contract_hash,
+          "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
+        }
 
-      _ ->
-        case structured_contract(issue) do
-          {:ok, compiled} ->
-            contract_identity = %{
-              "contract_hash" => compiled.contract_hash,
-              "issue_revision" => RuntimeContract.issue_revision(issue.description, issue.updated_at)
-            }
-
-            process_handoff_request(issue, workspace, contract_identity)
-
-          {:error, reason} = error ->
-            process_invalid_contract_request(workspace, reason, error)
+        case process_handoff_request(issue, workspace, contract_identity) do
+          :none -> current_handoff_certificate(issue, workspace)
+          result -> result
         end
+
+      {:error, reason} = error ->
+        process_invalid_contract_request(workspace, reason, error)
     end
   end
 
@@ -44,7 +41,9 @@ defmodule SymphonyElixir.HandoffController do
     with {:ok, _prior_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
          {:ok, %{"mode" => "review_rework"}} <-
            DispatchPreflight.prepare_review_delta_recovery(workspace, issue, inspection) do
-      certify_handoff(issue, workspace)
+      issue
+      |> certify_handoff(workspace)
+      |> reconcile_handoff_result(issue, workspace)
     else
       :not_ready -> :not_ready
       {:ok, %{"mode" => mode}} -> {:error, {:review_delta_reconciliation_mode_mismatch, mode}}
@@ -59,9 +58,20 @@ defmodule SymphonyElixir.HandoffController do
   defp process_handoff_request(issue, workspace, contract_identity) do
     case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested", contract_identity) do
       {:ok, request} ->
-        result = certify_handoff(issue, workspace)
-        :ok = record_request_result(workspace, request, result)
-        result
+        result =
+          case HandoffCertificate.current(issue, workspace) do
+            {:ok, certificate} -> {:ok, certificate}
+            _ -> certify_handoff(issue, workspace)
+          end
+
+        case reconcile_handoff_result(result, issue, workspace) do
+          ^result ->
+            :ok = record_request_result(workspace, request, result)
+            result
+
+          {:error, _reason} = error ->
+            error
+        end
 
       {:stale, request, reason} ->
         :ok = RuntimeRequest.mark_processed(workspace, request, "stale", %{"reason" => inspect(reason)})
@@ -69,6 +79,33 @@ defmodule SymphonyElixir.HandoffController do
 
       :none ->
         :none
+    end
+  end
+
+  defp current_handoff_certificate(issue, workspace) do
+    case HandoffCertificate.current(issue, workspace) do
+      {:ok, certificate} -> {:ok, certificate}
+      _ -> :none
+    end
+  end
+
+  defp validation_correction_scope({:error, {:validation_failed, %{"miu_id" => miu_id}}}, _workspace)
+       when is_binary(miu_id) and miu_id != "",
+       do: miu_id
+
+  defp validation_correction_scope(_result, workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} -> "__review_rework__"
+      _ -> "__final__"
+    end
+  end
+
+  defp reconcile_handoff_result(result, issue, workspace) do
+    correction_scope = validation_correction_scope(result, workspace)
+
+    case ValidationController.reconcile_runtime_corrections(issue, workspace, correction_scope, result) do
+      :ok -> result
+      {:error, reason} -> {:error, {:runtime_correction_reconciliation_failed, reason, result}}
     end
   end
 

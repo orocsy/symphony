@@ -55,9 +55,19 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               {:ok, _preflight} <- maybe_prepare_dispatch_preflight(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+            case reconcile_pending_runtime_transition(workspace, issue, opts) do
+              {:stop, _transition_result} ->
+                :ok
+
+              {:continue, _transition_result} ->
+                with {:ok, _preflight} <- maybe_prepare_dispatch_preflight(workspace, issue, worker_host) do
+                  run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+                end
+
+              {:error, _reason} = error ->
+                error
+            end
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -102,6 +112,9 @@ defmodule SymphonyElixir.AgentRunner do
 
     def current_issue_for_runtime_transition_for_test(workspace, issue, fetcher),
       do: current_issue_for_runtime_transition(workspace, issue, fetcher)
+
+    def reconcile_pending_runtime_transition_for_test(workspace, issue, opts),
+      do: reconcile_pending_runtime_transition(workspace, issue, opts)
 
     def policy_violation_recovery_action_for_test(
           workspace,
@@ -716,6 +729,31 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, {:runtime_transition_failed, Exception.message(error)}}
   end
 
+  defp reconcile_pending_runtime_transition(workspace, %Issue{} = issue, opts)
+       when is_binary(workspace) and is_list(opts) do
+    if RuntimeRequest.pending?(workspace, ["miu.completion_requested", "handoff.requested"]) do
+      issue_state_fetcher =
+        Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+
+      transition_processor =
+        Keyword.get(opts, :runtime_transition_processor, &process_runtime_transition_requests/3)
+
+      case transition_processor.(workspace, issue, issue_state_fetcher) do
+        {:error, _reason} = error ->
+          error
+
+        transition_result ->
+          if runtime_transition_stop?(transition_result),
+            do: {:stop, transition_result},
+            else: {:continue, transition_result}
+      end
+    else
+      {:continue, :none}
+    end
+  rescue
+    error -> {:error, {:runtime_transition_reconciliation_failed, Exception.message(error)}}
+  end
+
   defp current_issue_for_runtime_transition(workspace, %Issue{} = issue, issue_state_fetcher) do
     if RuntimeRequest.pending?(workspace, ["miu.completion_requested", "handoff.requested"]) do
       refresh_runtime_transition_issue(issue, issue_state_fetcher)
@@ -747,6 +785,10 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp runtime_transition_stop?({{:ok, certificate}, _handoff_result}) when is_map(certificate), do: true
   defp runtime_transition_stop?({_validation_result, {:ok, certificate}}) when is_map(certificate), do: true
+  defp runtime_transition_stop?({{:error, _reason}, _handoff_result}), do: true
+  defp runtime_transition_stop?({_validation_result, {:error, _reason}}), do: true
+  defp runtime_transition_stop?({{:blocked, _reason}, _handoff_result}), do: true
+  defp runtime_transition_stop?({_validation_result, {:blocked, _reason}}), do: true
   defp runtime_transition_stop?(_result), do: false
 
   defp maybe_record_controller_block(workspace, issue, controller, {:blocked, reason}) do
