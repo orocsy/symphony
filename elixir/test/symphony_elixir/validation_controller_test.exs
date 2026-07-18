@@ -383,6 +383,53 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "environment shape changes invalidate a failed validation fingerprint" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    previous_value = System.get_env(env_key)
+    System.delete_env(env_key)
+    {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      System.put_env(env_key, "new-environment-value")
+
+      assert {:error, {:validation_failed, second}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      refute second["validation_fingerprint"] == first["validation_fingerprint"]
+      refute second["environment_fingerprint"] == first["environment_fingerprint"]
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "redacts inherited secret values from validation evidence" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    secret_value = "validation-secret-value"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("0 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '0 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, event}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ secret_value
+      assert evidence =~ "[REDACTED:#{env_key}]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "processes worker requests through MIU certification and final handoff" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 

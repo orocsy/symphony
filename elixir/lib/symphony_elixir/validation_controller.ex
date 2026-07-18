@@ -14,6 +14,7 @@ defmodule SymphonyElixir.ValidationController do
   @max_capture_bytes 1_000_000
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
+  @sensitive_env_key ~r/(api[_-]?key|credential|password|private[_-]?key|secret|token)/i
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -570,6 +571,7 @@ defmodule SymphonyElixir.ValidationController do
     started = System.monotonic_time(:millisecond)
     timeout_ms = compiled.contract["validation_timeout_ms"]
     {output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
+    output = redact_sensitive_environment_values(output)
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
     tests = test_counts(command, output)
     {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
@@ -729,10 +731,26 @@ defmodule SymphonyElixir.ValidationController do
         if File.regular?(path), do: sha256(File.read!(path))
       end)
 
-    [System.version(), System.otp_release(), lock_digest]
+    environment_shape =
+      System.get_env()
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.join("\n")
+
+    [System.version(), System.otp_release(), lock_digest, environment_shape]
     |> Enum.join("\n")
     |> sha256()
     |> then(&("sha256:" <> &1))
+  end
+
+  defp redact_sensitive_environment_values(output) when is_binary(output) do
+    System.get_env()
+    |> Enum.filter(fn {key, value} ->
+      Regex.match?(@sensitive_env_key, key) and is_binary(value) and byte_size(value) >= 4
+    end)
+    |> Enum.reduce(output, fn {key, value}, redacted ->
+      String.replace(redacted, value, "[REDACTED:#{key}]")
+    end)
   end
 
   defp failed_fingerprint(workspace, fingerprint) do
