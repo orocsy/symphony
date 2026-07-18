@@ -6356,7 +6356,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "dispatch preflight inspects the authoritative contract branch instead of a stale tracker branch" do
+  test "dispatch preflight inspects only the authoritative contract branch" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -6384,6 +6384,9 @@ defmodule SymphonyElixir.CoreTest do
           description: "Fix current review feedback on the existing PR."
         })
         |> Map.put(:branch_name, stale_tracker_branch)
+        |> Map.update!(:description, fn description ->
+          description <> "\n## Review Branch\n#{stale_tracker_branch}\n"
+        end)
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
 
@@ -6405,22 +6408,42 @@ defmodule SymphonyElixir.CoreTest do
                }
              ]}
 
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") and
+              String.contains?(decoded, "head=acme:#{stale_tracker_branch}") ->
+            {:ok,
+             [
+               %{
+                 "number" => 111,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/111",
+                 "head" => %{
+                   "sha" => "218a18d424313e5e21d898cccd40b4a560157ce2",
+                   "ref" => stale_tracker_branch
+                 }
+               }
+             ]}
+
           String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") ->
             {:ok, []}
 
           endpoint == "repos/acme/nutribuddy/pulls/110/comments" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/110/reviews" ->
+            {:ok, []}
+
+          endpoint == "repos/acme/nutribuddy/pulls/111/comments" ->
             {:ok,
              [
                %{
-                 "body" => "Restore the route-content slot assertions.",
-                 "commit_id" => "118a18d424313e5e21d898cccd40b4a560157ce2",
+                 "body" => "Feedback from the stale PR must be ignored.",
+                 "commit_id" => "218a18d424313e5e21d898cccd40b4a560157ce2",
                  "path" => "README.md",
                  "line" => 113,
-                 "html_url" => "https://github.com/acme/nutribuddy/pull/110#discussion"
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/111#discussion"
                }
              ]}
 
-          endpoint == "repos/acme/nutribuddy/pulls/110/reviews" ->
+          endpoint == "repos/acme/nutribuddy/pulls/111/reviews" ->
             {:ok, []}
 
           true ->
@@ -6430,14 +6453,13 @@ defmodule SymphonyElixir.CoreTest do
 
       on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
 
-      assert {:ok, %{"mode" => "review_rework"} = preflight} =
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert get_in(preflight, ["requirements", "integration_branch"]) == contract_branch
       assert get_in(preflight, ["review", "pr_number"]) == 110
       assert preflight["branch"] == contract_branch
-      assert [feedback] = get_in(preflight, ["review", "feedback"])
-      assert feedback["path"] == "README.md"
+      assert get_in(preflight, ["review", "feedback"]) == []
     after
       File.rm_rf(test_root)
     end

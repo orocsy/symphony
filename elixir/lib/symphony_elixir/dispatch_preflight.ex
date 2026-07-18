@@ -219,8 +219,11 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp maybe_bind_authoritative_review_branch(%Issue{} = issue, requirements) do
     case authoritative_contract_branch(requirements) do
-      branch when is_binary(branch) and branch != "" -> %{issue | branch_name: branch}
-      _ -> issue
+      branch when is_binary(branch) and branch != "" ->
+        %{issue | branch_name: branch, description: ""}
+
+      _ ->
+        issue
     end
   end
 
