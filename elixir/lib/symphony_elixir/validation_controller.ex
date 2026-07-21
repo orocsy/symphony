@@ -14,7 +14,7 @@ defmodule SymphonyElixir.ValidationController do
   @max_capture_bytes 1_000_000
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
-  @sensitive_env_key ~r/(?:^|[_-])(?:api[_-]?key|auth|credentials?|password|private[_-]?key|secrets?|tokens?)(?:$|[_-])/i
+  @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
   @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
   @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
 
@@ -534,8 +534,7 @@ defmodule SymphonyElixir.ValidationController do
               miu["id"],
               head_sha,
               command,
-              environment_fingerprint(workspace),
-              credential_environment_fingerprint()
+              environment_fingerprint(workspace)
             ) ->
           {:halt, {:blocked, {:unchanged_failed_validation, product_attempt["validation_fingerprint"]}}}
 
@@ -589,7 +588,12 @@ defmodule SymphonyElixir.ValidationController do
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
     tests = test_counts(command, raw_output)
     {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
-    output = redact_sensitive_environment_values(raw_output)
+
+    output =
+      raw_output
+      |> redact_sensitive_environment_values()
+      |> bounded_capture(@max_capture_bytes)
+
     event_id = "validation-" <> String.slice(fingerprint, -16, 16)
     bounded_output = truncate(output, @max_log_bytes)
     log_path = write_validation_log(workspace, event_id, bounded_output)
@@ -605,7 +609,6 @@ defmodule SymphonyElixir.ValidationController do
       "head_sha" => head_sha,
       "command" => command,
       "command_hash" => "sha256:" <> sha256(command),
-      "credential_environment_fingerprint" => credential_environment_fingerprint(),
       "environment_fingerprint" => environment_fingerprint(workspace),
       "validation_fingerprint" => fingerprint,
       "status" => status,
@@ -628,8 +631,10 @@ defmodule SymphonyElixir.ValidationController do
         executable = resolve_executable(executable, workspace)
         port = open_command_port(executable, args, workspace, env)
 
+        capture_bytes = @max_capture_bytes + max_sensitive_environment_value_bytes()
+
         {output, exit_code, timed_out?} =
-          collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "")
+          collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "", capture_bytes)
 
         {output, exit_code, timed_out?, false}
 
@@ -764,13 +769,6 @@ defmodule SymphonyElixir.ValidationController do
     })
   end
 
-  defp credential_environment_fingerprint do
-    System.get_env()
-    |> Enum.filter(fn {key, _value} -> sensitive_env_key?(key) end)
-    |> Map.new()
-    |> ControllerEvidence.fingerprint()
-  end
-
   defp validation_environment do
     System.get_env()
     |> Enum.filter(fn {key, _value} ->
@@ -780,10 +778,7 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp redact_sensitive_environment_values(output) when is_binary(output) do
-    System.get_env()
-    |> Enum.filter(fn {key, value} ->
-      sensitive_env_key?(key) and is_binary(value) and value != ""
-    end)
+    sensitive_environment_values()
     |> Enum.sort_by(fn {key, value} -> {-byte_size(value), key} end)
     |> Enum.reduce(output, fn {key, value}, redacted ->
       redact_environment_value(redacted, key, value)
@@ -791,6 +786,19 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp sensitive_env_key?(key), do: Regex.match?(@sensitive_env_key, key)
+
+  defp sensitive_environment_values do
+    System.get_env()
+    |> Enum.filter(fn {key, value} ->
+      sensitive_env_key?(key) and is_binary(value) and value != ""
+    end)
+  end
+
+  defp max_sensitive_environment_value_bytes do
+    sensitive_environment_values()
+    |> Enum.map(fn {_key, value} -> byte_size(value) end)
+    |> Enum.max(fn -> 0 end)
+  end
 
   defp redact_environment_value(output, key, value) when byte_size(value) >= 4 do
     String.replace(output, value, "[REDACTED:#{key}]")
@@ -828,8 +836,7 @@ defmodule SymphonyElixir.ValidationController do
          miu_id,
          head_sha,
          command,
-         current_environment,
-         current_credentials
+         current_environment
        ) do
     command_hash = "sha256:" <> sha256(command)
 
@@ -842,18 +849,14 @@ defmodule SymphonyElixir.ValidationController do
         attempt["miu_id"] == miu_id and
         attempt["head_sha"] == head_sha and
         attempt["command_hash"] == command_hash and
-        product_failure_blocks_environment_retry?(attempt, current_environment, current_credentials)
+        product_failure_blocks_environment_retry?(attempt, current_environment)
     end)
   end
 
-  defp product_failure_blocks_environment_retry?(%{"reason_class" => "command_failed"} = attempt, current, credentials) do
-    case attempt["credential_environment_fingerprint"] do
-      previous when is_binary(previous) -> previous == credentials
-      _missing_from_older_evidence -> attempt["environment_fingerprint"] == current
-    end
-  end
+  defp product_failure_blocks_environment_retry?(%{"reason_class" => "command_failed"} = attempt, current),
+    do: attempt["environment_fingerprint"] == current
 
-  defp product_failure_blocks_environment_retry?(_attempt, _current, _credentials), do: true
+  defp product_failure_blocks_environment_retry?(_attempt, _current), do: true
 
   defp product_failure?(%{"status" => "failed", "reason_class" => reason_class}) do
     reason_class in @product_failure_classes
@@ -1254,12 +1257,18 @@ defmodule SymphonyElixir.ValidationController do
     port_opts ++ [{:env, env}]
   end
 
-  defp collect_command(port, timeout_ms, started_ms, output) do
+  defp collect_command(port, timeout_ms, started_ms, output, capture_bytes) do
     remaining_ms = max(0, timeout_ms - (System.monotonic_time(:millisecond) - started_ms))
 
     receive do
       {^port, {:data, data}} ->
-        collect_command(port, timeout_ms, started_ms, bounded_capture(output <> data))
+        collect_command(
+          port,
+          timeout_ms,
+          started_ms,
+          bounded_capture(output <> data, capture_bytes),
+          capture_bytes
+        )
 
       {^port, {:exit_status, exit_code}} ->
         {output, exit_code, false}
@@ -1270,10 +1279,10 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp bounded_capture(output) when byte_size(output) <= @max_capture_bytes, do: output
+  defp bounded_capture(output, max_bytes) when byte_size(output) <= max_bytes, do: output
 
-  defp bounded_capture(output) do
-    keep = @max_capture_bytes - byte_size("...[earlier output truncated]...\n")
+  defp bounded_capture(output, max_bytes) do
+    keep = max_bytes - byte_size("...[earlier output truncated]...\n")
     "...[earlier output truncated]...\n" <> binary_part(output, byte_size(output) - keep, keep)
   end
 

@@ -508,6 +508,81 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts database URLs and access-key identifiers" do
+    database_key = "DATABASE_URL"
+    access_key = "MEDIA_ACCESS_KEY_ID"
+    previous_database = System.get_env(database_key)
+    previous_access = System.get_env(access_key)
+    System.put_env(database_key, "postgres://user:password@example.test/db")
+    System.put_env(access_key, "media-access-123")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"database=$#{database_key}\"\necho \"access=$#{access_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ "postgres://"
+      refute evidence =~ "media-access-123"
+      assert evidence =~ "database=[REDACTED:#{database_key}]"
+      assert evidence =~ "access=[REDACTED:#{access_key}]"
+    after
+      restore_env(database_key, previous_database)
+      restore_env(access_key, previous_access)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "redacts a secret that crosses the retained capture boundary" do
+    env_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
+    secret_value = "capture-boundary-secret-value"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+    capture_marker = "...[earlier output truncated]...\n"
+    summary = "\n3 tests, 0 failures\n"
+    retained_bytes = 1_000_000 - byte_size(capture_marker)
+    suffix_bytes = retained_bytes - div(byte_size(secret_value), 2) - byte_size(summary)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\nprintf 'prefix'\nprintf '%s' \"$#{env_key}\"\nhead -c #{suffix_bytes} /dev/zero | tr '\\000' x\nprintf '#{summary}'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ String.slice(secret_value, div(byte_size(secret_value), 2)..-1//1)
+      assert evidence =~ "[REDACTED:#{env_key}]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "processes worker requests through MIU certification and final handoff" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
@@ -1297,6 +1372,33 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert first["reason_class"] == "command_failed"
       System.put_env(env_key, "replacement-auth")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "provider configuration changes allow an unparsed command failure retry" do
+    env_key = "OPENAI_BASE_URL"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "https://expired.example.test")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = https://valid.example.test ] || { echo 'provider rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "https://valid.example.test")
 
       assert {:ok, certificate} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
