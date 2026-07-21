@@ -15,7 +15,7 @@ defmodule SymphonyElixir.ValidationController do
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
   @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
-  @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
+  @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
   @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
 
   @spec process_requests(Issue.t(), String.t()) ::
@@ -584,15 +584,10 @@ defmodule SymphonyElixir.ValidationController do
   defp execute_validation(issue, workspace, compiled, miu_id, head_sha, command, fingerprint) do
     started = System.monotonic_time(:millisecond)
     timeout_ms = compiled.contract["validation_timeout_ms"]
-    {raw_output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
+    {raw_output, output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
     tests = test_counts(command, raw_output)
     {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
-
-    output =
-      raw_output
-      |> redact_sensitive_environment_values()
-      |> bounded_capture(@max_capture_bytes)
 
     event_id = "validation-" <> String.slice(fingerprint, -16, 16)
     bounded_output = truncate(output, @max_log_bytes)
@@ -631,18 +626,28 @@ defmodule SymphonyElixir.ValidationController do
         executable = resolve_executable(executable, workspace)
         port = open_command_port(executable, args, workspace, env)
 
-        capture_bytes = @max_capture_bytes + max_sensitive_environment_value_bytes()
+        sensitive_values = sensitive_environment_values()
+        carry_bytes = max_sensitive_environment_value_bytes(sensitive_values) + 1
 
-        {output, exit_code, timed_out?} =
-          collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "", capture_bytes)
+        {raw_output, output, exit_code, timed_out?} =
+          collect_command(
+            port,
+            timeout_ms,
+            System.monotonic_time(:millisecond),
+            "",
+            "",
+            "",
+            sensitive_values,
+            carry_bytes
+          )
 
-        {output, exit_code, timed_out?, false}
+        {raw_output, output, exit_code, timed_out?, false}
 
       [] ->
-        {"empty validation command", 127, false, true}
+        {"empty validation command", "empty validation command", 127, false, true}
     end
   rescue
-    error -> {Exception.message(error), 127, false, true}
+    error -> {Exception.message(error), Exception.message(error), 127, false, true}
   end
 
   defp split_env_assignments(parts) do
@@ -777,9 +782,8 @@ defmodule SymphonyElixir.ValidationController do
     |> Map.new()
   end
 
-  defp redact_sensitive_environment_values(output) when is_binary(output) do
-    sensitive_environment_values()
-    |> Enum.sort_by(fn {key, value} -> {-byte_size(value), key} end)
+  defp redact_sensitive_environment_values(output, sensitive_values) when is_binary(output) do
+    sensitive_values
     |> Enum.reduce(output, fn {key, value}, redacted ->
       redact_environment_value(redacted, key, value)
     end)
@@ -792,10 +796,11 @@ defmodule SymphonyElixir.ValidationController do
     |> Enum.filter(fn {key, value} ->
       sensitive_env_key?(key) and is_binary(value) and value != ""
     end)
+    |> Enum.sort_by(fn {key, value} -> {-byte_size(value), key} end)
   end
 
-  defp max_sensitive_environment_value_bytes do
-    sensitive_environment_values()
+  defp max_sensitive_environment_value_bytes(sensitive_values) do
+    sensitive_values
     |> Enum.map(fn {_key, value} -> byte_size(value) end)
     |> Enum.max(fn -> 0 end)
   end
@@ -1257,26 +1262,74 @@ defmodule SymphonyElixir.ValidationController do
     port_opts ++ [{:env, env}]
   end
 
-  defp collect_command(port, timeout_ms, started_ms, output, capture_bytes) do
+  defp collect_command(
+         port,
+         timeout_ms,
+         started_ms,
+         raw_output,
+         output,
+         redaction_tail,
+         sensitive_values,
+         carry_bytes
+       ) do
     remaining_ms = max(0, timeout_ms - (System.monotonic_time(:millisecond) - started_ms))
 
     receive do
       {^port, {:data, data}} ->
+        {redactable, redaction_tail} = split_redaction_tail(redaction_tail <> data, carry_bytes)
+        redacted = redact_sensitive_environment_values(redactable, sensitive_values)
+
         collect_command(
           port,
           timeout_ms,
           started_ms,
-          bounded_capture(output <> data, capture_bytes),
-          capture_bytes
+          bounded_capture(raw_output <> data, @max_capture_bytes),
+          bounded_capture(output <> redacted, @max_capture_bytes),
+          redaction_tail,
+          sensitive_values,
+          carry_bytes
         )
 
       {^port, {:exit_status, exit_code}} ->
-        {output, exit_code, false}
+        output = flush_redaction_tail(output, redaction_tail, sensitive_values)
+        {raw_output, output, exit_code, false}
     after
       remaining_ms ->
         Port.close(port)
-        {output <> "\n[validation timed out after #{timeout_ms}ms]\n", 124, true}
+        timeout_output = "\n[validation timed out after #{timeout_ms}ms]\n"
+        output = flush_redaction_tail(output, redaction_tail, sensitive_values)
+
+        {
+          bounded_capture(raw_output <> timeout_output, @max_capture_bytes),
+          bounded_capture(output <> timeout_output, @max_capture_bytes),
+          124,
+          true
+        }
     end
+  end
+
+  defp split_redaction_tail(output, carry_bytes) when byte_size(output) <= carry_bytes,
+    do: {"", output}
+
+  defp split_redaction_tail(output, carry_bytes) do
+    prefix_bytes = utf8_boundary_at_or_before(output, byte_size(output) - carry_bytes)
+    tail_bytes = byte_size(output) - prefix_bytes
+    {binary_part(output, 0, prefix_bytes), binary_part(output, prefix_bytes, tail_bytes)}
+  end
+
+  defp utf8_boundary_at_or_before(_output, candidate) when candidate <= 0, do: 0
+
+  defp utf8_boundary_at_or_before(output, candidate) do
+    if String.valid?(binary_part(output, 0, candidate)) do
+      candidate
+    else
+      utf8_boundary_at_or_before(output, candidate - 1)
+    end
+  end
+
+  defp flush_redaction_tail(output, redaction_tail, sensitive_values) do
+    redacted_tail = redact_sensitive_environment_values(redaction_tail, sensitive_values)
+    bounded_capture(output <> redacted_tail, @max_capture_bytes)
   end
 
   defp bounded_capture(output, max_bytes) when byte_size(output) <= max_bytes, do: output

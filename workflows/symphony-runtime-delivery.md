@@ -455,7 +455,7 @@ Runtime Contract; they MUST NOT be appended into authority-bearing scope.
   "head_sha": "...",
   "command_id": "cards-route-focused",
   "command_hash": "sha256:...",
-  "environment_fingerprint": "sha256:...",
+  "environment_fingerprint": "hmac-sha256:...",
   "validation_fingerprint": "sha256:...",
   "status": "passed",
   "exit_code": 0,

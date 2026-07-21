@@ -546,7 +546,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
-  test "redacts a secret that crosses the retained capture boundary" do
+  test "redacts repeated secrets across the retained capture boundary" do
     env_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
     secret_value = "capture-boundary-secret-value"
     previous_value = System.get_env(env_key)
@@ -554,11 +554,13 @@ defmodule SymphonyElixir.ValidationControllerTest do
     capture_marker = "...[earlier output truncated]...\n"
     summary = "\n3 tests, 0 failures\n"
     retained_bytes = 1_000_000 - byte_size(capture_marker)
-    suffix_bytes = retained_bytes - div(byte_size(secret_value), 2) - byte_size(summary)
+
+    suffix_bytes =
+      retained_bytes - div(byte_size(secret_value), 2) - byte_size(secret_value) - byte_size(summary)
 
     {workspace, issue} =
       workspace_and_issue("3 tests, 0 failures",
-        script_body: "#!/bin/sh\nprintf 'prefix'\nprintf '%s' \"$#{env_key}\"\nhead -c #{suffix_bytes} /dev/zero | tr '\\000' x\nprintf '#{summary}'\n"
+        script_body: "#!/bin/sh\nprintf 'prefix'\nprintf '%s' \"$#{env_key}\"\nhead -c #{suffix_bytes} /dev/zero | tr '\\000' x\nprintf '%s' \"$#{env_key}\"\nprintf '#{summary}'\n"
       )
 
     try do
@@ -1399,6 +1401,33 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert first["reason_class"] == "command_failed"
       System.put_env(env_key, "https://valid.example.test")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "proxy changes allow an unparsed command failure retry" do
+    env_key = "HTTPS_PROXY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "http://expired-proxy.example.test")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = http://valid-proxy.example.test ] || { echo 'proxy rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "http://valid-proxy.example.test")
 
       assert {:ok, certificate} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
