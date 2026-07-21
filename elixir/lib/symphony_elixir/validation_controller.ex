@@ -524,6 +524,17 @@ defmodule SymphonyElixir.ValidationController do
       prior_infrastructure_failures = infrastructure_failure_count(workspace, issue, compiled, miu["id"], command)
 
       cond do
+        product_attempt =
+            product_failure_at_same_code_identity?(
+              workspace,
+              issue,
+              compiled,
+              miu["id"],
+              head_sha,
+              command
+            ) ->
+          {:halt, {:blocked, {:unchanged_failed_validation, product_attempt["validation_fingerprint"]}}}
+
         failed_attempt = failed_fingerprint(workspace, fingerprint) ->
           reason =
             if infrastructure_failure?(failed_attempt) do
@@ -570,11 +581,11 @@ defmodule SymphonyElixir.ValidationController do
   defp execute_validation(issue, workspace, compiled, miu_id, head_sha, command, fingerprint) do
     started = System.monotonic_time(:millisecond)
     timeout_ms = compiled.contract["validation_timeout_ms"]
-    {output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
-    output = redact_sensitive_environment_values(output)
+    {raw_output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
-    tests = test_counts(command, output)
+    tests = test_counts(command, raw_output)
     {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
+    output = redact_sensitive_environment_values(raw_output)
     event_id = "validation-" <> String.slice(fingerprint, -16, 16)
     bounded_output = truncate(output, @max_log_bytes)
     log_path = write_validation_log(workspace, event_id, bounded_output)
@@ -731,16 +742,12 @@ defmodule SymphonyElixir.ValidationController do
         if File.regular?(path), do: sha256(File.read!(path))
       end)
 
-    environment_shape =
-      System.get_env()
-      |> Map.keys()
-      |> Enum.sort()
-      |> Enum.join("\n")
-
-    [System.version(), System.otp_release(), lock_digest, environment_shape]
-    |> Enum.join("\n")
-    |> sha256()
-    |> then(&("sha256:" <> &1))
+    ControllerEvidence.fingerprint(%{
+      "environment" => System.get_env(),
+      "lock_digest" => lock_digest,
+      "otp_release" => System.otp_release(),
+      "runtime_version" => System.version()
+    })
   end
 
   defp redact_sensitive_environment_values(output) when is_binary(output) do
@@ -769,6 +776,21 @@ defmodule SymphonyElixir.ValidationController do
         attempt["issue"] == issue.identifier and
         attempt["contract_hash"] == compiled.contract_hash and
         attempt["miu_id"] == miu_id and
+        attempt["command_hash"] == command_hash
+    end)
+  end
+
+  defp product_failure_at_same_code_identity?(workspace, issue, compiled, miu_id, head_sha, command) do
+    command_hash = "sha256:" <> sha256(command)
+
+    workspace
+    |> trusted_attempts()
+    |> Enum.find(fn attempt ->
+      product_failure?(attempt) and
+        attempt["issue"] == issue.identifier and
+        attempt["contract_hash"] == compiled.contract_hash and
+        attempt["miu_id"] == miu_id and
+        attempt["head_sha"] == head_sha and
         attempt["command_hash"] == command_hash
     end)
   end

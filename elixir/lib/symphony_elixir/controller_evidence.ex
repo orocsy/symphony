@@ -31,6 +31,9 @@ defmodule SymphonyElixir.ControllerEvidence do
 
   def valid?(_evidence), do: false
 
+  @spec fingerprint(term()) :: String.t()
+  def fingerprint(value), do: signature(value)
+
   @spec key_path() :: String.t()
   def key_path do
     System.get_env("SYMPHONY_CONTROLLER_EVIDENCE_KEY_PATH") ||

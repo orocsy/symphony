@@ -383,7 +383,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
-  test "environment shape changes invalidate a failed validation fingerprint" do
+  test "environment changes do not bypass a product failure at the same code identity" do
     env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
     previous_value = System.get_env(env_key)
     System.delete_env(env_key)
@@ -395,11 +395,10 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       System.put_env(env_key, "new-environment-value")
 
-      assert {:error, {:validation_failed, second}} =
+      assert {:blocked, {:unchanged_failed_validation, fingerprint}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
-      refute second["validation_fingerprint"] == first["validation_fingerprint"]
-      refute second["environment_fingerprint"] == first["environment_fingerprint"]
+      assert fingerprint == first["validation_fingerprint"]
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
@@ -408,18 +407,27 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
   test "redacts inherited secret values from validation evidence" do
     env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
-    secret_value = "validation-secret-value"
+    secret_value = "tests"
     previous_value = System.get_env(env_key)
     System.put_env(env_key, secret_value)
 
     {workspace, issue} =
-      workspace_and_issue("0 tests, 0 failures",
-        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '0 tests, 0 failures'\n"
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
       )
 
     try do
-      assert {:error, {:validation_failed, event}} =
+      assert {:ok, certificate} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ secret_value
@@ -1139,6 +1147,39 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert {:blocked, {:infrastructure_retry_budget_exhausted, "COD-700-MIU-1"}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "credential value changes allow an infrastructure retry at the same code identity" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "expired-credential")
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- README.md", "- \"**\"")
+          |> String.replace("- ./fake-test", "- ./missing-validation-executable")
+    }
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      System.put_env(env_key, "replacement-credential")
+
+      assert {:error, {:validation_failed, second}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_launch_failed"
+      assert second["reason_class"] == "command_launch_failed"
+      refute second["environment_fingerprint"] == first["environment_fingerprint"]
+      refute second["validation_fingerprint"] == first["validation_fingerprint"]
+    after
+      restore_env(env_key, previous_value)
       File.rm_rf(workspace)
     end
   end
