@@ -471,6 +471,43 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts overlapping auth and token values longest-first" do
+    short_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
+    long_key = "NPM_CONFIG__AUTH"
+    previous_short = System.get_env(short_key)
+    previous_long = System.get_env(long_key)
+    System.put_env(short_key, "abcd")
+    System.put_env(long_key, "abcdef")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"auth=$#{long_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ "abcdef"
+      refute evidence =~ "[REDACTED:#{short_key}]ef"
+      assert evidence =~ "auth=[REDACTED:#{long_key}]"
+    after
+      restore_env(short_key, previous_short)
+      restore_env(long_key, previous_long)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "processes worker requests through MIU certification and final handoff" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
@@ -1238,6 +1275,64 @@ defmodule SymphonyElixir.ValidationControllerTest do
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
       assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "auth-named credential changes allow an unparsed command failure retry" do
+    env_key = "DOCKER_AUTH_CONFIG"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "expired-auth")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = replacement-auth ] || { echo 'auth rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "replacement-auth")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "unrelated process metadata does not create a new infrastructure retry identity" do
+    env_key = "SYMPHONY_VALIDATION_TEST_AUTHORITY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "first-run")
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- README.md", "- \"**\"")
+          |> String.replace("- ./fake-test", "- ./missing-validation-executable")
+    }
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_launch_failed"
+      System.put_env(env_key, "second-run")
+
+      assert {:blocked, {:unchanged_infrastructure_validation, fingerprint}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert fingerprint == first["validation_fingerprint"]
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)

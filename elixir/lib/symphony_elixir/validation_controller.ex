@@ -14,7 +14,9 @@ defmodule SymphonyElixir.ValidationController do
   @max_capture_bytes 1_000_000
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
-  @sensitive_env_key ~r/(api[_-]?key|credential|password|private[_-]?key|secret|token)/i
+  @sensitive_env_key ~r/(?:^|[_-])(?:api[_-]?key|auth|credentials?|password|private[_-]?key|secrets?|tokens?)(?:$|[_-])/i
+  @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
+  @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -755,7 +757,7 @@ defmodule SymphonyElixir.ValidationController do
       end)
 
     ControllerEvidence.fingerprint(%{
-      "environment" => System.get_env(),
+      "environment" => validation_environment(),
       "lock_digest" => lock_digest,
       "otp_release" => System.otp_release(),
       "runtime_version" => System.version()
@@ -763,23 +765,32 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp credential_environment_fingerprint do
-    environment =
-      System.get_env()
-      |> Enum.filter(fn {key, _value} -> Regex.match?(@sensitive_env_key, key) end)
-      |> Map.new()
+    System.get_env()
+    |> Enum.filter(fn {key, _value} -> sensitive_env_key?(key) end)
+    |> Map.new()
+    |> ControllerEvidence.fingerprint()
+  end
 
-    ControllerEvidence.fingerprint(environment)
+  defp validation_environment do
+    System.get_env()
+    |> Enum.filter(fn {key, _value} ->
+      sensitive_env_key?(key) or Regex.match?(@validation_env_key, key) or Regex.match?(@provider_env_key, key)
+    end)
+    |> Map.new()
   end
 
   defp redact_sensitive_environment_values(output) when is_binary(output) do
     System.get_env()
     |> Enum.filter(fn {key, value} ->
-      Regex.match?(@sensitive_env_key, key) and is_binary(value) and value != ""
+      sensitive_env_key?(key) and is_binary(value) and value != ""
     end)
+    |> Enum.sort_by(fn {key, value} -> {-byte_size(value), key} end)
     |> Enum.reduce(output, fn {key, value}, redacted ->
       redact_environment_value(redacted, key, value)
     end)
   end
+
+  defp sensitive_env_key?(key), do: Regex.match?(@sensitive_env_key, key)
 
   defp redact_environment_value(output, key, value) when byte_size(value) >= 4 do
     String.replace(output, value, "[REDACTED:#{key}]")
