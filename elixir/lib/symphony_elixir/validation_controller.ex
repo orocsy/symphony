@@ -531,7 +531,9 @@ defmodule SymphonyElixir.ValidationController do
               compiled,
               miu["id"],
               head_sha,
-              command
+              command,
+              environment_fingerprint(workspace),
+              credential_environment_fingerprint()
             ) ->
           {:halt, {:blocked, {:unchanged_failed_validation, product_attempt["validation_fingerprint"]}}}
 
@@ -601,6 +603,7 @@ defmodule SymphonyElixir.ValidationController do
       "head_sha" => head_sha,
       "command" => command,
       "command_hash" => "sha256:" <> sha256(command),
+      "credential_environment_fingerprint" => credential_environment_fingerprint(),
       "environment_fingerprint" => environment_fingerprint(workspace),
       "validation_fingerprint" => fingerprint,
       "status" => status,
@@ -647,16 +650,25 @@ defmodule SymphonyElixir.ValidationController do
 
   defp validation_status(_command, _exit_code, _tests, true, false), do: {"failed", "command_timed_out"}
 
-  defp validation_status(_command, exit_code, _tests, false, false) when exit_code != 0,
-    do: {"failed", "command_failed"}
-
-  defp validation_status(command, 0, tests, false, false) do
+  defp validation_status(command, exit_code, tests, false, false) do
     cond do
-      not test_command?(command) -> {"passed", "passed"}
-      tests == nil -> {"failed", "test_count_unavailable"}
-      tests["collected"] == 0 -> {"failed", "zero_tests_collected"}
-      tests["failed"] > 0 -> {"failed", "tests_failed"}
-      true -> {"passed", "passed"}
+      test_command?(command) and is_map(tests) and tests["collected"] == 0 ->
+        {"failed", "zero_tests_collected"}
+
+      test_command?(command) and is_map(tests) and tests["failed"] > 0 ->
+        {"failed", "tests_failed"}
+
+      exit_code != 0 ->
+        {"failed", "command_failed"}
+
+      not test_command?(command) ->
+        {"passed", "passed"}
+
+      tests == nil ->
+        {"failed", "test_count_unavailable"}
+
+      true ->
+        {"passed", "passed"}
     end
   end
 
@@ -750,14 +762,32 @@ defmodule SymphonyElixir.ValidationController do
     })
   end
 
+  defp credential_environment_fingerprint do
+    environment =
+      System.get_env()
+      |> Enum.filter(fn {key, _value} -> Regex.match?(@sensitive_env_key, key) end)
+      |> Map.new()
+
+    ControllerEvidence.fingerprint(environment)
+  end
+
   defp redact_sensitive_environment_values(output) when is_binary(output) do
     System.get_env()
     |> Enum.filter(fn {key, value} ->
-      Regex.match?(@sensitive_env_key, key) and is_binary(value) and byte_size(value) >= 4
+      Regex.match?(@sensitive_env_key, key) and is_binary(value) and value != ""
     end)
     |> Enum.reduce(output, fn {key, value}, redacted ->
-      String.replace(redacted, value, "[REDACTED:#{key}]")
+      redact_environment_value(redacted, key, value)
     end)
+  end
+
+  defp redact_environment_value(output, key, value) when byte_size(value) >= 4 do
+    String.replace(output, value, "[REDACTED:#{key}]")
+  end
+
+  defp redact_environment_value(output, key, value) do
+    pattern = Regex.compile!("(?<![[:alnum:]_])#{Regex.escape(value)}(?![[:alnum:]_])")
+    Regex.replace(pattern, output, "[REDACTED:#{key}]")
   end
 
   defp failed_fingerprint(workspace, fingerprint) do
@@ -780,7 +810,16 @@ defmodule SymphonyElixir.ValidationController do
     end)
   end
 
-  defp product_failure_at_same_code_identity?(workspace, issue, compiled, miu_id, head_sha, command) do
+  defp product_failure_at_same_code_identity?(
+         workspace,
+         issue,
+         compiled,
+         miu_id,
+         head_sha,
+         command,
+         current_environment,
+         current_credentials
+       ) do
     command_hash = "sha256:" <> sha256(command)
 
     workspace
@@ -791,9 +830,19 @@ defmodule SymphonyElixir.ValidationController do
         attempt["contract_hash"] == compiled.contract_hash and
         attempt["miu_id"] == miu_id and
         attempt["head_sha"] == head_sha and
-        attempt["command_hash"] == command_hash
+        attempt["command_hash"] == command_hash and
+        product_failure_blocks_environment_retry?(attempt, current_environment, current_credentials)
     end)
   end
+
+  defp product_failure_blocks_environment_retry?(%{"reason_class" => "command_failed"} = attempt, current, credentials) do
+    case attempt["credential_environment_fingerprint"] do
+      previous when is_binary(previous) -> previous == credentials
+      _missing_from_older_evidence -> attempt["environment_fingerprint"] == current
+    end
+  end
+
+  defp product_failure_blocks_environment_retry?(_attempt, _current, _credentials), do: true
 
   defp product_failure?(%{"status" => "failed", "reason_class" => reason_class}) do
     reason_class in @product_failure_classes

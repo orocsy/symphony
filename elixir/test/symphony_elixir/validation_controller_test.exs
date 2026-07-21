@@ -438,6 +438,39 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts short inherited secret values at token boundaries" do
+    env_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
+    secret_value = "abc"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"token=$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ "token=#{secret_value}"
+      assert evidence =~ "token=[REDACTED:#{env_key}]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "processes worker requests through MIU certification and final handoff" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
@@ -1178,6 +1211,60 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert second["reason_class"] == "command_launch_failed"
       refute second["environment_fingerprint"] == first["environment_fingerprint"]
       refute second["validation_fingerprint"] == first["validation_fingerprint"]
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "credential value changes allow an unparsed command failure retry at the same code identity" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "expired-credential")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = replacement-credential ] || { echo 'credential rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "replacement-credential")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "credential value changes do not bypass parsed test failures" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "first-credential")
+
+    {workspace, issue} =
+      workspace_and_issue("1 failed | 2 passed",
+        script_body: "#!/bin/sh\necho 'Tests 1 failed | 2 passed'\nexit 1\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "tests_failed"
+      System.put_env(env_key, "second-credential")
+
+      assert {:blocked, {:unchanged_failed_validation, fingerprint}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert fingerprint == first["validation_fingerprint"]
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
