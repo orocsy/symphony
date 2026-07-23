@@ -28,7 +28,9 @@ Codex with a narrower thread configuration. These mode-specific sessions disable
 plugins, apps, and tool search, and the app-server client enforces broad-discovery command bans such
 as `rg`, `grep`, `find`, `git ls-files`, and `gh api`. Fresh implementation mode is intended for
 one small MIU with an explicit issue brief; review rework mode is intended for already-collected PR
-feedback.
+feedback. Review rework permits one bounded local checkpoint command,
+`git log -N --oneline [--decorate|--no-decorate]` for `N` from 1 through 20. Other `git log`
+forms, including revision/path selection and content-producing output, remain denied.
 
 ### Structured Runtime Contracts
 

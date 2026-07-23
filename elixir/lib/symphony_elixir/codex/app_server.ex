@@ -2093,7 +2093,8 @@ defmodule SymphonyElixir.Codex.AppServer do
               scope_audit_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          git_log_pattern?(match) and bounded_git_log_metadata_allowed?(command_for_patterns) ->
+          git_log_pattern?(match) and
+              bounded_git_log_metadata_allowed?(command_for_patterns, workspace) ->
             :ok
 
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
@@ -2706,24 +2707,56 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp git_log_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "git\\s+log")
   defp git_log_pattern?(_pattern), do: false
 
-  defp bounded_git_log_metadata_allowed?(command) when is_binary(command) do
-    case Regex.run(
-           ~r/(?:^|[\s"'])git\s+log\s+-(\d{1,2})\s+--oneline(?:\s+--(?:no-)?decorate)?(?=["']|$)/,
-           command,
-           capture: :all_but_first
-         ) do
-      [count] ->
-        case Integer.parse(count) do
-          {value, ""} -> value in 1..20
-          _ -> false
-        end
+  defp bounded_git_log_metadata_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    dispatch_preflight_mode(workspace) == "review_rework" and
+      command
+      |> worker_command_tokens()
+      |> bounded_git_log_metadata_tokens?()
+  end
 
-      _ ->
-        false
+  defp bounded_git_log_metadata_allowed?(_command, _workspace), do: false
+
+  defp worker_command_tokens(command) do
+    case OptionParser.split(command) do
+      [shell, "-lc", inner]
+      when shell in ["zsh", "bash", "sh", "/bin/zsh", "/bin/bash", "/bin/sh"] ->
+        OptionParser.split(inner)
+
+      tokens ->
+        tokens
+    end
+  rescue
+    _error -> []
+  end
+
+  defp bounded_git_log_metadata_tokens?(["git", "log" | args]) do
+    count_args = Enum.filter(args, &Regex.match?(~r/^-\d{1,2}$/, &1))
+    oneline_count = Enum.count(args, &(&1 == "--oneline"))
+    decorate_count = Enum.count(args, &(&1 in ["--decorate", "--no-decorate"]))
+
+    length(count_args) == 1 and
+      oneline_count == 1 and
+      decorate_count <= 1 and
+      length(args) == 2 + decorate_count and
+      Enum.all?(args, fn arg ->
+        arg == "--oneline" or
+          arg in ["--decorate", "--no-decorate"] or
+          Regex.match?(~r/^-\d{1,2}$/, arg)
+      end) and
+      bounded_git_log_count?(hd(count_args))
+  end
+
+  defp bounded_git_log_metadata_tokens?(_tokens), do: false
+
+  defp bounded_git_log_count?("-" <> count) do
+    case Integer.parse(count) do
+      {value, ""} -> value in 1..20
+      _ -> false
     end
   end
 
-  defp bounded_git_log_metadata_allowed?(_command), do: false
+  defp bounded_git_log_count?(_count), do: false
 
   defp integration_check_allowed_ref_names(preflight) when is_map(preflight) do
     requirements =

@@ -661,16 +661,35 @@ defmodule SymphonyElixir.PromptBuilder do
           "\n- Plus #{length(generated)} generated workspace path guard(s) that restrict `sed`/read commands to the exact files named by the correction, brief, and review feedback. Read only those named files."
         end
 
+      bounded_log_note =
+        if review_rework_mode?(workspace) do
+          "\n- Narrow exception: local checkpoint metadata may use only `git log -N --oneline [--decorate|--no-decorate]` with `N` from 1 through 20. Revision selectors, pathspecs, patch/stat/name output, other flags, and unbounded history remain denied."
+        else
+          ""
+        end
+
       """
       Runtime command policy (enforced by the Symphony command guard):
 
-      - Commands matching any regex below are denied in this mode. Running one interrupts the worker turn and, after repeated violations, parks the issue for human review.
+      - Commands matching any regex below are denied in this mode except for an explicitly documented narrow exception. Running any other match interrupts the worker turn and, after repeated violations, parks the issue for human review.
       #{rendered}#{generated_note}
-      - The runtime-provided context above replaces the output of the denied git history/diff commands. Do not attempt equivalents or workarounds; make the scoped correction fix instead.
+      #{bounded_log_note}
+      - The runtime-provided context above replaces the output of all other denied git history/diff commands. Do not attempt equivalents or workarounds; make the scoped correction fix instead.
       """
       |> String.trim()
     end
   end
+
+  defp review_rework_mode?(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, %{"mode" => "review_rework"}} -> true
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_mode?(_workspace), do: false
 
   defp effective_command_policy_patterns(workspace) do
     AppServer.effective_forbidden_command_patterns_for(workspace)

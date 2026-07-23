@@ -1299,6 +1299,12 @@ defmodule SymphonyElixir.AppServerTest do
       assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
                AppServer.command_policy_violation_for_test(workspace, "git log -4 --oneline --patch")
 
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -4 --oneline'' --patch"
+               )
+
       assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
                AppServer.command_policy_violation_for_test(
                  workspace,
@@ -1313,6 +1319,27 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git diff -- src/main/Button.tsx")
       assert :ok = AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "foo|bar" README.md))
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["README.md", "src/main/Button.tsx"]
+          }
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        codex_forbidden_command_patterns: ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
+      )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate"
+               )
     after
       File.rm_rf(workspace)
     end
