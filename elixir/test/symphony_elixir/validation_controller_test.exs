@@ -1756,7 +1756,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
   end
 
   test "unrelated validation environment changes do not retry unparsed command failures" do
-    env_key = "CI"
+    env_key = "CI_CONFIG_PATH"
     previous_value = System.get_env(env_key)
     System.put_env(env_key, "first-run")
 
