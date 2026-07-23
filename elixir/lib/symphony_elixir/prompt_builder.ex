@@ -508,9 +508,10 @@ defmodule SymphonyElixir.PromptBuilder do
         """
         Open correction mode (runtime enforced):
 
-        - This workspace has open Orocsy corrections. Resolving the newest applicable correction is the only first task. All handoff checkpoints and review shortcuts are suspended until the correction is resolved.
+        - This workspace has open Orocsy corrections. Resolving the newest applicable correction is the only first task. Review shortcuts are suspended until the correction is resolved.
+        - A dirty validated handoff checkpoint remains authoritative evidence. If its focused delta already addresses the correction and its passed evidence is current for that unchanged delta, resolve the correction and continue handoff without making another edit or rerunning the same validation.
         - Do not inspect commit history, diffs versus the base branch, PR/GitHub/Linear state, or handoff status first. The runtime-provided status below is enough to confirm the workspace state.
-        - Required worker checkpoint: immediately after the first scoped code/test edit, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "#{checkpoint_event}"`.
+        - Required worker checkpoint: after the first scoped code/test edit, append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "#{checkpoint_event}"`. Do not append a duplicate checkpoint when current passed evidence already records the correction delta.
         """
         |> String.trim(),
         runtime_workspace_status_context(workspace),
@@ -763,7 +764,8 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     Open correction execution contract:
 
-    - The open Orocsy correction overrides all review-rework shortcuts and handoff checkpoints. Do not append `review-feedback-classified`, do not retry browser validation-only runs, and do not commit, push, or request review before the correction fix and its evidence exist.
+    - The open Orocsy correction overrides review-rework shortcuts, but not a current dirty validated checkpoint that already proves the named correction delta. Do not append `review-feedback-classified`, retry browser validation-only runs, or commit/push/request review before correction evidence exists.
+    - If the runtime context contains a dirty validated checkpoint, inspect only its focused delta first. When the delta already addresses the correction and the listed passed evidence is current for the unchanged delta, resolve the correction from that evidence and continue handoff without another edit or duplicate validation.
     - Before the first edit, read only the exact source files named by the correction and the inlined issue brief. Do not read test files first unless a source file is missing a required local type or helper.
     - Make the smallest in-scope source edit or record a scoped blocker. Do not stop after analysis and do not spend the first turn reading every allowed file.
     - Immediately after the first scoped code/test edit, append the `#{checkpoint_event}` durable event exactly as specified above.
@@ -1651,7 +1653,8 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp passed_validation_event_decoded?(_decoded), do: false
 
-  defp explicit_validation_event?("validation", decoded) when is_map(decoded) do
+  defp explicit_validation_event?(event, decoded)
+       when event in ["validation", "validation.finished"] and is_map(decoded) do
     decoded
     |> validation_signal_text()
     |> String.downcase()

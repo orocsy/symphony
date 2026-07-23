@@ -8298,6 +8298,86 @@ defmodule SymphonyElixir.CoreTest do
                "Record an Orocsy correction and stop only when validation lacks an actionable in-scope target"
 
       refute prompt =~ "Mode: fresh implementation"
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "validation.finished",
+          "status" => "passed",
+          "tool" => "vitest",
+          "command" => "pnpm exec vitest run tests/unit/analytics.test.ts",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_dirty_validated_review.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_dirty_validated_review",
+          "status" => "open",
+          "next_action" => "retry",
+          "source" => "codex.review-rework",
+          "summary" => "Fix README.md analytics review feedback",
+          "findings" => ["README.md:2 - keep the analytics handoff bounded"]
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 56,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+                 "head" => %{"sha" => "abc123", "ref" => issue.branch_name}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/56/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Keep the analytics handoff bounded.",
+                 "commit_id" => "abc123",
+                 "path" => "README.md",
+                 "line" => 2,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/56/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = reviewed_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert reviewed_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert reviewed_preflight["first_task"] =~ "existing focused dirty delta first"
+      assert reviewed_preflight["first_task"] =~ "without manufacturing another edit"
+
+      reviewed_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert reviewed_prompt =~ "Dirty validated handoff checkpoint"
+      assert reviewed_prompt =~ "without another edit or duplicate validation"
+      refute reviewed_prompt =~ "Mode: review rework"
     after
       File.rm_rf(test_root)
     end

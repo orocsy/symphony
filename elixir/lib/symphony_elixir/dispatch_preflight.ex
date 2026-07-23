@@ -441,6 +441,9 @@ defmodule SymphonyElixir.DispatchPreflight do
       retryable_miu_validation_correction?(workspace) ->
         "handoff_recovery"
 
+      handoff_recovery_checkpoint?(workspace) and dirty_handoff?(workspace) ->
+        "handoff_recovery"
+
       scoped_review_feedback?(inspection, requirements) ->
         "review_rework"
 
@@ -901,6 +904,15 @@ defmodule SymphonyElixir.DispatchPreflight do
     dirty_or_ahead_handoff?(workspace) or current_branch_matches_review_head?(workspace, inspection)
   end
 
+  defp dirty_handoff?(workspace) when is_binary(workspace) do
+    case git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]) do
+      {status, 0} -> substantive_status_lines(status) != []
+      _ -> false
+    end
+  end
+
+  defp dirty_handoff?(_workspace), do: false
+
   defp dirty_or_ahead_handoff?(workspace) when is_binary(workspace) do
     case git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]) do
       {status, 0} ->
@@ -1189,7 +1201,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_correction_task(correction) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
-    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
+    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Inspect the existing focused dirty delta first. When that delta already addresses the named correction and current passed evidence covers it, resolve the correction from that evidence and continue commit/push/review handoff without manufacturing another edit or rerunning the same validation. Otherwise edit only the named in-scope files, run focused validation, and resolve the correction after evidence is recorded. Do not use unrelated or stale handoff evidence to skip the correction."
   end
 
   defp handoff_recovery_branch(workspace, issue, requirements, inspection) do
@@ -1544,7 +1556,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Validation command guidance: #{preflight["validation_command_guidance"] || validation_guidance(preflight["toolchain"], open_corrections)}
 
       Handoff recovery limits:
-      - If an open Orocsy correction is listed above, it overrides any dirty validated checkpoint. Start from the exact file path named in the correction, and do not commit, push, request review, or use older validation evidence until the correction is fixed or explicitly blocked.
+      - If an open Orocsy correction is listed above, inspect the focused dirty delta against its named paths first. When the existing delta addresses the correction and the checkpoint lists current passed evidence for that unchanged delta, resolve the correction and continue handoff without another edit or duplicate validation. Otherwise start from the exact correction path and do not commit, push, or request review until the correction is fixed or explicitly blocked.
       - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
       - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
       - If the focused diff is complete and the dirty handoff checkpoint already lists current passed validation/gate evidence for those dirty files, do not rerun the same validation command; use the recorded evidence, then commit, push the current branch, and request/update Codex review.
