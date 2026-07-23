@@ -383,9 +383,52 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ secret_value
-      assert evidence =~ "[REDACTED:#{env_key}]"
+      assert evidence =~ "[REDACTED]"
       refute event["command"] =~ secret_value
-      assert event["command"] =~ "#{env_key}=[REDACTED:#{env_key}]"
+      assert event["command"] =~ "#{env_key}=[REDACTED]"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "redacts shell-escaped leading environment assignments structurally" do
+    env_key = "SYMPHONY_VALIDATION_LOCAL_API_KEY"
+    secret_value = "foo bar"
+    encoded_secret = "foo\\ bar"
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    issue = %{
+      issue
+      | description:
+          String.replace(
+            issue.description,
+            "- ./fake-test",
+            "- #{env_key}=#{encoded_secret} ./fake-test"
+          )
+    }
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ secret_value
+      refute event["command"] =~ secret_value
+      refute event["command"] =~ encoded_secret
+      assert event["command"] =~ "#{env_key}=[REDACTED]"
     after
       File.rm_rf(workspace)
     end
@@ -473,7 +516,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ secret_value
-      assert evidence =~ "[REDACTED:#{env_key}]"
+      assert evidence =~ "[REDACTED]"
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
@@ -506,7 +549,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ "token=#{secret_value}"
-      assert evidence =~ "token=[REDACTED:#{env_key}]"
+      assert evidence =~ "token=[REDACTED]"
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
@@ -541,11 +584,47 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ "abcdef"
-      refute evidence =~ "[REDACTED:#{short_key}]ef"
-      assert evidence =~ "auth=[REDACTED:#{long_key}]"
+      refute evidence =~ "[REDACTED]ef"
+      assert evidence =~ "auth=[REDACTED]"
     after
       restore_env(short_key, previous_short)
       restore_env(long_key, previous_long)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "does not include another secret value in a redaction marker" do
+    marker_secret_key = "SYMPHONY_VALIDATION_TEST_PASSWORD"
+    output_secret_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    previous_marker_secret = System.get_env(marker_secret_key)
+    previous_output_secret = System.get_env(output_secret_key)
+    System.put_env(marker_secret_key, "KEY")
+    System.put_env(output_secret_key, "long-secret")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{output_secret_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ "long-secret"
+      refute evidence =~ "KEY"
+    after
+      restore_env(marker_secret_key, previous_marker_secret)
+      restore_env(output_secret_key, previous_output_secret)
       File.rm_rf(workspace)
     end
   end
@@ -578,8 +657,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ "abcdef"
-      refute evidence =~ "[REDACTED:#{short_key}]ef"
-      assert evidence =~ "[REDACTED:#{long_key}]"
+      refute evidence =~ "[REDACTED]ef"
+      assert evidence =~ "[REDACTED]"
     after
       restore_env(short_key, previous_short)
       restore_env(long_key, previous_long)
@@ -616,8 +695,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ "postgres://"
       refute evidence =~ "media-access-123"
-      assert evidence =~ "database=[REDACTED:#{database_key}]"
-      assert evidence =~ "access=[REDACTED:#{access_key}]"
+      assert evidence =~ "database=[REDACTED]"
+      assert evidence =~ "access=[REDACTED]"
     after
       restore_env(database_key, previous_database)
       restore_env(access_key, previous_access)
@@ -693,7 +772,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ secret_value
-      assert evidence =~ "[REDACTED:#{env_key}]"
+      assert evidence =~ "[REDACTED]"
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
@@ -727,7 +806,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ secret_value
       assert String.valid?(evidence)
-      assert evidence =~ "[REDACTED:#{env_key}]"
+      assert evidence =~ "[REDACTED]"
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
@@ -1534,6 +1613,40 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "credential rotation during validation does not rewrite executed environment evidence" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "expired-credential")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body:
+          "#!/bin/sh\nmkdir -p .orocsy\ntouch .orocsy/validation-started\nsleep 0.15\n[ \"$#{env_key}\" = replacement-credential ] || { echo 'credential rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      rotation =
+        Task.async(fn ->
+          wait_for_file!(Path.join(workspace, ".orocsy/validation-started"))
+          System.put_env(env_key, "replacement-credential")
+        end)
+
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      Task.await(rotation)
+      assert first["reason_class"] == "command_failed"
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "auth-named credential changes allow an unparsed command failure retry" do
     env_key = "DOCKER_AUTH_CONFIG"
     previous_value = System.get_env(env_key)
@@ -2324,4 +2437,17 @@ defmodule SymphonyElixir.ValidationControllerTest do
     |> File.stream!()
     |> Enum.map(&(String.trim(&1) |> Jason.decode!()))
   end
+
+  defp wait_for_file!(path, attempts \\ 200)
+
+  defp wait_for_file!(path, attempts) when attempts > 0 do
+    if File.regular?(path) do
+      :ok
+    else
+      Process.sleep(10)
+      wait_for_file!(path, attempts - 1)
+    end
+  end
+
+  defp wait_for_file!(path, 0), do: flunk("timed out waiting for #{path}")
 end

@@ -473,6 +473,9 @@ The repair-environment fingerprint MUST be narrower: credentials, provider
 connection settings, proxies, and TLS trust configuration. Incidental process
 metadata such as `CI` or `PATH` MUST NOT authorize an unchanged-code product
 validation retry.
+The controller MUST snapshot the effective child environment once per
+validation command and use that same snapshot for process launch, both
+environment fingerprints, and signed result evidence.
 Secrets and raw environment values MUST NOT be persisted.
 
 ### Runtime MIU certificate
