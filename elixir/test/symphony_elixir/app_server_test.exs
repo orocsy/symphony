@@ -1044,6 +1044,7 @@ defmodule SymphonyElixir.AppServerTest do
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-same-session"}}}'
             printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -1077,11 +1078,19 @@ defmodule SymphonyElixir.AppServerTest do
       events = delivery_events!(workspace)
       assert Enum.count(events, &(&1["event"] == "scope.access.requested")) == 1
 
-      assert decided = Enum.find(events, &(&1["event"] == "scope.access.decided"))
-      assert decided["decision"] == "allow_once"
-      assert decided["status"] == "allowed"
-      assert decided["reason_class"] == "safe_read_context"
-      assert decided["paths"] == [context_path]
+      decisions = Enum.filter(events, &(&1["event"] == "scope.access.decided"))
+      assert length(decisions) == 1
+
+      assert Enum.all?(decisions, fn decided ->
+               decided["decision"] == "allow_once" and
+                 decided["status"] == "allowed" and
+                 decided["reason_class"] == "safe_read_context" and
+                 decided["paths"] == [context_path]
+             end)
+
+      refute Enum.any?(events, fn event ->
+               event["event"] == "scope.access.decided" and event["status"] == "blocked"
+             end)
 
       [patch_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
       patch = patch_path |> File.read!() |> Jason.decode!()

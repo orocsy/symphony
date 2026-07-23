@@ -15344,6 +15344,18 @@ defmodule SymphonyElixir.CoreTest do
       active_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
       assert active_patch["status"] == "active"
 
+      duplicate_request = SymphonyElixir.ScopeAccess.classify_command(command, preflight)
+
+      assert {:allow_once, duplicate_patch} =
+               SymphonyElixir.ScopeAccess.Controller.decide(
+                 duplicate_request,
+                 preflight,
+                 workspace
+               )
+
+      assert duplicate_patch["patch_id"] == active_patch["patch_id"]
+      assert duplicate_patch["status"] == "active"
+
       assert Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
                entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
                  entry["source"] == "scope_access.auto.direct_import"

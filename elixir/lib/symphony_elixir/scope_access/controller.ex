@@ -12,6 +12,8 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   @spec decide(map() | nil, map() | nil, String.t() | nil) :: decision()
   def decide(%{"operation" => operation, "paths" => paths} = request, policy, workspace)
       when operation in ["read", "search"] and is_list(paths) do
+    active_patch = active_policy_patch(workspace, request)
+
     cond do
       Map.get(request, "broad") == true ->
         {:block, correction(request, "broad_scope_drift", "The denied command asks for broad project discovery.")}
@@ -19,8 +21,8 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       paths == [] ->
         {:block, correction(request, "missing_exact_path", "The denied command did not name an exact workspace file.")}
 
-      policy_patch_exists?(workspace, request) ->
-        {:block, correction(request, "policy_patch_already_applied", "The same read-only policy patch has already been applied.")}
+      is_map(active_patch) ->
+        {:allow_once, active_patch}
 
       true ->
         case safe_read_entries(request, policy, workspace) do
@@ -317,20 +319,20 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       Enum.map(@supported_extensions, &Path.join(base, "index#{&1}"))
   end
 
-  defp policy_patch_exists?(workspace, request) when is_binary(workspace) do
+  defp active_policy_patch(workspace, request) when is_binary(workspace) do
     path = policy_patch_path(workspace, patch_id(request))
 
     with true <- File.regular?(path),
          {:ok, body} <- File.read(path),
-         {:ok, %{} = patch} <- Jason.decode(body) do
-      Map.get(patch, "status", "active") == "active"
+         {:ok, %{} = patch} <- Jason.decode(body),
+         true <- Map.get(patch, "status", "active") == "active" do
+      patch
     else
-      false -> false
-      _ -> true
+      _ -> nil
     end
   end
 
-  defp policy_patch_exists?(_workspace, _request), do: false
+  defp active_policy_patch(_workspace, _request), do: nil
 
   defp policy_patch_path(workspace, patch_id) do
     Path.join([workspace, @policy_patch_dir, "#{safe_patch_id(patch_id)}.json"])
