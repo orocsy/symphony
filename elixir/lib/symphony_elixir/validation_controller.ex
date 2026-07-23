@@ -14,6 +14,23 @@ defmodule SymphonyElixir.ValidationController do
   @max_capture_bytes 1_000_000
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
+  @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|pat|jwt|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
+  @generic_key_env_key ~r/(?:^|[_-])(?:[A-Z0-9]+[_-])?KEY(?:$|[_-])/i
+  @sensitive_proxy_env_key ~r/^(?:[A-Z][A-Z0-9]*_)*(?:HTTP|HTTPS|ALL)_PROXY$/i
+  @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
+  @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
+  @repair_env_key ~r/^(?:(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO)$/i
+  @repair_provider_env_key ~r/^(?!(?:CI|BUILD|RUNNER|JOB|WORKFLOW|STEP)_)[A-Z][A-Z0-9_]*_(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE)$/i
+
+  if Mix.env() == :test do
+    @spec merge_effective_environment_for_test(map(), map(), term()) :: map()
+    def merge_effective_environment_for_test(inherited, command, os_type),
+      do: merge_effective_environment(inherited, command, os_type)
+
+    @spec executable_names_for_test(String.t(), String.t(), term()) :: [String.t()]
+    def executable_names_for_test(executable, path_ext, os_type),
+      do: executable_names(executable, path_ext, os_type)
+  end
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -518,11 +535,34 @@ defmodule SymphonyElixir.ValidationController do
 
   defp run_validations(issue, workspace, compiled, miu, head_sha) do
     Enum.reduce_while(miu["validations"], {:ok, []}, fn command, {:ok, events} ->
-      fingerprint = validation_fingerprint(issue, workspace, compiled, miu["id"], head_sha, command)
+      environment = validation_environment_snapshot(workspace, command)
+
+      fingerprint =
+        validation_fingerprint(
+          issue,
+          compiled,
+          miu["id"],
+          head_sha,
+          command,
+          environment.environment_fingerprint
+        )
+
       prior_product_failures = product_failure_count(workspace, issue, compiled, miu["id"], command)
       prior_infrastructure_failures = infrastructure_failure_count(workspace, issue, compiled, miu["id"], command)
 
       cond do
+        product_attempt =
+            product_failure_at_same_code_identity?(
+              workspace,
+              issue,
+              compiled,
+              miu["id"],
+              head_sha,
+              command,
+              environment.repair_environment_fingerprint
+            ) ->
+          {:halt, {:blocked, {:unchanged_failed_validation, product_attempt["validation_fingerprint"]}}}
+
         failed_attempt = failed_fingerprint(workspace, fingerprint) ->
           reason =
             if infrastructure_failure?(failed_attempt) do
@@ -533,14 +573,32 @@ defmodule SymphonyElixir.ValidationController do
 
           {:halt, {:blocked, reason}}
 
-        infrastructure_failure_in_current_environment?(workspace, issue, compiled, miu["id"], command) ->
+        infrastructure_failure_in_current_environment?(
+          workspace,
+          issue,
+          compiled,
+          miu["id"],
+          command,
+          environment.environment_fingerprint
+        ) ->
           {:halt, {:blocked, {:unchanged_infrastructure_environment, miu["id"]}}}
 
         prior_infrastructure_failures >= 2 ->
           {:halt, {:blocked, {:infrastructure_retry_budget_exhausted, miu["id"]}}}
 
         true ->
-          result = execute_validation(issue, workspace, compiled, miu["id"], head_sha, command, fingerprint)
+          result =
+            execute_validation(
+              issue,
+              workspace,
+              compiled,
+              miu["id"],
+              head_sha,
+              command,
+              fingerprint,
+              environment
+            )
+
           :ok = append_attempt(workspace, result)
           :ok = append_event(workspace, result)
 
@@ -566,13 +624,26 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp execute_validation(issue, workspace, compiled, miu_id, head_sha, command, fingerprint) do
+  defp execute_validation(
+         issue,
+         workspace,
+         compiled,
+         miu_id,
+         head_sha,
+         command,
+         fingerprint,
+         environment
+       ) do
     started = System.monotonic_time(:millisecond)
     timeout_ms = compiled.contract["validation_timeout_ms"]
-    {output, exit_code, timed_out?, launch_failed?} = run_command(workspace, command, timeout_ms)
+
+    {_raw_output, output, exit_code, timed_out?, launch_failed?} =
+      run_command(workspace, command, timeout_ms, environment)
+
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
     tests = test_counts(command, output)
     {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
+
     event_id = "validation-" <> String.slice(fingerprint, -16, 16)
     bounded_output = truncate(output, @max_log_bytes)
     log_path = write_validation_log(workspace, event_id, bounded_output)
@@ -586,9 +657,10 @@ defmodule SymphonyElixir.ValidationController do
       "contract_hash" => compiled.contract_hash,
       "miu_id" => miu_id,
       "head_sha" => head_sha,
-      "command" => command,
+      "command" => environment.redacted_command,
       "command_hash" => "sha256:" <> sha256(command),
-      "environment_fingerprint" => environment_fingerprint(workspace),
+      "environment_fingerprint" => environment.environment_fingerprint,
+      "repair_environment_fingerprint" => environment.repair_environment_fingerprint,
       "validation_fingerprint" => fingerprint,
       "status" => status,
       "reason_class" => reason_class,
@@ -603,23 +675,44 @@ defmodule SymphonyElixir.ValidationController do
     })
   end
 
-  defp run_command(workspace, command, timeout_ms) do
+  defp run_command(workspace, command, timeout_ms, environment) do
     case OptionParser.split(command) do
       parts when parts != [] ->
-        {env, [executable | args]} = split_env_assignments(parts)
-        executable = resolve_executable(executable, workspace)
-        port = open_command_port(executable, args, workspace, env)
+        {_env, [executable | args]} = split_env_assignments(parts)
 
-        {output, exit_code, timed_out?} =
-          collect_command(port, timeout_ms, System.monotonic_time(:millisecond), "")
+        executable =
+          resolve_executable(
+            executable,
+            environment.executable_names,
+            workspace,
+            environment.executable_path,
+            environment.os_type
+          )
 
-        {output, exit_code, timed_out?, false}
+        port = open_command_port(executable, args, workspace, environment.child_environment)
+
+        sensitive_values = environment.sensitive_values
+        carry_bytes = max_sensitive_environment_value_bytes(sensitive_values)
+
+        {raw_output, output, exit_code, timed_out?} =
+          collect_command(
+            port,
+            timeout_ms,
+            System.monotonic_time(:millisecond),
+            "",
+            "",
+            "",
+            sensitive_values,
+            carry_bytes
+          )
+
+        {raw_output, output, exit_code, timed_out?, false}
 
       [] ->
-        {"empty validation command", 127, false, true}
+        {"empty validation command", "empty validation command", 127, false, true}
     end
   rescue
-    error -> {Exception.message(error), 127, false, true}
+    error -> {Exception.message(error), Exception.message(error), 127, false, true}
   end
 
   defp split_env_assignments(parts) do
@@ -634,16 +727,25 @@ defmodule SymphonyElixir.ValidationController do
 
   defp validation_status(_command, _exit_code, _tests, true, false), do: {"failed", "command_timed_out"}
 
-  defp validation_status(_command, exit_code, _tests, false, false) when exit_code != 0,
-    do: {"failed", "command_failed"}
-
-  defp validation_status(command, 0, tests, false, false) do
+  defp validation_status(command, exit_code, tests, false, false) do
     cond do
-      not test_command?(command) -> {"passed", "passed"}
-      tests == nil -> {"failed", "test_count_unavailable"}
-      tests["collected"] == 0 -> {"failed", "zero_tests_collected"}
-      tests["failed"] > 0 -> {"failed", "tests_failed"}
-      true -> {"passed", "passed"}
+      test_command?(command) and is_map(tests) and tests["collected"] == 0 ->
+        {"failed", "zero_tests_collected"}
+
+      test_command?(command) and is_map(tests) and tests["failed"] > 0 ->
+        {"failed", "tests_failed"}
+
+      exit_code != 0 ->
+        {"failed", "command_failed"}
+
+      not test_command?(command) ->
+        {"passed", "passed"}
+
+      tests == nil ->
+        {"failed", "test_count_unavailable"}
+
+      true ->
+        {"passed", "passed"}
     end
   end
 
@@ -706,7 +808,14 @@ defmodule SymphonyElixir.ValidationController do
     Regex.match?(~r/(^|[\s\/.\-_])(test|tests|unittest|jest|vitest|pytest)([\s\/.\-_:]|$)/i, command)
   end
 
-  defp validation_fingerprint(issue, workspace, compiled, miu_id, head_sha, command) do
+  defp validation_fingerprint(
+         issue,
+         compiled,
+         miu_id,
+         head_sha,
+         command,
+         environment_fingerprint
+       ) do
     [
       issue.id,
       issue.identifier,
@@ -714,14 +823,43 @@ defmodule SymphonyElixir.ValidationController do
       miu_id,
       head_sha,
       "sha256:" <> sha256(command),
-      environment_fingerprint(workspace)
+      environment_fingerprint
     ]
     |> Enum.map_join("\n", &to_string/1)
     |> sha256()
     |> then(&("sha256:" <> &1))
   end
 
-  defp environment_fingerprint(workspace) do
+  defp validation_environment_snapshot(workspace, command) do
+    command_env =
+      command
+      |> OptionParser.split()
+      |> split_env_assignments()
+      |> elem(0)
+      |> environment_assignments()
+
+    os_type = :os.type()
+    effective_environment = merge_effective_environment(System.get_env(), command_env, os_type)
+    sensitive_values = sensitive_values(effective_environment)
+
+    %{
+      child_environment: Enum.map(effective_environment, fn {key, value} -> "#{key}=#{value}" end),
+      executable_names:
+        executable_names(
+          command |> OptionParser.split() |> split_env_assignments() |> elem(1) |> hd(),
+          Map.get(effective_environment, "PATHEXT", ""),
+          os_type
+        ),
+      executable_path: Map.get(effective_environment, "PATH", ""),
+      os_type: os_type,
+      environment_fingerprint: environment_fingerprint(workspace, effective_environment),
+      repair_environment_fingerprint: repair_environment_fingerprint(effective_environment),
+      sensitive_values: sensitive_values,
+      redacted_command: redacted_validation_command(command, sensitive_values)
+    }
+  end
+
+  defp environment_fingerprint(workspace, effective_environment) do
     lock_digest =
       ["pnpm-lock.yaml", "mix.lock", "package-lock.json", "yarn.lock"]
       |> Enum.find_value("none", fn name ->
@@ -729,10 +867,130 @@ defmodule SymphonyElixir.ValidationController do
         if File.regular?(path), do: sha256(File.read!(path))
       end)
 
-    [System.version(), System.otp_release(), lock_digest]
-    |> Enum.join("\n")
-    |> sha256()
-    |> then(&("sha256:" <> &1))
+    ControllerEvidence.fingerprint(%{
+      "environment" => validation_environment(effective_environment),
+      "lock_digest" => lock_digest,
+      "otp_release" => System.otp_release(),
+      "runtime_version" => System.version()
+    })
+  end
+
+  defp validation_environment(effective_environment) do
+    effective_environment
+    |> Enum.filter(fn {key, value} ->
+      sensitive_environment_entry?(key, value) or Regex.match?(@validation_env_key, key) or
+        Regex.match?(@provider_env_key, key)
+    end)
+    |> Map.new()
+  end
+
+  defp repair_environment_fingerprint(effective_environment) do
+    effective_environment
+    |> Enum.filter(fn {key, value} ->
+      sensitive_environment_entry?(key, value) or Regex.match?(@repair_env_key, key) or
+        Regex.match?(@repair_provider_env_key, key)
+    end)
+    |> Map.new()
+    |> ControllerEvidence.fingerprint()
+  end
+
+  defp sensitive_env_key?(key),
+    do:
+      Regex.match?(@sensitive_env_key, key) or Regex.match?(@generic_key_env_key, key) or
+        Regex.match?(@sensitive_proxy_env_key, key)
+
+  defp sensitive_environment_entry?(key, value),
+    do: sensitive_env_key?(key) or credential_bearing_uri?(value)
+
+  defp credential_bearing_uri?(value) when is_binary(value) do
+    case URI.parse(value) do
+      %URI{scheme: scheme, userinfo: userinfo}
+      when is_binary(scheme) and scheme != "" and is_binary(userinfo) and userinfo != "" ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp credential_bearing_uri?(_value), do: false
+
+  defp redacted_validation_command(command, sensitive_values) do
+    {env_parts, command_parts} =
+      command
+      |> OptionParser.split()
+      |> split_env_assignments()
+
+    marker = redaction_marker(sensitive_values)
+
+    redacted_env =
+      Enum.map(env_parts, fn assignment ->
+        [key, _value] = String.split(assignment, "=", parts: 2)
+        "#{key}=#{marker}"
+      end)
+
+    display_command =
+      redacted_env
+      |> Kernel.++(command_parts)
+      |> Enum.map_join(" ", &inspect/1)
+
+    {redacted, ""} = redact_stream_prefix(display_command, sensitive_values, 0)
+    redacted
+  end
+
+  defp environment_assignments(assignments) do
+    assignments
+    |> Enum.map(fn assignment ->
+      [key, value] = String.split(assignment, "=", parts: 2)
+      {key, value}
+    end)
+    |> Map.new()
+  end
+
+  defp merge_effective_environment(inherited, command, {:win32, _name}) do
+    inherited
+    |> normalize_windows_environment()
+    |> Map.merge(normalize_windows_environment(command))
+  end
+
+  defp merge_effective_environment(inherited, command, _unix),
+    do: Map.merge(inherited, command)
+
+  defp normalize_windows_environment(environment) do
+    Map.new(environment, fn {key, value} -> {String.upcase(key), value} end)
+  end
+
+  defp executable_names(executable, path_ext, {:win32, _name}) do
+    if Path.extname(executable) == "" do
+      path_ext
+      |> String.split(";", trim: true)
+      |> Enum.map(fn extension ->
+        extension = if String.starts_with?(extension, "."), do: extension, else: "." <> extension
+        executable <> extension
+      end)
+      |> case do
+        [] -> Enum.map(~w(.COM .EXE .BAT .CMD), &(executable <> &1))
+        names -> names
+      end
+    else
+      [executable]
+    end
+  end
+
+  defp executable_names(executable, _path_ext, _unix), do: [executable]
+
+  defp sensitive_values(environment) do
+    environment
+    |> Enum.filter(fn {key, value} ->
+      is_binary(value) and value != "" and sensitive_environment_entry?(key, value)
+    end)
+    |> Enum.sort_by(fn {key, value} -> {-byte_size(value), key} end)
+  end
+
+  defp max_sensitive_environment_value_bytes(sensitive_values) do
+    sensitive_values
+    |> Enum.map(fn {_key, value} -> byte_size(value) end)
+    |> Enum.max(fn -> 0 end)
   end
 
   defp failed_fingerprint(workspace, fingerprint) do
@@ -755,6 +1013,39 @@ defmodule SymphonyElixir.ValidationController do
     end)
   end
 
+  defp product_failure_at_same_code_identity?(
+         workspace,
+         issue,
+         compiled,
+         miu_id,
+         head_sha,
+         command,
+         current_repair_environment
+       ) do
+    command_hash = "sha256:" <> sha256(command)
+
+    workspace
+    |> trusted_attempts()
+    |> Enum.find(fn attempt ->
+      product_failure?(attempt) and
+        attempt["issue"] == issue.identifier and
+        attempt["contract_hash"] == compiled.contract_hash and
+        attempt["miu_id"] == miu_id and
+        attempt["head_sha"] == head_sha and
+        attempt["command_hash"] == command_hash and
+        product_failure_blocks_environment_retry?(attempt, current_repair_environment)
+    end)
+  end
+
+  defp product_failure_blocks_environment_retry?(%{"reason_class" => "command_failed"} = attempt, current) do
+    case attempt["repair_environment_fingerprint"] do
+      previous when is_binary(previous) -> previous == current
+      _missing_from_older_evidence -> true
+    end
+  end
+
+  defp product_failure_blocks_environment_retry?(_attempt, _current), do: true
+
   defp product_failure?(%{"status" => "failed", "reason_class" => reason_class}) do
     reason_class in @product_failure_classes
   end
@@ -775,9 +1066,15 @@ defmodule SymphonyElixir.ValidationController do
     end)
   end
 
-  defp infrastructure_failure_in_current_environment?(workspace, issue, compiled, miu_id, command) do
+  defp infrastructure_failure_in_current_environment?(
+         workspace,
+         issue,
+         compiled,
+         miu_id,
+         command,
+         current_environment
+       ) do
     command_hash = "sha256:" <> sha256(command)
-    current_environment = environment_fingerprint(workspace)
 
     workspace
     |> trusted_attempts()
@@ -1123,11 +1420,56 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp resolve_executable(executable, workspace) do
-    cond do
-      String.starts_with?(executable, "./") -> Path.expand(executable, workspace)
-      path = System.find_executable(executable) -> path
-      true -> raise "validation executable not found: #{executable}"
+  defp resolve_executable(executable, names, workspace, executable_path, os_type) do
+    resolved =
+      if String.starts_with?(executable, "./") or Path.type(executable) == :absolute or
+           String.contains?(executable, "/") do
+        Enum.find_value(names, fn name ->
+          name
+          |> Path.expand(workspace)
+          |> executable_path_candidate(os_type)
+        end)
+      else
+        find_executable(names, executable_path, workspace, os_type)
+      end
+
+    resolved || raise "validation executable not found: #{executable}"
+  end
+
+  defp find_executable(names, executable_path, workspace, os_type) do
+    executable_path
+    |> String.split(path_separator())
+    |> Enum.find_value(fn
+      "" -> executable_candidate(workspace, names, workspace, os_type)
+      directory -> executable_candidate(directory, names, workspace, os_type)
+    end)
+  end
+
+  defp executable_candidate(directory, names, workspace, os_type) do
+    directory =
+      if Path.type(directory) == :relative,
+        do: Path.expand(directory, workspace),
+        else: directory
+
+    Enum.find_value(names, fn name ->
+      directory
+      |> Path.join(name)
+      |> executable_path_candidate(os_type)
+    end)
+  end
+
+  defp executable_path_candidate(candidate, os_type) do
+    case {os_type, File.stat(candidate)} do
+      {{:win32, _name}, {:ok, %{type: :regular}}} -> candidate
+      {_os, {:ok, %{type: :regular, mode: mode}}} when Bitwise.band(mode, 0o111) != 0 -> candidate
+      _missing_or_non_regular -> false
+    end
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _unix -> ":"
     end
   end
 
@@ -1154,26 +1496,150 @@ defmodule SymphonyElixir.ValidationController do
     port_opts ++ [{:env, env}]
   end
 
-  defp collect_command(port, timeout_ms, started_ms, output) do
+  defp collect_command(
+         port,
+         timeout_ms,
+         started_ms,
+         raw_output,
+         output,
+         redaction_tail,
+         sensitive_values,
+         carry_bytes
+       ) do
     remaining_ms = max(0, timeout_ms - (System.monotonic_time(:millisecond) - started_ms))
 
     receive do
       {^port, {:data, data}} ->
-        collect_command(port, timeout_ms, started_ms, bounded_capture(output <> data))
+        {redacted, redaction_tail} =
+          redaction_tail
+          |> Kernel.<>(data)
+          |> redact_stream_prefix(sensitive_values, carry_bytes)
+
+        collect_command(
+          port,
+          timeout_ms,
+          started_ms,
+          bounded_capture(raw_output <> data, @max_capture_bytes),
+          bounded_capture(output <> redacted, @max_capture_bytes),
+          redaction_tail,
+          sensitive_values,
+          carry_bytes
+        )
 
       {^port, {:exit_status, exit_code}} ->
-        {output, exit_code, false}
+        output = flush_redaction_tail(output, redaction_tail, sensitive_values)
+        {String.replace_invalid(raw_output), String.replace_invalid(output), exit_code, false}
     after
       remaining_ms ->
         Port.close(port)
-        {output <> "\n[validation timed out after #{timeout_ms}ms]\n", 124, true}
+        timeout_output = "\n[validation timed out after #{timeout_ms}ms]\n"
+        output = flush_redaction_tail(output, redaction_tail, sensitive_values)
+
+        {
+          raw_output
+          |> Kernel.<>(timeout_output)
+          |> bounded_capture(@max_capture_bytes)
+          |> String.replace_invalid(),
+          output
+          |> Kernel.<>(timeout_output)
+          |> bounded_capture(@max_capture_bytes)
+          |> String.replace_invalid(),
+          124,
+          true
+        }
     end
   end
 
-  defp bounded_capture(output) when byte_size(output) <= @max_capture_bytes, do: output
+  defp redact_stream_prefix(output, [], _carry_bytes), do: {output, ""}
 
-  defp bounded_capture(output) do
-    keep = @max_capture_bytes - byte_size("...[earlier output truncated]...\n")
+  defp redact_stream_prefix(output, sensitive_values, carry_bytes) do
+    redact_stream_prefix(
+      output,
+      sensitive_values,
+      carry_bytes,
+      redaction_marker(sensitive_values),
+      []
+    )
+  end
+
+  defp redact_stream_prefix("", _sensitive_values, _carry_bytes, _marker, output),
+    do: {IO.iodata_to_binary(Enum.reverse(output)), ""}
+
+  defp redact_stream_prefix(input, _sensitive_values, carry_bytes, _marker, output)
+       when byte_size(input) <= carry_bytes do
+    {IO.iodata_to_binary(Enum.reverse(output)), input}
+  end
+
+  defp redact_stream_prefix(input, sensitive_values, carry_bytes, marker, output) do
+    case sensitive_prefix(input, sensitive_values) do
+      {_key, value} ->
+        value_bytes = byte_size(value)
+        rest_bytes = byte_size(input) - value_bytes
+        rest = binary_part(input, value_bytes, rest_bytes)
+
+        redact_stream_prefix(
+          rest,
+          sensitive_values,
+          carry_bytes,
+          marker,
+          [marker | output]
+        )
+
+      nil ->
+        emit_bytes = safe_plain_prefix_bytes(input, sensitive_values, carry_bytes)
+        emitted = binary_part(input, 0, emit_bytes)
+        rest = binary_part(input, emit_bytes, byte_size(input) - emit_bytes)
+
+        redact_stream_prefix(
+          rest,
+          sensitive_values,
+          carry_bytes,
+          marker,
+          [emitted | output]
+        )
+    end
+  end
+
+  defp redaction_marker(sensitive_values) do
+    Enum.find(["[REDACTED]", "<redacted>", "***", ""], fn candidate ->
+      Enum.all?(sensitive_values, fn {_key, value} ->
+        :binary.match(candidate, value) == :nomatch
+      end)
+    end)
+  end
+
+  defp sensitive_prefix(input, sensitive_values) do
+    Enum.find(sensitive_values, fn {_key, value} ->
+      value_bytes = byte_size(value)
+      byte_size(input) >= value_bytes and binary_part(input, 0, value_bytes) == value
+    end)
+  end
+
+  defp safe_plain_prefix_bytes(input, sensitive_values, carry_bytes) do
+    max_emit = byte_size(input) - carry_bytes
+
+    sensitive_values
+    |> Enum.reduce(nil, fn {_key, value}, earliest ->
+      case :binary.match(input, value) do
+        {index, _length} when is_nil(earliest) or index < earliest -> index
+        _ -> earliest
+      end
+    end)
+    |> case do
+      nil -> max_emit
+      index -> min(max_emit, index)
+    end
+  end
+
+  defp flush_redaction_tail(output, redaction_tail, sensitive_values) do
+    {redacted_tail, ""} = redact_stream_prefix(redaction_tail, sensitive_values, 0)
+    bounded_capture(output <> redacted_tail, @max_capture_bytes)
+  end
+
+  defp bounded_capture(output, max_bytes) when byte_size(output) <= max_bytes, do: output
+
+  defp bounded_capture(output, max_bytes) do
+    keep = max_bytes - byte_size("...[earlier output truncated]...\n")
     "...[earlier output truncated]...\n" <> binary_part(output, byte_size(output) - keep, keep)
   end
 

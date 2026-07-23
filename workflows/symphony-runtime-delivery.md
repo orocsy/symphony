@@ -455,7 +455,8 @@ Runtime Contract; they MUST NOT be appended into authority-bearing scope.
   "head_sha": "...",
   "command_id": "cards-route-focused",
   "command_hash": "sha256:...",
-  "environment_fingerprint": "sha256:...",
+  "environment_fingerprint": "hmac-sha256:...",
+  "repair_environment_fingerprint": "hmac-sha256:...",
   "validation_fingerprint": "sha256:...",
   "status": "passed",
   "exit_code": 0,
@@ -468,6 +469,13 @@ Runtime Contract; they MUST NOT be appended into authority-bearing scope.
 
 The environment fingerprint SHOULD include the validation adapter version,
 runtime/toolchain versions, lockfile digest, and declared environment identity.
+The repair-environment fingerprint MUST be narrower: credentials, provider
+connection settings, proxies, and TLS trust configuration. Incidental process
+metadata such as `CI` or `PATH` MUST NOT authorize an unchanged-code product
+validation retry.
+The controller MUST snapshot the effective child environment once per
+validation command and use that same snapshot for process launch, both
+environment fingerprints, and signed result evidence.
 Secrets and raw environment values MUST NOT be persisted.
 
 ### Runtime MIU certificate

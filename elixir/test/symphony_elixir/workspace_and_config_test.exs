@@ -1299,7 +1299,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           "bash -lc 'mix test'",
           "env -S 'sh -c echo fake-success'",
           "pwsh -e ZQBjAGgAbwAgAGYAYQBrAGUALQBzAHUAYwBjAGUAcwBzAA==",
-          "mix test | cat"
+          "mix test | cat",
+          "FOO=bar"
         ] do
       issue = %Issue{
         id: "issue-shell-validation",
