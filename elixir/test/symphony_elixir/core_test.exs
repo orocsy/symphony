@@ -15467,6 +15467,37 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-206"
   end
 
+  test "policy violation recovery finalizes a dirty validated handoff without rereading" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "MT-207",
+      title: "Finalize validated handoff",
+      description: "Recovery flow",
+      state: "Rework",
+      url: "https://example.org/issues/MT-207",
+      labels: []
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        policy_violation: %{
+          command: "sed -n '48,102p' src/components/ui/bottom-sheet.tsx",
+          pattern: "dirty_validated_handoff_recheck_before_commit",
+          attempt: 1,
+          max_attempts: 2
+        }
+      )
+
+    assert prompt =~ "The dirty diff already has current validation evidence"
+    assert prompt =~ "do not read source/test files or rerun validation"
+    assert prompt =~ "then stage the runtime-listed dirty files, commit, push"
+
+    refute prompt =~
+             "Continue directly with the smallest in-scope fix for the open correction or current task"
+  end
+
   test "agent runner allows one denied command recovery for strict implementation review rework" do
     workspace =
       Path.join(
@@ -16787,6 +16818,12 @@ defmodule SymphonyElixir.CoreTest do
                AppServer.command_policy_violation_for_test(
                  workspace,
                  "git commit -m 'COD-266: send guest safety draft to cards request'"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 ~s(PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "pnpm typecheck")
                )
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git push")

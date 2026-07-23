@@ -816,8 +816,8 @@ defmodule SymphonyElixir.PromptBuilder do
         - Denied command: `#{command}`
         - Matched policy: `#{pattern}`
         #{scope_access_lines}
-        #{policy_violation_command_guidance(scope_access)}
-        - Continue directly with the smallest in-scope fix for the open correction or current task, then its focused validation.
+        #{policy_violation_command_guidance(scope_access, pattern)}
+        #{policy_violation_next_action(pattern)}
         #{final_warning}
         """
         |> String.trim()
@@ -842,18 +842,31 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp policy_violation_scope_access_lines(_scope_access), do: ""
 
-  defp policy_violation_command_guidance(%{} = scope_access) do
+  defp policy_violation_command_guidance(%{} = scope_access, pattern) do
     if scope_access_decision(scope_access) == "allow_once" do
       "- The runtime added this as read-only context for this retry. You may rerun that exact bounded read/search once if still needed; do not broaden it or edit that path."
     else
-      default_policy_violation_command_guidance()
+      default_policy_violation_command_guidance(pattern)
     end
   end
 
-  defp policy_violation_command_guidance(_scope_access), do: default_policy_violation_command_guidance()
+  defp policy_violation_command_guidance(_scope_access, pattern),
+    do: default_policy_violation_command_guidance(pattern)
 
-  defp default_policy_violation_command_guidance do
+  defp default_policy_violation_command_guidance("dirty_validated_handoff_recheck_before_commit") do
+    "- Do not run that command again. The dirty diff already has current validation evidence; do not read source/test files or rerun validation."
+  end
+
+  defp default_policy_violation_command_guidance(_pattern) do
     "- Do not run that command again, and do not run other git history/diff/discovery commands. The runtime-provided context in this prompt already contains the repository state."
+  end
+
+  defp policy_violation_next_action("dirty_validated_handoff_recheck_before_commit") do
+    "- Continue directly with `git status --short --branch`, then stage the runtime-listed dirty files, commit, push, and request the configured handoff/review. If any handoff command fails, record the exact blocker and stop."
+  end
+
+  defp policy_violation_next_action(_pattern) do
+    "- Continue directly with the smallest in-scope fix for the open correction or current task, then its focused validation."
   end
 
   defp scope_access_paths(scope_access) do

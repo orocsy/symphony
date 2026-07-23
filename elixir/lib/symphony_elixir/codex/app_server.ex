@@ -2966,7 +2966,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp redact_delivery_event_append_metadata(command) when is_binary(command) do
-    ["command", "summary", "message", "details", "detail", "body"]
+    ["command", "summary", "message", "details", "detail", "body", "tool", "step"]
     |> Enum.reduce(command, fn flag, acc ->
       acc
       |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
