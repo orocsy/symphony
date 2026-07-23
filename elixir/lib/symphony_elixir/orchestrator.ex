@@ -5233,12 +5233,19 @@ defmodule SymphonyElixir.Orchestrator do
     normalize_correction_value(correction["status"]) == "open" and
       normalize_correction_value(correction["next_action"]) == "retry" and
       is_nil(correction["resolved_at"]) and
-      not DispatchPreflight.playwright_browser_correction?(correction) and
+      not worker_browser_provider_correction?(correction) and
       retry_fingerprint_changed?(correction, workspace_path) and
       actionable_code_or_test_correction?(correction)
   end
 
   defp dispatchable_retry_correction?(_correction, _workspace_path), do: false
+
+  defp worker_browser_provider_correction?(%{} = correction) do
+    DispatchPreflight.playwright_browser_correction?(correction) and
+      normalize_correction_value(correction["source"]) != "symphony.runtime.validation-controller"
+  end
+
+  defp worker_browser_provider_correction?(_correction), do: false
 
   defp retry_fingerprint_changed?(%{"guard" => %{"retry_fingerprint" => %{} = stored}} = correction, workspace_path)
        when is_binary(workspace_path) do
