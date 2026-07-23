@@ -743,6 +743,15 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     def worker_thread_overrides_for_test(params, workspace),
       do: maybe_put_worker_thread_overrides(params, workspace)
+
+    def scope_access_resolution_for_test(workspace, command, pattern)
+        when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
+      resolve_scope_access_violation(
+        %{workspace: workspace, worker_host: nil},
+        command,
+        pattern
+      )
+    end
   end
 
   defp bounded_git_log_exception_available?(workspace, configured_patterns)
@@ -2313,18 +2322,22 @@ defmodule SymphonyElixir.Codex.AppServer do
       %{} = request ->
         case ScopeAccessController.decide(request, policy, workspace) do
           {:allow_once, patch} ->
-            case ScopeAccessController.write_policy_patch(workspace, patch) do
-              {:ok, written_patch} ->
-                {:allow, written_patch}
+            if scope_access_command_eligible?(command, request) do
+              case ScopeAccessController.write_policy_patch(workspace, patch) do
+                {:ok, written_patch} ->
+                  {:allow, written_patch}
 
-              {:error, reason} ->
-                decision =
-                  request
-                  |> ScopeAccess.decision_for()
-                  |> Map.put("reason_class", "policy_patch_write_failed")
-                  |> Map.put("error", inspect(reason))
+                {:error, reason} ->
+                  decision =
+                    request
+                    |> ScopeAccess.decision_for()
+                    |> Map.put("reason_class", "policy_patch_write_failed")
+                    |> Map.put("error", inspect(reason))
 
-                {:deny, decision}
+                  {:deny, decision}
+              end
+            else
+              :defer
             end
 
           {decision, correction_attrs} when decision in [:block, :escalate] ->
@@ -2341,6 +2354,65 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp resolve_scope_access_violation(_command_guard, _command, _pattern), do: :defer
+
+  defp scope_access_command_eligible?(
+         command,
+         %{
+           "operation" => operation,
+           "command_class" => command_class,
+           "broad" => false
+         }
+       )
+       when operation in ["read", "search"] and
+              command_class in [
+                "bounded_file_read",
+                "bounded_file_search",
+                "directory_listing",
+                "git_diff",
+                "git_discovery"
+              ] do
+    command
+    |> unwrap_shell_login_command()
+    |> pure_scope_read_command?()
+  end
+
+  defp scope_access_command_eligible?(_command, _request), do: false
+
+  defp unwrap_shell_login_command(command) when is_binary(command) do
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.trim()
+
+    cond do
+      String.starts_with?(normalized, ~s(/bin/zsh -lc ")) and
+          String.ends_with?(normalized, "\"") ->
+        normalized
+        |> String.trim_leading(~s(/bin/zsh -lc "))
+        |> String.trim_trailing("\"")
+
+      String.starts_with?(normalized, "/bin/zsh -lc '") and
+          String.ends_with?(normalized, "'") ->
+        normalized
+        |> String.trim_leading("/bin/zsh -lc '")
+        |> String.trim_trailing("'")
+
+      true ->
+        normalized
+    end
+  end
+
+  defp unwrap_shell_login_command(_command), do: ""
+
+  defp pure_scope_read_command?(command) when is_binary(command) do
+    not String.contains?(command, ["$(", "`", "&&", "||", ";"]) and
+      Regex.match?(
+        ~r/\A(?:sed\s+-n|(?:cat|head|tail|nl|rg|grep|ls)\s|git\s+(?:diff|log|ls-files)(?:\s|$))/,
+        command
+      )
+  end
+
+  defp pure_scope_read_command?(_command), do: false
 
   defp scope_access_attrs(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do

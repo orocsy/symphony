@@ -4709,7 +4709,8 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(fake_ssh, """
       #!/bin/sh
-      printf '%s\\0' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","resolved_at":null,"summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
+      printf '%s\\n' 'Warning: Permanently added worker-a to the list of known hosts.' >&2
+      printf '%s%s\\0' '__SYMPHONY_CORRECTION__' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","resolved_at":null,"summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
       """)
 
       File.chmod!(fake_ssh, 0o755)
@@ -4722,6 +4723,40 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:error, ^command, "playwright_browser_correction_requires_runtime_controller_handoff"} =
                AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "hard command guards cannot be overridden by an embedded safe read" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hard-guard-scope-bypass-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-HARD-GUARD")
+      File.mkdir_p!(workspace)
+
+      command =
+        ~S|python3 .codex/delivery/bin/orocsy.py --repo . inbox create --summary "$(cat tests/unit/named.test.ts)"|
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 command,
+                 "delivery_inbox_metadata_command_substitution"
+               )
+
+      destructive_command = ~S|rm -f "$(cat tests/unit/named.test.ts)"|
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 destructive_command,
+                 "(^|\\s|[\"'])(rm|sudo|chmod|chown)(\\s|$)"
+               )
     after
       File.rm_rf(test_root)
     end

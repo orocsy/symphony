@@ -5085,7 +5085,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp token_budget_pushed_handoff_stop?(_reason, _running_entry), do: false
 
   defp fresh_clean_pushed_handoff_stop?(
-         %{workspace_path: workspace, started_at: %DateTime{} = started_at},
+         %{
+           workspace_path: workspace,
+           started_at: %DateTime{} = started_at,
+           issue: %Issue{} = issue
+         },
          mode
        )
        when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] do
@@ -5098,8 +5102,7 @@ defmodule SymphonyElixir.Orchestrator do
          true <- pushed_branch_head_matches?(workspace, branch, head),
          %DateTime{} = committed_at <- git_head_committed_at(workspace),
          true <- datetime_at_or_after?(committed_at, started_at),
-         progress when progress != [] <-
-           event_durable_progress_times(workspace, started_at, false) do
+         true <- pushed_validated_handoff_stop?(workspace, issue) do
       true
     else
       _ -> false

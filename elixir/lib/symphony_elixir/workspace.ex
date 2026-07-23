@@ -16,6 +16,7 @@ defmodule SymphonyElixir.Workspace do
   }
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @remote_correction_marker "__SYMPHONY_CORRECTION__"
 
   @type worker_host :: String.t() | nil
 
@@ -144,9 +145,15 @@ defmodule SymphonyElixir.Workspace do
       |> IO.iodata_to_binary()
       |> String.split(<<0>>, trim: true)
       |> Enum.flat_map(fn body ->
-        case Jason.decode(body) do
-          {:ok, %{} = correction} -> [correction]
-          _ -> []
+        case String.split(body, @remote_correction_marker, parts: 2) do
+          [_diagnostics, payload] ->
+            case Jason.decode(String.trim(payload)) do
+              {:ok, %{} = correction} -> [correction]
+              _ -> []
+            end
+
+          _ ->
+            []
         end
       end)
       |> newest_corrections_first()
@@ -1229,6 +1236,7 @@ defmodule SymphonyElixir.Workspace do
       "for correction in \"$inbox\"/correction_*.json; do",
       "  [ -f \"$correction\" ] || continue",
       "  if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"open\"' \"$correction\" && grep -Eq '\"next_action\"[[:space:]]*:[[:space:]]*\"(block|retry|escalate)\"' \"$correction\" && grep -Eq '\"resolved_at\"[[:space:]]*:[[:space:]]*null' \"$correction\"; then",
+      "    printf '%s' '#{@remote_correction_marker}'",
       "    cat \"$correction\"",
       "    printf '\\0'",
       "  fi",

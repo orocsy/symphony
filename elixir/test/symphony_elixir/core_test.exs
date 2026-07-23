@@ -2612,20 +2612,23 @@ defmodule SymphonyElixir.CoreTest do
         }) <> "\n"
       )
 
-      issue = %Issue{
-        id: issue_id,
-        identifier: "COD-300",
-        state: "Rework",
-        title: "Desktop guest setup handoff",
-        description: "The worker pushed its validated correction.",
-        branch_name: branch,
-        labels: []
-      }
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: issue_id,
+          identifier: "COD-300",
+          state: "Rework",
+          title: "Desktop guest setup handoff",
+          description: "The worker pushed its validated correction.",
+          branch_name: branch,
+          labels: []
+        })
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         max_failed_worker_retries: 3
       )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
@@ -22839,8 +22842,7 @@ defmodule SymphonyElixir.CoreTest do
       assert Workspace.blocking_correction_in_workspace?(workspace)
       assert Orchestrator.should_dispatch_issue_for_test(issue, state)
 
-      refute_receive {:memory_tracker_state_update,
-                      "issue-actionable-github-review-correction", _state},
+      refute_receive {:memory_tracker_state_update, "issue-actionable-github-review-correction", _state},
                      50
     after
       File.rm_rf(test_root)
