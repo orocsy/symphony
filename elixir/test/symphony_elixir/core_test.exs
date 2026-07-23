@@ -22797,6 +22797,56 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "actionable GitHub Codex review correction remains open and dispatchable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-actionable-github-review-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(
+          test_root,
+          "issue-actionable-github-review-correction",
+          %{
+            source: "github-codex-review",
+            summary: "Preserve focus when the mobile sheet becomes desktop inline setup",
+            findings: [
+              "src/components/ui/bottom-sheet.tsx:50 restores focus to a hidden close button."
+            ],
+            required_corrections: [
+              "Fix src/components/ui/bottom-sheet.tsx, update tests/unit/bottom-sheet.test.ts, and run focused validation."
+            ]
+          }
+        )
+
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      request_at = iso_seconds(-300)
+      feedback_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        pull_comments: [review_thread_payload(head_sha, feedback_at)],
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      actionable = correction_path |> File.read!() |> Jason.decode!()
+      assert actionable["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      refute_receive {:memory_tracker_state_update,
+                      "issue-actionable-github-review-correction", _state},
+                     50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   defp pending_review_correction_fixture(test_root, issue_id, correction_attrs \\ %{}) do
     workspace_root = Path.join(test_root, "workspaces")
 

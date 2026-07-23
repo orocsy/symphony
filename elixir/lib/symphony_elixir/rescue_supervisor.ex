@@ -1348,7 +1348,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     findings = correction["findings"] |> string_values() |> Enum.join(" ")
     required = correction["required_corrections"] |> string_values() |> Enum.join(" ")
 
-    source in @pending_codex_review_correction_sources or
+    (source in @pending_codex_review_correction_sources and
+       not actionable_code_or_test_correction?(correction)) or
       (next_action == "retry" and not actionable_code_or_test_correction?(correction) and
          (String.contains?(summary, "Codex review") or
             String.contains?(findings, "Codex review") or
