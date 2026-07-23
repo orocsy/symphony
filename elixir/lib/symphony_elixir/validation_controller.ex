@@ -1276,8 +1276,13 @@ defmodule SymphonyElixir.ValidationController do
 
     receive do
       {^port, {:data, data}} ->
-        {redactable, redaction_tail} = split_redaction_tail(redaction_tail <> data, carry_bytes)
-        redacted = redact_sensitive_environment_values(redactable, sensitive_values)
+        data = String.replace_invalid(data)
+
+        {redacted, redaction_tail} =
+          redaction_tail
+          |> Kernel.<>(data)
+          |> redact_sensitive_environment_values(sensitive_values)
+          |> split_redaction_tail(carry_bytes)
 
         collect_command(
           port,

@@ -585,6 +585,66 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts a secret split across port output chunks" do
+    env_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
+    secret_value = "cross-chunk-secret"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\nprintf 'cross-chunk-'\nsleep 0.05\nprintf 'secret'\necho\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ secret_value
+      assert evidence =~ "[REDACTED:#{env_key}]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "bounds and sanitizes invalid UTF-8 validation output" do
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\nprintf '\\377'\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      assert String.valid?(evidence)
+      assert evidence =~ "3 tests, 0 failures"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "processes worker requests through MIU certification and final handoff" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
