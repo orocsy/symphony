@@ -168,6 +168,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       patterns: forbidden_command_patterns,
       configured_patterns: configured_forbidden_command_patterns,
       workspace: workspace,
+      worker_host: worker_host,
       fresh_checkpoint_stop_enabled: dispatch_preflight_mode(workspace) == "fresh_implementation",
       fresh_checkpoint_present_at_turn_start: fresh_implementation_checkpoint_ready?(workspace)
     }
@@ -719,7 +720,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     @spec command_policy_violation_for_test(String.t(), String.t(), [String.t()]) ::
             :ok | {:error, String.t(), String.t()}
-    def command_policy_violation_for_test(workspace, command, configured_patterns)
+    def command_policy_violation_for_test(workspace, command, configured_patterns, worker_host \\ nil)
         when is_list(configured_patterns) do
       payload = %{"params" => %{"msg" => %{"command" => command}}}
       patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
@@ -727,7 +728,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       forbidden_command_violation(payload, %{
         patterns: patterns,
         configured_patterns: configured_patterns,
-        workspace: workspace
+        workspace: workspace,
+        worker_host: worker_host
       })
     end
 
@@ -2138,7 +2140,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       open_correction_blocks_review_classification?(command_for_patterns, workspace) ->
         {:error, command, "open_correction_requires_scoped_fix_before_review_feedback_classified"}
 
-      unsafe_playwright_correction_validation?(command_for_patterns, workspace) ->
+      unsafe_playwright_correction_validation?(command_for_patterns, workspace, Map.get(command_guard, :worker_host)) ->
         {:error, command, "playwright_browser_correction_requires_runtime_controller_handoff"}
 
       symlinked_vitest_full_test_command?(command_for_patterns, workspace) ->
@@ -2290,15 +2292,15 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp delivery_inbox_command_substitution?(_command), do: false
 
-  defp unsafe_playwright_correction_validation?(command, workspace)
+  defp unsafe_playwright_correction_validation?(command, workspace, worker_host)
        when is_binary(command) and is_binary(workspace) do
     playwright_test_command?(command) and
-      open_playwright_browser_correction?(workspace)
+      open_playwright_browser_correction?(workspace, worker_host)
   rescue
     _error -> false
   end
 
-  defp unsafe_playwright_correction_validation?(_command, _workspace), do: false
+  defp unsafe_playwright_correction_validation?(_command, _workspace, _worker_host), do: false
 
   defp playwright_test_command?(command) when is_binary(command) do
     command
@@ -2309,13 +2311,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp playwright_test_command?(_command), do: false
 
-  defp open_playwright_browser_correction?(workspace) when is_binary(workspace) do
+  defp open_playwright_browser_correction?(workspace, worker_host) when is_binary(workspace) do
     workspace
-    |> Workspace.open_blocking_corrections_in_workspace()
+    |> Workspace.open_blocking_corrections_in_workspace(worker_host)
     |> Enum.any?(&DispatchPreflight.playwright_browser_correction?/1)
   end
 
-  defp open_playwright_browser_correction?(_workspace), do: false
+  defp open_playwright_browser_correction?(_workspace, _worker_host), do: false
 
   defp symlinked_vitest_full_test_command?(command, workspace)
        when is_binary(command) and is_binary(workspace) do

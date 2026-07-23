@@ -303,10 +303,6 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp strict_review_rework_implementation_child?(_workspace), do: false
 
-  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
-       when recovery_count >= max_policy_recoveries,
-       do: :stop
-
   defp policy_violation_recovery_action(
          _workspace,
          _issue,
@@ -317,6 +313,10 @@ defmodule SymphonyElixir.AgentRunner do
          _worker_host
        ),
        do: {:parked, nil}
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
+       when recovery_count >= max_policy_recoveries,
+       do: :stop
 
   defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, worker_host)
        when is_binary(worker_host),

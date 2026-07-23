@@ -15159,7 +15159,7 @@ defmodule SymphonyElixir.CoreTest do
                issue,
                "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1",
                "playwright_browser_correction_requires_runtime_controller_handoff",
-               0,
+               2,
                2,
                "worker-a"
              )

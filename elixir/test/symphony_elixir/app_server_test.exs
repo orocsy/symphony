@@ -4545,6 +4545,57 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "remote command guard reads browser corrections from the worker workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-playwright-correction-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REMOTE-PLAYWRIGHT-CORRECTION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REMOTE-PLAYWRIGHT-CORRECTION",
+          "branch" => "orocsy/mt-remote-playwright-correction",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\0' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","resolved_at":null,"summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      command =
+        "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
+
+      assert {:error, ^command, "playwright_browser_correction_requires_runtime_controller_handoff"} =
+               AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows correction creation that quotes a blocked playwright command" do
     test_root =
       Path.join(
