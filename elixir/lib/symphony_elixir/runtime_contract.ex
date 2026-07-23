@@ -377,10 +377,18 @@ defmodule SymphonyElixir.RuntimeContract do
     trimmed == command and
       trimmed != "" and
       not String.contains?(trimmed, ["\n", "&&", "||", "|", ";", "`", "$(", ">", "<"]) and
+      validation_executable?(trimmed) and
       not shell_command_mode?(trimmed)
   end
 
   defp valid_validation_command?(_command), do: false
+
+  defp validation_executable?(command) do
+    command
+    |> OptionParser.split()
+    |> Enum.drop_while(&Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=.*/, &1))
+    |> Kernel.!=([])
+  end
 
   defp shell_command_mode?(command) do
     command

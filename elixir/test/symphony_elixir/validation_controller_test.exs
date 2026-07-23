@@ -662,6 +662,40 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts inherited tool-specific proxy credentials" do
+    env_key = "NPM_CONFIG_HTTPS_PROXY"
+    proxy_url = "http://tool-user:tool-password@proxy.example.test"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, proxy_url)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ proxy_url
+      refute evidence =~ "tool-user:tool-password"
+      assert evidence =~ "[REDACTED]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "redacts short inherited secret values at token boundaries" do
     env_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
     secret_value = "abc"
@@ -1869,6 +1903,33 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
   test "proxy changes allow an unparsed command failure retry" do
     env_key = "HTTPS_PROXY"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "http://expired-proxy.example.test")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = http://valid-proxy.example.test ] || { echo 'proxy rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "http://valid-proxy.example.test")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "tool-specific proxy changes allow an unparsed command failure retry" do
+    env_key = "YARN_HTTP_PROXY"
     previous_value = System.get_env(env_key)
     System.put_env(env_key, "http://expired-proxy.example.test")
 
