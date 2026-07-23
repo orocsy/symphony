@@ -434,6 +434,49 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts credentials embedded in leading proxy assignments" do
+    env_key = "HTTPS_PROXY"
+    proxy_url = "http://user:password@proxy.example.test"
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    issue = %{
+      issue
+      | description:
+          String.replace(
+            issue.description,
+            "- ./fake-test",
+            "- #{env_key}=#{proxy_url} ./fake-test"
+          )
+    }
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ proxy_url
+      refute evidence =~ "user:password"
+      refute event["command"] =~ proxy_url
+      refute event["command"] =~ "user:password"
+      assert event["command"] =~ "#{env_key}=[REDACTED]"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "does not sign a MIU when validation leaves the worktree dirty" do
     {workspace, issue} =
       workspace_and_issue("3 tests, 0 failures",
