@@ -693,8 +693,17 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   if Mix.env() == :test do
     def command_policy_violation_for_test(workspace, command) do
+      command_policy_violation_for_test(
+        workspace,
+        command,
+        Config.settings!().codex.forbidden_command_patterns
+      )
+    end
+
+    def command_policy_violation_for_test(workspace, command, configured_patterns)
+        when is_list(configured_patterns) do
       payload = %{"params" => %{"msg" => %{"command" => command}}}
-      patterns = effective_forbidden_command_patterns_for(workspace)
+      patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
       forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
     end
 

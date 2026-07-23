@@ -14839,6 +14839,11 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Runtime command policy (enforced by the Symphony command guard):"
 
       assert prompt =~
+               "`git log -N --oneline [--decorate|--no-decorate]` with `N` from 1 through 20"
+
+      assert prompt =~ "all other denied git history/diff commands"
+
+      assert prompt =~
                "Issue brief (`.codex/agentic/issue-briefs/MT-204.md`), inlined by the runtime"
 
       assert prompt =~ "Remove the no-op cards preference header."
@@ -14984,21 +14989,6 @@ defmodule SymphonyElixir.CoreTest do
       assert rendered =~ "design/Mobile\\ Top\\ Area\\.html"
       assert rendered =~ "design/state\\.svg"
       assert rendered =~ "design/export\\.png"
-
-      issue = %Issue{
-        identifier: "MT-DESIGN",
-        title: "Review design correction",
-        description: "Review rework prompt policy",
-        state: "Rework",
-        labels: []
-      }
-
-      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
-
-      assert prompt =~
-               "`git log -N --oneline [--decorate|--no-decorate]` with `N` from 1 through 20"
-
-      assert prompt =~ "all other denied git history/diff commands"
     after
       File.rm_rf(workspace)
     end

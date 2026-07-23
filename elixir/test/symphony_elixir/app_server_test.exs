@@ -1331,14 +1331,11 @@ defmodule SymphonyElixir.AppServerTest do
         })
       )
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        codex_forbidden_command_patterns: ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
-      )
-
       assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
                AppServer.command_policy_violation_for_test(
                  workspace,
-                 "git log -5 --oneline --decorate"
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
                )
     after
       File.rm_rf(workspace)
