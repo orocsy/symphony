@@ -1290,6 +1290,13 @@ defmodule SymphonyElixir.AppServerTest do
                  "/bin/zsh -lc 'git log -5 --oneline --decorate'"
                )
 
+      assert AppServer.bounded_git_log_exception_available_for_test(workspace, [])
+
+      refute AppServer.bounded_git_log_exception_available_for_test(
+               workspace,
+               ["(^|\\s|[\"'])git(\\s|$)"]
+             )
+
       assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
                AppServer.command_policy_violation_for_test(workspace, "git log --oneline")
 

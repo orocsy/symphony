@@ -662,7 +662,7 @@ defmodule SymphonyElixir.PromptBuilder do
         end
 
       bounded_log_note =
-        if review_rework_mode?(workspace) do
+        if AppServer.bounded_git_log_exception_available?(workspace) do
           "\n- Narrow exception: local checkpoint metadata may use only `git log -N --oneline [--decorate|--no-decorate]` with `N` from 1 through 20. Revision selectors, pathspecs, patch/stat/name output, other flags, and unbounded history remain denied."
         else
           ""
@@ -679,17 +679,6 @@ defmodule SymphonyElixir.PromptBuilder do
       |> String.trim()
     end
   end
-
-  defp review_rework_mode?(workspace) when is_binary(workspace) do
-    case DispatchPreflight.read(workspace) do
-      {:ok, %{"mode" => "review_rework"}} -> true
-      _ -> false
-    end
-  rescue
-    _error -> false
-  end
-
-  defp review_rework_mode?(_workspace), do: false
 
   defp effective_command_policy_patterns(workspace) do
     AppServer.effective_forbidden_command_patterns_for(workspace)

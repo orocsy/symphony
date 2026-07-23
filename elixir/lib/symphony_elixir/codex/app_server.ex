@@ -691,6 +691,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   def effective_forbidden_command_patterns_for(_workspace), do: []
 
+  @spec bounded_git_log_exception_available?(String.t()) :: boolean()
+  def bounded_git_log_exception_available?(workspace) when is_binary(workspace) do
+    bounded_git_log_exception_available?(
+      workspace,
+      Config.settings!().codex.forbidden_command_patterns
+    )
+  rescue
+    _error -> false
+  end
+
+  def bounded_git_log_exception_available?(_workspace), do: false
+
   if Mix.env() == :test do
     def command_policy_violation_for_test(workspace, command) do
       command_policy_violation_for_test(
@@ -707,9 +719,30 @@ defmodule SymphonyElixir.Codex.AppServer do
       forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
     end
 
+    def bounded_git_log_exception_available_for_test(workspace, configured_patterns)
+        when is_list(configured_patterns) do
+      bounded_git_log_exception_available?(workspace, configured_patterns)
+    end
+
     def worker_thread_overrides_for_test(params, workspace),
       do: maybe_put_worker_thread_overrides(params, workspace)
   end
+
+  defp bounded_git_log_exception_available?(workspace, configured_patterns)
+       when is_binary(workspace) and is_list(configured_patterns) do
+    payload = %{
+      "params" => %{
+        "msg" => %{"command" => "/bin/zsh -lc 'git log -5 --oneline --decorate'"}
+      }
+    }
+
+    patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
+
+    dispatch_preflight_mode(workspace) == "review_rework" and
+      forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace}) == :ok
+  end
+
+  defp bounded_git_log_exception_available?(_workspace, _configured_patterns), do: false
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case dispatch_preflight_mode(workspace) do
