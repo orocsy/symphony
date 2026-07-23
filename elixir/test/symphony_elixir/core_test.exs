@@ -15083,6 +15083,37 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner does not retry worker commands reserved for the runtime controller" do
+    issue = %Issue{
+      id: "issue-controller-handoff",
+      identifier: "MT-CONTROLLER-HANDOFF",
+      title: "Controller handoff",
+      state: "Rework",
+      labels: []
+    }
+
+    assert :stop =
+             AgentRunner.policy_violation_recovery_action_for_test(
+               System.tmp_dir!(),
+               issue,
+               "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1",
+               "playwright_browser_correction_requires_runtime_controller_handoff",
+               0,
+               2
+             )
+
+    assert :stop =
+             AgentRunner.policy_violation_recovery_action_for_test(
+               System.tmp_dir!(),
+               issue,
+               "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1",
+               "playwright_browser_correction_requires_runtime_controller_handoff",
+               0,
+               2,
+               "worker-a"
+             )
+  end
+
   test "safe direct import read writes read-context policy patch and retries once" do
     test_root =
       Path.join(

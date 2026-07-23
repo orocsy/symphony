@@ -25,6 +25,7 @@ defmodule SymphonyElixir.AgentRunner do
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
   @strict_review_rework_policy_violation_recoveries 1
+  @runtime_controller_handoff_policy_pattern "playwright_browser_correction_requires_runtime_controller_handoff"
 
   @type worker_host :: String.t() | nil
 
@@ -304,6 +305,17 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
        when recovery_count >= max_policy_recoveries,
+       do: :stop
+
+  defp policy_violation_recovery_action(
+         _workspace,
+         _issue,
+         _command,
+         @runtime_controller_handoff_policy_pattern,
+         _recovery_count,
+         _max_policy_recoveries,
+         _worker_host
+       ),
        do: :stop
 
   defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, worker_host)
