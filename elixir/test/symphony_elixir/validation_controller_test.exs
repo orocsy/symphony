@@ -349,6 +349,34 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "resolves validation executables from the captured PATH assignment" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+    bin_dir = Path.join(workspace, ".orocsy/captured-bin")
+    executable = Path.join(bin_dir, "captured-test")
+    File.mkdir_p!(bin_dir)
+    File.write!(executable, "#!/bin/sh\necho '3 tests, 0 failures'\n")
+    File.chmod!(executable, 0o755)
+
+    issue = %{
+      issue
+      | description:
+          String.replace(
+            issue.description,
+            "- ./fake-test",
+            "- PATH=#{bin_dir} captured-test"
+          )
+    }
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "redacts secrets from leading environment assignments" do
     env_key = "SYMPHONY_VALIDATION_LOCAL_API_KEY"
     secret_value = "command-local-secret"

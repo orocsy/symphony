@@ -668,7 +668,7 @@ defmodule SymphonyElixir.ValidationController do
     case OptionParser.split(command) do
       parts when parts != [] ->
         {_env, [executable | args]} = split_env_assignments(parts)
-        executable = resolve_executable(executable, workspace)
+        executable = resolve_executable(executable, workspace, environment.executable_path)
         port = open_command_port(executable, args, workspace, environment.child_environment)
 
         sensitive_values = environment.sensitive_values
@@ -823,6 +823,7 @@ defmodule SymphonyElixir.ValidationController do
 
     %{
       child_environment: Enum.map(effective_environment, fn {key, value} -> "#{key}=#{value}" end),
+      executable_path: Map.get(effective_environment, "PATH", ""),
       environment_fingerprint: environment_fingerprint(workspace, effective_environment),
       repair_environment_fingerprint: repair_environment_fingerprint(effective_environment),
       sensitive_values: sensitive_values,
@@ -1340,11 +1341,34 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp resolve_executable(executable, workspace) do
+  defp resolve_executable(executable, workspace, executable_path) do
     cond do
       String.starts_with?(executable, "./") -> Path.expand(executable, workspace)
-      path = System.find_executable(executable) -> path
+      Path.type(executable) == :absolute -> executable
+      String.contains?(executable, "/") -> Path.expand(executable, workspace)
+      path = find_executable(executable, executable_path, workspace) -> path
       true -> raise "validation executable not found: #{executable}"
+    end
+  end
+
+  defp find_executable(executable, executable_path, workspace) do
+    executable_path
+    |> String.split(path_separator())
+    |> Enum.find_value(fn
+      "" -> executable_candidate(workspace, executable)
+      directory -> executable_candidate(directory, executable)
+    end)
+  end
+
+  defp executable_candidate(directory, executable) do
+    candidate = Path.join(directory, executable)
+    if File.regular?(candidate), do: candidate
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _unix -> ":"
     end
   end
 
