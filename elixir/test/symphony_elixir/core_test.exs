@@ -343,6 +343,74 @@ defmodule SymphonyElixir.CoreTest do
         })
       )
 
+      File.write!(
+        Path.join(inbox, "correction_20260722000000_stale_provider.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260722000000_stale_provider",
+          "status" => "open",
+          "source" => "codex.review-rework",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Focused Playwright validation could not launch Chrome",
+          "findings" => ["Chrome exited with SIGABRT before the test executed."],
+          "required_corrections" => ["Retry outside the worker sandbox."]
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "dispatch gate treats a launched Chromium sandbox-behavior failure as actionable product rework" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-browser-product-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-browser-product-correction",
+        identifier: "COD-BROWSER-PRODUCT",
+        title: "Browser product correction",
+        state: "Rework"
+      }
+
+      inbox = Path.join([workspace_root, issue.identifier, ".orocsy/delivery/inbox"])
+      File.mkdir_p!(inbox)
+
+      correction = %{
+        "correction_id" => "correction_20260723000002_product",
+        "status" => "open",
+        "source" => "codex.review-rework",
+        "next_action" => "retry",
+        "resolved_at" => nil,
+        "summary" => "Playwright Chromium sandbox behavior test failed",
+        "findings" => [
+          "tests/e2e/browser-sandbox.spec.ts failed after Chrome launched and the application assertion failed."
+        ],
+        "required_corrections" => [
+          "Fix tests/e2e/browser-sandbox.spec.ts and rerun the focused test."
+        ]
+      }
+
+      File.write!(
+        Path.join(inbox, "correction_20260723000002_product.json"),
+        Jason.encode!(correction)
+      )
+
+      refute SymphonyElixir.DispatchPreflight.playwright_browser_correction?(correction)
+
       state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
       assert Orchestrator.should_dispatch_issue_for_test(issue, state)
@@ -2672,6 +2740,7 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(state.claimed, issue_id)
       assert MapSet.member?(state.completed, issue_id)
       refute Map.has_key?(state.retry_attempts, issue_id)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
@@ -8380,6 +8449,9 @@ defmodule SymphonyElixir.CoreTest do
       reviewed_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
       assert reviewed_prompt =~ "Dirty validated handoff checkpoint"
       assert reviewed_prompt =~ "without another edit or duplicate validation"
+      assert reviewed_prompt =~ "Current-head review feedback"
+      assert reviewed_prompt =~ "Keep the analytics handoff bounded."
+      assert reviewed_prompt =~ "do not commit or request review until"
       refute reviewed_prompt =~ "Mode: review rework"
     after
       File.rm_rf(test_root)
@@ -21172,6 +21244,51 @@ defmodule SymphonyElixir.CoreTest do
 
       assert_receive {:pending_transition_reconciled, issue_state_fetcher}
       assert is_function(issue_state_fetcher, 1)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "controller-owned browser handoff reconciles its pending request before parking" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-parked-transition-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "handoff.requested",
+        "event_id" => "request-before-browser-park",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    issue = %Issue{
+      id: "issue-controller-parked-transition",
+      identifier: "MT-CONTROLLER-PARK",
+      title: "Controller parked transition",
+      state: "Rework"
+    }
+
+    test_pid = self()
+
+    try do
+      assert :ok =
+               AgentRunner.reconcile_controller_handoff_after_park_for_test(
+                 "playwright_browser_correction_requires_runtime_controller_handoff",
+                 workspace,
+                 issue,
+                 runtime_transition_processor: fn _, _, _ ->
+                   send(test_pid, :controller_park_transition_processed)
+                   {:none, {:ok, %{"event" => "handoff.ready"}}}
+                 end
+               )
+
+      assert_receive :controller_park_transition_processed
     after
       File.rm_rf(workspace)
     end

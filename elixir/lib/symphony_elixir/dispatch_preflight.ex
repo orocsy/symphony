@@ -1510,6 +1510,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_prompt_context(preflight) do
     requirements = preflight["requirements"] || %{}
     review = preflight["review"] || %{}
+    feedback = review["feedback"] || []
     open_corrections = preflight["open_corrections"] || []
     correction_active? = open_corrections != []
 
@@ -1526,7 +1527,11 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Runtime preflight is not worker progress and is not proof that certification, push, or review handoff is complete.
       - First task: #{preflight["first_task"]}
       - Open Orocsy corrections: #{format_corrections(open_corrections)}
+      - Target current-head feedback file(s): #{format_inline_items(feedback_paths(feedback))}
       - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
+
+      Current-head review feedback:
+      #{format_items(feedback)}
 
       Structured recovery limits:
       - The Runtime Contract execution/final handoff gate prepended above is authoritative. Do not substitute `gate.post-miu`, `technical-miu-trace`, or a worker-created validation event.
@@ -1534,6 +1539,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - For a final handoff gate, do not create another MIU commit. Push the canonical branch, verify upstream equality, ensure the PR exists, append `handoff.requested`, and stop.
       - Do not run contract-declared validation inside the Codex worker. The validation controller runs it after the runtime request and writes exact failure evidence into an Orocsy correction when a fix is needed.
       - When a matching MIU validation correction is open, use its supplied command output to make the smallest in-scope fix. Do not manually resolve it; successful controller certification resolves it.
+      - When current-head review feedback is listed, the recovered delta must address that feedback before final handoff certification.
       - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
       """
       |> String.trim()
@@ -1550,10 +1556,14 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
       - First task: #{preflight["first_task"]}
       - Open Orocsy corrections: #{format_corrections(open_corrections)}
+      - Target current-head feedback file(s): #{format_inline_items(feedback_paths(feedback))}
       - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
       - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
       - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
       - Validation command guidance: #{preflight["validation_command_guidance"] || validation_guidance(preflight["toolchain"], open_corrections)}
+
+      Current-head review feedback:
+      #{format_items(feedback)}
 
       Handoff recovery limits:
       - If an open Orocsy correction is listed above, inspect the focused dirty delta against its named paths first. When the existing delta addresses the correction and the checkpoint lists current passed evidence for that unchanged delta, resolve the correction and continue handoff without another edit or duplicate validation. Otherwise start from the exact correction path and do not commit, push, or request review until the correction is fixed or explicitly blocked.
@@ -1562,6 +1572,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - If the focused diff is complete and the dirty handoff checkpoint already lists current passed validation/gate evidence for those dirty files, do not rerun the same validation command; use the recorded evidence, then commit, push the current branch, and request/update Codex review.
       - If validation evidence is missing, stale, or the focused diff changed after evidence was recorded, run the smallest validation for the dirty files before committing.
       - If focused validation fails and names exact in-scope files, assertions, missing columns, missing exports, or required contract symbols, make that smallest in-scope fix first, rerun the same focused validation, then continue handoff.
+      - When current-head review feedback is listed, do not commit or request review until the focused dirty delta addresses every listed in-scope finding.
       - Record an Orocsy correction and stop only when validation lacks an actionable in-scope target, a required dependency/credential is missing, permissions block the command, or the needed edit is outside the issue write scope.
       """
       |> String.trim()
@@ -1730,8 +1741,25 @@ defmodule SymphonyElixir.DispatchPreflight do
       |> Enum.join("\n")
       |> String.downcase()
 
-    String.contains?(text, ["playwright", "chrome", "chromium"]) and
+    browser_command? = String.contains?(text, ["playwright", "chrome", "chromium"])
+
+    launch_failure? =
+      String.contains?(text, [
+        "could not launch",
+        "cannot launch",
+        "failed to launch",
+        "launch failed",
+        "did not execute because",
+        "exited with sigabrt",
+        "exited sigabrt",
+        "executable missing",
+        "local-browsers"
+      ])
+
+    environment_failure? =
       String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"])
+
+    browser_command? and launch_failure? and environment_failure?
   end
 
   def playwright_browser_correction?(_correction), do: false

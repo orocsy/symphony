@@ -2759,7 +2759,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed} = state,
+         %State{running: running, claimed: claimed, completed: completed} = state,
          active_states,
          terminal_states
        ) do
@@ -2767,6 +2767,7 @@ defmodule SymphonyElixir.Orchestrator do
       !issue_blocked_by_non_terminal?(issue, terminal_states) and
       workflow_correction_gate_allows_dispatch?(issue) and
       !review_rework_review_request_pending?(issue) and
+      !completed_pushed_handoff_hold?(issue, completed) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -2775,6 +2776,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp completed_pushed_handoff_hold?(%Issue{} = issue, completed) do
+    monitor = Config.settings!().review_monitor
+
+    not monitor.enabled and
+      MapSet.member?(completed, issue.id) and
+      current_signed_handoff_head?(issue)
+  end
+
+  defp completed_pushed_handoff_hold?(_issue, _completed), do: false
+
+  defp current_signed_handoff_head?(%Issue{} = issue) do
+    with {:ok, workspace} <- Workspace.path_for_issue(issue),
+         {:ok, signed_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
+         {:ok, current_head} <- git_output(workspace, ["rev-parse", "HEAD"]) do
+      signed_head == String.trim(current_head)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -5097,9 +5120,6 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, branch_output} <- git_output(workspace, ["branch", "--show-current"]),
          branch = String.trim(branch_output),
          true <- handoff_branch_name?(branch),
-         {:ok, head_output} <- git_output(workspace, ["rev-parse", "HEAD"]),
-         head = String.trim(head_output),
-         true <- pushed_branch_head_matches?(workspace, branch, head),
          %DateTime{} = committed_at <- git_head_committed_at(workspace),
          true <- datetime_at_or_after?(committed_at, started_at),
          true <- pushed_validated_handoff_stop?(workspace, issue) do
@@ -5112,34 +5132,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp fresh_clean_pushed_handoff_stop?(_running_entry, _mode), do: false
-
-  defp pushed_branch_head_matches?(workspace, branch, head)
-       when is_binary(workspace) and is_binary(branch) and is_binary(head) do
-    local_remote_ref_matches?(workspace, branch, head) or
-      live_remote_ref_matches?(workspace, branch, head)
-  end
-
-  defp pushed_branch_head_matches?(_workspace, _branch, _head), do: false
-
-  defp local_remote_ref_matches?(workspace, branch, head) do
-    case git_output(workspace, ["rev-parse", "--verify", "refs/remotes/origin/#{branch}"]) do
-      {:ok, remote_output} -> String.trim(remote_output) == head
-      _ -> false
-    end
-  end
-
-  defp live_remote_ref_matches?(workspace, branch, head) do
-    case git_output(workspace, ["ls-remote", "--heads", "origin", "refs/heads/#{branch}"]) do
-      {:ok, output} ->
-        case String.split(String.trim(output), ~r/\s+/, parts: 2) do
-          [remote_head, _ref] -> remote_head == head
-          _ -> false
-        end
-
-      _ ->
-        false
-    end
-  end
 
   defp pushed_validated_handoff_stop?(workspace, %Issue{} = issue) when is_binary(workspace) do
     match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace))
@@ -5305,7 +5297,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp correction_block_check_target_dispatchable_retry?(_target), do: false
 
   defp dispatchable_retry_corrections?(corrections, workspace_path) when is_list(corrections) do
-    corrections != [] and Enum.all?(corrections, &dispatchable_retry_correction?(&1, workspace_path))
+    actionable =
+      if Enum.any?(corrections, &controller_validation_retry_correction?/1) do
+        Enum.reject(corrections, &worker_browser_provider_correction?/1)
+      else
+        corrections
+      end
+
+    actionable != [] and
+      Enum.all?(actionable, &dispatchable_retry_correction?(&1, workspace_path))
   end
 
   defp dispatchable_retry_corrections?(_corrections, _workspace_path), do: false
@@ -5327,6 +5327,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp worker_browser_provider_correction?(_correction), do: false
+
+  defp controller_validation_retry_correction?(%{} = correction) do
+    normalize_correction_value(correction["source"]) ==
+      "symphony.runtime.validation-controller" and
+      normalize_correction_value(correction["next_action"]) == "retry"
+  end
+
+  defp controller_validation_retry_correction?(_correction), do: false
 
   defp retry_fingerprint_changed?(%{"guard" => %{"retry_fingerprint" => %{} = stored}} = correction, workspace_path)
        when is_binary(workspace_path) do

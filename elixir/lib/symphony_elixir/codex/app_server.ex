@@ -722,7 +722,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     @spec command_policy_violation_for_test(String.t(), String.t(), [String.t()]) ::
             :ok | {:error, String.t(), String.t()}
-    def command_policy_violation_for_test(workspace, command, configured_patterns, worker_host \\ nil)
+    def command_policy_violation_for_test(workspace, command, configured_patterns) do
+      command_policy_violation_for_test(workspace, command, configured_patterns, nil)
+    end
+
+    @spec command_policy_violation_for_test(
+            String.t(),
+            String.t(),
+            [String.t()],
+            String.t() | nil
+          ) ::
+            :ok | {:error, String.t(), String.t()}
+    def command_policy_violation_for_test(workspace, command, configured_patterns, worker_host)
         when is_list(configured_patterns) do
       payload = %{"params" => %{"msg" => %{"command" => command}}}
       patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
@@ -2009,8 +2020,14 @@ defmodule SymphonyElixir.Codex.AppServer do
         case forbidden_command_violation(payload, command_guard) do
           {:error, command, pattern} ->
             case resolve_scope_access_violation(command_guard, command, pattern) do
-              {:allow, decision} ->
-                record_scope_access_events(command_guard, command, pattern, decision)
+              {:allow, {:scope_access_decision, decision, policy}} ->
+                record_scope_access_events(
+                  command_guard,
+                  command,
+                  pattern,
+                  decision,
+                  policy
+                )
 
                 handle_allowed_turn_method(
                   port,
@@ -2284,6 +2301,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp record_scope_access_events(command_guard, command, pattern, _decision),
     do: record_scope_access_events(command_guard, command, pattern)
 
+  defp record_scope_access_events(
+         %{workspace: workspace},
+         command,
+         pattern,
+         decision,
+         policy
+       )
+       when is_binary(workspace) and is_binary(command) and is_binary(pattern) and
+              is_map(decision) and is_map(policy) do
+    command
+    |> ScopeAccess.events(pattern, policy, scope_access_attrs(workspace), decision)
+    |> Enum.each(&append_scope_access_event(workspace, &1))
+  rescue
+    error ->
+      Logger.warning("Failed to record resolved scope access events: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_scope_access_events(command_guard, command, pattern, decision, _policy),
+    do: record_scope_access_events(command_guard, command, pattern, decision)
+
   defp scope_access_events(workspace, command, pattern) do
     ScopeAccess.events(command, pattern, scope_access_policy(workspace), scope_access_attrs(workspace))
   end
@@ -2325,7 +2363,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             if scope_access_command_eligible?(command, request) do
               case ScopeAccessController.write_policy_patch(workspace, patch) do
                 {:ok, written_patch} ->
-                  {:allow, written_patch}
+                  {:allow, {:scope_access_decision, written_patch, policy}}
 
                 {:error, reason} ->
                   decision =

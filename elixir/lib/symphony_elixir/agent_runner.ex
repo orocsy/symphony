@@ -117,6 +117,9 @@ defmodule SymphonyElixir.AgentRunner do
     def reconcile_pending_runtime_transition_for_test(workspace, issue, opts),
       do: reconcile_pending_runtime_transition(workspace, issue, opts)
 
+    def reconcile_controller_handoff_after_park_for_test(pattern, workspace, issue, opts),
+      do: reconcile_controller_handoff_after_park(pattern, workspace, issue, opts)
+
     def policy_violation_recovery_action_for_test(
           workspace,
           issue,
@@ -260,7 +263,7 @@ defmodule SymphonyElixir.AgentRunner do
               worker_host
             )
 
-            :ok
+            reconcile_controller_handoff_after_park(pattern, workspace, issue, opts)
 
           :stop ->
             result
@@ -278,6 +281,22 @@ defmodule SymphonyElixir.AgentRunner do
       @max_policy_violation_recoveries
     end
   end
+
+  defp reconcile_controller_handoff_after_park(
+         @runtime_controller_handoff_policy_pattern,
+         workspace,
+         %Issue{} = issue,
+         opts
+       )
+       when is_binary(workspace) and is_list(opts) do
+    case reconcile_pending_runtime_transition(workspace, issue, opts) do
+      {:error, _reason} = error -> error
+      _transition_result -> :ok
+    end
+  end
+
+  defp reconcile_controller_handoff_after_park(_pattern, _workspace, _issue, _opts),
+    do: :ok
 
   defp consume_turn_policy_patches(workspace) when is_binary(workspace) do
     DispatchPreflight.consume_turn_policy_patches(workspace)

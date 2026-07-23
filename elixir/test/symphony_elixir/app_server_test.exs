@@ -1077,6 +1077,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       events = delivery_events!(workspace)
       assert Enum.count(events, &(&1["event"] == "scope.access.requested")) == 1
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
 
       decisions = Enum.filter(events, &(&1["event"] == "scope.access.decided"))
       assert length(decisions) == 1
@@ -1095,6 +1096,9 @@ defmodule SymphonyElixir.AppServerTest do
       [patch_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
       patch = patch_path |> File.read!() |> Jason.decode!()
       assert patch["status"] == "active"
+      assert requested["policy_hash"] == patch["policy_hash_before"]
+      assert hd(decisions)["policy_hash"] == patch["policy_hash_before"]
+      assert requested["request_id"] == hd(decisions)["request_id"]
     after
       File.rm_rf(test_root)
     end
