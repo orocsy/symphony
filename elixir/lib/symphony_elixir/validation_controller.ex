@@ -14,12 +14,12 @@ defmodule SymphonyElixir.ValidationController do
   @max_capture_bytes 1_000_000
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
-  @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
+  @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|pat|jwt|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
   @sensitive_proxy_env_key ~r/^(?:HTTP|HTTPS|ALL)_PROXY$/i
   @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
   @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
   @repair_env_key ~r/^(?:(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO)$/i
-  @repair_provider_env_key ~r/^(?:OPENAI|ANTHROPIC|AZURE_OPENAI|GOOGLE|GEMINI|DEEPSEEK|OPENROUTER|AWS|CLOUDFLARE|LINEAR|GITHUB|SENTRY|HONEYCOMB|OTEL|DATABASE|DB|POSTGRES|PG|MYSQL|REDIS|MONGO|MONGODB)_(?:[A-Z0-9]+_)*(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG)$/i
+  @repair_provider_env_key ~r/^(?!(?:CI|BUILD|RUNNER|JOB|WORKFLOW|STEP)_)[A-Z][A-Z0-9_]*_(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE)$/i
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -1355,12 +1355,17 @@ defmodule SymphonyElixir.ValidationController do
     executable_path
     |> String.split(path_separator())
     |> Enum.find_value(fn
-      "" -> executable_candidate(workspace, executable)
-      directory -> executable_candidate(directory, executable)
+      "" -> executable_candidate(workspace, executable, workspace)
+      directory -> executable_candidate(directory, executable, workspace)
     end)
   end
 
-  defp executable_candidate(directory, executable) do
+  defp executable_candidate(directory, executable, workspace) do
+    directory =
+      if Path.type(directory) == :relative,
+        do: Path.expand(directory, workspace),
+        else: directory
+
     candidate = Path.join(directory, executable)
     if File.regular?(candidate), do: candidate
   end

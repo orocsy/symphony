@@ -351,7 +351,8 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
   test "resolves validation executables from the captured PATH assignment" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
-    bin_dir = Path.join(workspace, ".orocsy/captured-bin")
+    path_entry = ".orocsy/captured-bin"
+    bin_dir = Path.join(workspace, path_entry)
     executable = Path.join(bin_dir, "captured-test")
     File.mkdir_p!(bin_dir)
     File.write!(executable, "#!/bin/sh\necho '3 tests, 0 failures'\n")
@@ -363,7 +364,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
           String.replace(
             issue.description,
             "- ./fake-test",
-            "- PATH=#{bin_dir} captured-test"
+            "- PATH=#{path_entry} captured-test"
           )
     }
 
@@ -564,6 +565,39 @@ defmodule SymphonyElixir.ValidationControllerTest do
   test "redacts inherited secret values from validation evidence" do
     env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
     secret_value = "tests"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ secret_value
+      assert evidence =~ "[REDACTED]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "redacts inherited personal access tokens" do
+    env_key = "GITHUB_PAT"
+    secret_value = "github-personal-access-secret"
     previous_value = System.get_env(env_key)
     System.put_env(env_key, secret_value)
 
@@ -1761,6 +1795,33 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert first["reason_class"] == "command_failed"
       System.put_env(env_key, "https://valid.example.test")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "unlisted provider connection changes allow an unparsed command failure retry" do
+    env_key = "OLLAMA_HOST"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "http://expired.example.test")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = http://valid.example.test ] || { echo 'provider rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "http://valid.example.test")
 
       assert {:ok, certificate} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
