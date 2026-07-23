@@ -1278,6 +1278,21 @@ defmodule SymphonyElixir.AppServerTest do
                  "git diff --name-only --no-renames origin/main...HEAD"
                )
 
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "/bin/zsh -lc 'git log -4 --oneline'"
+               )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log --oneline")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log -21 --oneline")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log -4 --oneline --patch")
+
       assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
                AppServer.command_policy_violation_for_test(
                  workspace,

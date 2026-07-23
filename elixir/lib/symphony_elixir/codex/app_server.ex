@@ -2093,6 +2093,9 @@ defmodule SymphonyElixir.Codex.AppServer do
               scope_audit_allowed?(command_for_patterns, workspace) ->
             :ok
 
+          git_log_pattern?(match) and bounded_git_log_metadata_allowed?(command_for_patterns) ->
+            :ok
+
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -2700,6 +2703,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp grep_pattern?(_pattern), do: false
   defp rg_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "rg")
   defp rg_pattern?(_pattern), do: false
+  defp git_log_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "git\\s+log")
+  defp git_log_pattern?(_pattern), do: false
+
+  defp bounded_git_log_metadata_allowed?(command) when is_binary(command) do
+    case Regex.run(
+           ~r/(?:^|[\s"'])git\s+log\s+-(\d{1,2})\s+--oneline(?:\s+--no-decorate)?(?=["']|$)/,
+           command,
+           capture: :all_but_first
+         ) do
+      [count] ->
+        case Integer.parse(count) do
+          {value, ""} -> value in 1..20
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp bounded_git_log_metadata_allowed?(_command), do: false
 
   defp integration_check_allowed_ref_names(preflight) when is_map(preflight) do
     requirements =
