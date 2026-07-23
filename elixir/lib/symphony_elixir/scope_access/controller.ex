@@ -318,9 +318,16 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   end
 
   defp policy_patch_exists?(workspace, request) when is_binary(workspace) do
-    workspace
-    |> policy_patch_path(patch_id(request))
-    |> File.regular?()
+    path = policy_patch_path(workspace, patch_id(request))
+
+    with true <- File.regular?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{} = patch} <- Jason.decode(body) do
+      Map.get(patch, "status", "active") == "active"
+    else
+      false -> false
+      _ -> true
+    end
   end
 
   defp policy_patch_exists?(_workspace, _request), do: false

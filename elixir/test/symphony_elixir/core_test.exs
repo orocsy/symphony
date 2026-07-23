@@ -15370,6 +15370,22 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^command, ^pattern} =
                AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:retry, 1, renewed_scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 command,
+                 pattern,
+                 0,
+                 1
+               )
+
+      assert renewed_scope_access["decision"] == "allow_once"
+      assert renewed_scope_access["reason_class"] == "safe_read_context"
+
+      renewed_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert renewed_patch["status"] == "active"
     after
       File.rm_rf(test_root)
     end
