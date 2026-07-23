@@ -2509,6 +2509,172 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "token budget exit after a fresh validated sparse-fetch push does not retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-token-budget-pushed-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      origin = Path.join(test_root, "origin.git")
+      issue_id = "issue-token-budget-pushed-handoff"
+      branch = "orocsy/cod-300-desktop-guest-setup"
+
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "origin", "HEAD:refs/heads/#{branch}"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+      File.write!(Path.join(workspace, "guest-setup.tsx"), "export const guestSetup = true;\n")
+      assert {_output, 0} = System.cmd("git", ["add", "guest-setup.tsx"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Implement guest setup"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", "HEAD"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+
+      assert {remote_head, 0} =
+               System.cmd("git", ["rev-parse", "refs/remotes/origin/#{branch}"], cd: workspace)
+
+      refute String.trim(head) == String.trim(remote_head)
+
+      assert {live_remote, 0} =
+               System.cmd("git", ["ls-remote", "--heads", "origin", "refs/heads/#{branch}"], cd: workspace)
+
+      assert String.starts_with?(live_remote, String.trim(head))
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "handoff_recovery"}, pretty: true) <> "\n"
+      )
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+        Jason.encode!(%{
+          "event" => "tool.finished",
+          "status" => "passed",
+          "tool" => "vitest",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "COD-300",
+        state: "Rework",
+        title: "Desktop guest setup handoff",
+        description: "The worker pushed its validated correction.",
+        branch_name: branch,
+        labels: []
+      }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        max_failed_worker_retries: 3
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :TokenBudgetPushedHandoffOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: started_at,
+        workspace_path: workspace
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed: {:turn_token_budget_exceeded, 733_209, 700_000}"}, []}}
+      )
+
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert MapSet.member?(state.completed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "token budget worker with fresh upstream progress schedules recovery retry" do
     test_root =
       Path.join(

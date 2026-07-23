@@ -201,6 +201,15 @@ defmodule SymphonyElixir.Orchestrator do
 
             _ ->
               cond do
+                token_budget_pushed_handoff_stop?(reason, running_entry) ->
+                  Logger.warning(
+                    "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} after a fresh validated push; blocking retry until review/Linear state changes"
+                  )
+
+                  state
+                  |> complete_issue(issue_id)
+                  |> release_issue_claim(issue_id)
+
                 provider_usage_limit_failure?(reason) ->
                   Logger.warning(
                     "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} after Codex provider usage limit; parking until worker quota is available"
@@ -5059,6 +5068,75 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp normal_completion_handoff_stop?(_running_entry), do: false
+
+  defp token_budget_pushed_handoff_stop?(reason, %{workspace_path: workspace} = running_entry)
+       when is_binary(workspace) do
+    with %{kind: "token-budget"} <- classify_agent_failure(reason),
+         false <- workflow_blocked_by_open_correction?(running_entry),
+         {:ok, %{"mode" => mode}} <- DispatchPreflight.read(workspace) do
+      fresh_clean_pushed_handoff_stop?(running_entry, mode)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp token_budget_pushed_handoff_stop?(_reason, _running_entry), do: false
+
+  defp fresh_clean_pushed_handoff_stop?(
+         %{workspace_path: workspace, started_at: %DateTime{} = started_at},
+         mode
+       )
+       when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] do
+    with [] <- meaningful_git_dirty_paths(workspace),
+         {:ok, branch_output} <- git_output(workspace, ["branch", "--show-current"]),
+         branch = String.trim(branch_output),
+         true <- handoff_branch_name?(branch),
+         {:ok, head_output} <- git_output(workspace, ["rev-parse", "HEAD"]),
+         head = String.trim(head_output),
+         true <- pushed_branch_head_matches?(workspace, branch, head),
+         %DateTime{} = committed_at <- git_head_committed_at(workspace),
+         true <- datetime_at_or_after?(committed_at, started_at),
+         progress when progress != [] <-
+           event_durable_progress_times(workspace, started_at, false) do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp fresh_clean_pushed_handoff_stop?(_running_entry, _mode), do: false
+
+  defp pushed_branch_head_matches?(workspace, branch, head)
+       when is_binary(workspace) and is_binary(branch) and is_binary(head) do
+    local_remote_ref_matches?(workspace, branch, head) or
+      live_remote_ref_matches?(workspace, branch, head)
+  end
+
+  defp pushed_branch_head_matches?(_workspace, _branch, _head), do: false
+
+  defp local_remote_ref_matches?(workspace, branch, head) do
+    case git_output(workspace, ["rev-parse", "--verify", "refs/remotes/origin/#{branch}"]) do
+      {:ok, remote_output} -> String.trim(remote_output) == head
+      _ -> false
+    end
+  end
+
+  defp live_remote_ref_matches?(workspace, branch, head) do
+    case git_output(workspace, ["ls-remote", "--heads", "origin", "refs/heads/#{branch}"]) do
+      {:ok, output} ->
+        case String.split(String.trim(output), ~r/\s+/, parts: 2) do
+          [remote_head, _ref] -> remote_head == head
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
 
   defp pushed_validated_handoff_stop?(workspace, %Issue{} = issue) when is_binary(workspace) do
     match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace))
