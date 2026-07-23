@@ -1297,6 +1297,25 @@ defmodule SymphonyElixir.AppServerTest do
                ["(^|\\s|[\"'])git(\\s|$)"]
              )
 
+      refute AppServer.bounded_git_log_exception_available_for_test(
+               workspace,
+               ["(^|\\s|[\"'])git\\s+log\\s+-5"]
+             )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log\\s+-5"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log\\s+-5"]
+               )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
+               )
+
       assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
                AppServer.command_policy_violation_for_test(workspace, "git log --oneline")
 

@@ -63,6 +63,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @review_rework_command_chain_pattern "command_chain_operator_outside_quotes"
   @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
   @review_rework_dirty_validated_handoff_recheck_pattern "dirty_validated_handoff_recheck_before_commit"
+  @review_rework_git_log_pattern "(^|\\s|[\"'])git\\s+log(\\s|$)"
   @review_rework_forbidden_command_patterns [
     @review_rework_command_chain_pattern,
     @review_rework_dirty_validated_handoff_recheck_pattern,
@@ -70,7 +71,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
     "(^|\\s|[\"'])find(\\s|$)",
-    "(^|\\s|[\"'])git\\s+log(\\s|$)",
+    @review_rework_git_log_pattern,
     "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
     @review_rework_git_diff_base_pattern,
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
@@ -160,10 +161,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
-    forbidden_command_patterns = effective_forbidden_command_patterns(workspace, forbidden_command_patterns)
+    configured_forbidden_command_patterns = forbidden_command_patterns
+    forbidden_command_patterns = effective_forbidden_command_patterns(workspace, configured_forbidden_command_patterns)
 
     command_guard = %{
       patterns: forbidden_command_patterns,
+      configured_patterns: configured_forbidden_command_patterns,
       workspace: workspace,
       fresh_checkpoint_stop_enabled: dispatch_preflight_mode(workspace) == "fresh_implementation",
       fresh_checkpoint_present_at_turn_start: fresh_implementation_checkpoint_ready?(workspace)
@@ -704,6 +707,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   def bounded_git_log_exception_available?(_workspace), do: false
 
   if Mix.env() == :test do
+    @spec command_policy_violation_for_test(String.t(), String.t()) ::
+            :ok | {:error, String.t(), String.t()}
     def command_policy_violation_for_test(workspace, command) do
       command_policy_violation_for_test(
         workspace,
@@ -712,13 +717,21 @@ defmodule SymphonyElixir.Codex.AppServer do
       )
     end
 
+    @spec command_policy_violation_for_test(String.t(), String.t(), [String.t()]) ::
+            :ok | {:error, String.t(), String.t()}
     def command_policy_violation_for_test(workspace, command, configured_patterns)
         when is_list(configured_patterns) do
       payload = %{"params" => %{"msg" => %{"command" => command}}}
       patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
-      forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
+
+      forbidden_command_violation(payload, %{
+        patterns: patterns,
+        configured_patterns: configured_patterns,
+        workspace: workspace
+      })
     end
 
+    @spec bounded_git_log_exception_available_for_test(String.t(), [String.t()]) :: boolean()
     def bounded_git_log_exception_available_for_test(workspace, configured_patterns)
         when is_list(configured_patterns) do
       bounded_git_log_exception_available?(workspace, configured_patterns)
@@ -739,7 +752,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
 
     dispatch_preflight_mode(workspace) == "review_rework" and
-      forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace}) == :ok
+      forbidden_command_violation(payload, %{
+        patterns: patterns,
+        configured_patterns: configured_patterns,
+        workspace: workspace
+      }) == :ok
   end
 
   defp bounded_git_log_exception_available?(_workspace, _configured_patterns), do: false
@@ -2106,7 +2123,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace}) when is_list(patterns) do
+  defp forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace} = command_guard)
+       when is_list(patterns) do
     command = command_text(payload)
     command_for_patterns = command_for_forbidden_patterns(command)
 
@@ -2135,7 +2153,8 @@ defmodule SymphonyElixir.Codex.AppServer do
               scope_audit_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          git_log_pattern?(match) and
+          match == @review_rework_git_log_pattern and
+            not configured_forbidden_command_match?(command_for_patterns, command_guard) and
               bounded_git_log_metadata_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -2186,6 +2205,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp configured_forbidden_command_match?(command, %{configured_patterns: patterns})
+       when is_binary(command) and is_list(patterns) do
+    not is_nil(first_matching_command_pattern(command, patterns))
+  end
+
+  defp configured_forbidden_command_match?(_command, _command_guard), do: false
 
   defp record_scope_access_events(%{workspace: workspace}, command, pattern)
        when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
@@ -2746,8 +2772,6 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp grep_pattern?(_pattern), do: false
   defp rg_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "rg")
   defp rg_pattern?(_pattern), do: false
-  defp git_log_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "git\\s+log")
-  defp git_log_pattern?(_pattern), do: false
 
   defp bounded_git_log_metadata_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do

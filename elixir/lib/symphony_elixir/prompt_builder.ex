@@ -405,6 +405,7 @@ defmodule SymphonyElixir.PromptBuilder do
           [
             checkpoint,
             preflight_context,
+            runtime_command_policy_section(workspace),
             review_rework_micro_prompt(checkpoint)
           ]
           |> Enum.reject(&(&1 == ""))
@@ -1214,7 +1215,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Continuation context:
 
     - This is retry attempt ##{attempt} because the issue is still active after an interrupted or failed agent turn.
-    - Resume from the current workspace state; inspect `git status --short --branch` and `.orocsy/delivery/events/events.jsonl` before editing. Use the runtime-provided checkpoint context in this prompt for commit/diff state; do not run `git log` or `git diff --stat`.
+    - Resume from the current workspace state; inspect `git status --short --branch` and `.orocsy/delivery/events/events.jsonl` before editing. Use the runtime-provided checkpoint context in this prompt for commit/diff state. Run bounded `git log` only when the runtime command policy explicitly advertises it; `git diff --stat` and all other denied history commands remain unavailable.
     - If the workspace is dirty or ahead and recent `tool.finished`, `gate.post-miu`, `gate.required-evidence`, or `gate.declared-scope` events passed, treat that as a dirty handoff checkpoint.
     - At a dirty handoff checkpoint, do not redo implementation, broad PR/Linear review scans, or broad validations first. Run only `git status --short --branch` and a focused `git diff -- <dirty-file>` read; commit and diffstat context is already provided by the runtime checkpoint. If the checkpoint already lists passed validation/gate evidence for the dirty files and the diff has not changed since that evidence, do not rerun the same validation command; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when evidence is missing, stale, or the focused diff is incomplete/invalid.
     - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
@@ -1280,7 +1281,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
     Allowed context:
 
-    - `git status --short --branch`, current branch/head, the runtime-provided commit list/diffstat in the checkpoint above, focused `git diff -- <file>` reads, and exact files named by current review feedback. Do not run `git log` or `git diff --stat`; the runtime denies them.
+    - `git status --short --branch`, current branch/head, the runtime-provided commit list/diffstat in the checkpoint above, focused `git diff -- <file>` reads, and exact files named by current review feedback. Run bounded `git log` only when the runtime command policy explicitly advertises it; `git diff --stat` and all other denied history commands remain unavailable.
     - The existing PR for the current branch, including current Codex/GitHub review threads, comments, reviews, and head SHA.
     - Focused tests or type/lint checks that cover changed review-fix files.
 
@@ -1469,7 +1470,7 @@ defmodule SymphonyElixir.PromptBuilder do
     #{git_context}
     - Recent passed validation/gate evidence:
     #{indent(event_summary)}
-    - The commit list and diffstat above are runtime-provided. Do not run `git log`, `git diff --stat`, or base-branch diff/history commands; the runtime denies them and interrupts the turn.
+    - The commit list and diffstat above are runtime-provided. Run bounded `git log` only when the runtime command policy explicitly advertises it; `git diff --stat`, base-branch diff/history commands, and all other denied history forms remain unavailable.
     - First action: inspect the focused diff with `git diff -- <dirty-file>` and compare it to the recent passed validation/gate evidence listed above.
     - If the focused diff is unchanged since the listed passed evidence, do not rerun the same validation command before committing; use the recorded evidence and proceed to commit, push, PR review request/update, and Linear handoff.
     - Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
@@ -1489,7 +1490,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - `git status --short --branch`:
     #{indent(status)}
     #{git_context}
-    - The commit list and diffstat above are runtime-provided. Do not run `git log`, `git diff --stat`, or base-branch diff/history commands; the runtime denies them and interrupts the turn.
+    - The commit list and diffstat above are runtime-provided. Run bounded `git log` only when the runtime command policy explicitly advertises it; `git diff --stat`, base-branch diff/history commands, and all other denied history forms remain unavailable.
     - First action: run the smallest validation needed for the changed files listed above, using a focused `git diff -- <dirty-file>` read only when a dirty file needs inspection.
     - If the focused diff is complete and validation passes, commit any dirty intended files, push the branch, and request/update PR review.
     - For review-rework handoffs, never set Linear to a terminal state; a fresh review request is not proof that the new review is clean.
@@ -1509,7 +1510,7 @@ defmodule SymphonyElixir.PromptBuilder do
     #{git_context}
     - Recent passed validation/gate evidence:
     #{indent(event_summary)}
-    - The commit list and diffstat above are runtime-provided. Do not run `git log`, `git diff --stat`, or base-branch diff/history commands; the runtime denies them and interrupts the turn.
+    - The commit list and diffstat above are runtime-provided. Run bounded `git log` only when the runtime command policy explicitly advertises it; `git diff --stat`, base-branch diff/history commands, and all other denied history forms remain unavailable.
     - First action: verify whether a PR already exists for this branch. If none exists, create one against `main`.
     - Do not redo implementation, broad context scans, or broad validations before the PR/Linear handoff.
     - Request/update PR review and update Linear with branch, PR, commit, validation, and blockers.

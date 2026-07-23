@@ -14505,7 +14505,7 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "Diffstat versus `main` (runtime-provided; do not run `git diff`)"
 
       assert prompt =~
-               "Do not run `git log`, `git diff --stat`, or base-branch diff/history commands"
+               "Run bounded `git log` only when the runtime command policy explicitly advertises it"
 
       refute prompt =~ "inspect the focused local diff and local commits"
       assert prompt =~ "Do not restart or broaden implementation"
@@ -14603,6 +14603,14 @@ defmodule SymphonyElixir.CoreTest do
 
       assert String.starts_with?(prompt, "Local handoff recovery checkpoint:")
       assert prompt =~ "Runtime dispatch preflight:"
+      assert prompt =~ "Runtime command policy (enforced by the Symphony command guard):"
+
+      assert prompt =~
+               "`git log -N --oneline [--decorate|--no-decorate]` with `N` from 1 through 20"
+
+      assert prompt =~
+               "Run bounded `git log` only when the runtime command policy explicitly advertises it"
+
       assert prompt =~ "If a dirty/local handoff checkpoint appears above"
       assert prompt =~ "src/features/swipe/SwipeDeck.tsx"
       refute prompt =~ "Ticket MT-203"
