@@ -15,6 +15,7 @@ defmodule SymphonyElixir.ValidationController do
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
   @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|pat|jwt|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
+  @generic_key_env_key ~r/(?:^|[_-])(?:[A-Z0-9]+[_-])?KEY(?:$|[_-])/i
   @sensitive_proxy_env_key ~r/^(?:[A-Z][A-Z0-9]*_)*(?:HTTP|HTTPS|ALL)_PROXY$/i
   @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
   @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
@@ -636,11 +637,11 @@ defmodule SymphonyElixir.ValidationController do
     started = System.monotonic_time(:millisecond)
     timeout_ms = compiled.contract["validation_timeout_ms"]
 
-    {raw_output, output, exit_code, timed_out?, launch_failed?} =
+    {_raw_output, output, exit_code, timed_out?, launch_failed?} =
       run_command(workspace, command, timeout_ms, environment)
 
     duration_ms = max(0, System.monotonic_time(:millisecond) - started)
-    tests = test_counts(command, raw_output)
+    tests = test_counts(command, output)
     {status, reason_class} = validation_status(command, exit_code, tests, timed_out?, launch_failed?)
 
     event_id = "validation-" <> String.slice(fingerprint, -16, 16)
@@ -876,16 +877,17 @@ defmodule SymphonyElixir.ValidationController do
 
   defp validation_environment(effective_environment) do
     effective_environment
-    |> Enum.filter(fn {key, _value} ->
-      sensitive_env_key?(key) or Regex.match?(@validation_env_key, key) or Regex.match?(@provider_env_key, key)
+    |> Enum.filter(fn {key, value} ->
+      sensitive_environment_entry?(key, value) or Regex.match?(@validation_env_key, key) or
+        Regex.match?(@provider_env_key, key)
     end)
     |> Map.new()
   end
 
   defp repair_environment_fingerprint(effective_environment) do
     effective_environment
-    |> Enum.filter(fn {key, _value} ->
-      sensitive_env_key?(key) or Regex.match?(@repair_env_key, key) or
+    |> Enum.filter(fn {key, value} ->
+      sensitive_environment_entry?(key, value) or Regex.match?(@repair_env_key, key) or
         Regex.match?(@repair_provider_env_key, key)
     end)
     |> Map.new()
@@ -893,7 +895,25 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp sensitive_env_key?(key),
-    do: Regex.match?(@sensitive_env_key, key) or Regex.match?(@sensitive_proxy_env_key, key)
+    do:
+      Regex.match?(@sensitive_env_key, key) or Regex.match?(@generic_key_env_key, key) or
+        Regex.match?(@sensitive_proxy_env_key, key)
+
+  defp sensitive_environment_entry?(key, value),
+    do: sensitive_env_key?(key) or credential_bearing_uri?(value)
+
+  defp credential_bearing_uri?(value) when is_binary(value) do
+    case URI.parse(value) do
+      %URI{scheme: scheme, userinfo: userinfo}
+      when is_binary(scheme) and scheme != "" and is_binary(userinfo) and userinfo != "" ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp credential_bearing_uri?(_value), do: false
 
   defp redacted_validation_command(command, sensitive_values) do
     {env_parts, command_parts} =
@@ -905,8 +925,8 @@ defmodule SymphonyElixir.ValidationController do
 
     redacted_env =
       Enum.map(env_parts, fn assignment ->
-        [key, value] = String.split(assignment, "=", parts: 2)
-        if sensitive_env_key?(key), do: "#{key}=#{marker}", else: "#{key}=#{value}"
+        [key, _value] = String.split(assignment, "=", parts: 2)
+        "#{key}=#{marker}"
       end)
 
     display_command =
@@ -962,7 +982,7 @@ defmodule SymphonyElixir.ValidationController do
   defp sensitive_values(environment) do
     environment
     |> Enum.filter(fn {key, value} ->
-      sensitive_env_key?(key) and is_binary(value) and value != ""
+      is_binary(value) and value != "" and sensitive_environment_entry?(key, value)
     end)
     |> Enum.sort_by(fn {key, value} -> {-byte_size(value), key} end)
   end

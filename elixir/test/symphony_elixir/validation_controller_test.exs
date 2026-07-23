@@ -540,6 +540,49 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts every leading assignment and credential-bearing provider output" do
+    env_key = "OLLAMA_HOST"
+    provider_url = "http://provider-user:provider-password@provider.example.test"
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    issue = %{
+      issue
+      | description:
+          String.replace(
+            issue.description,
+            "- ./fake-test",
+            "- #{env_key}=#{provider_url} ./fake-test"
+          )
+    }
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ provider_url
+      refute evidence =~ "provider-user:provider-password"
+      refute event["command"] =~ provider_url
+      assert event["command"] =~ "#{env_key}=[REDACTED]"
+      assert evidence =~ "[REDACTED]"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "does not sign a MIU when validation leaves the worktree dirty" do
     {workspace, issue} =
       workspace_and_issue("3 tests, 0 failures",
@@ -608,6 +651,64 @@ defmodule SymphonyElixir.ValidationControllerTest do
       )
 
     try do
+      assert {:error, {:validation_failed, event}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      assert event["reason_class"] == "test_count_unavailable"
+      assert event["tests"] == nil
+      refute evidence =~ secret_value
+      assert evidence =~ "[REDACTED]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "parses test counts only after inherited secrets are redacted" do
+    env_key = "SYMPHONY_VALIDATION_TEST_API_KEY"
+    secret_value = "0 tests, 0 failures"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      assert event["tests"] == %{"collected" => 3, "failed" => 0, "passed" => 3}
+      refute File.read!(Path.join(workspace, event["bounded_log_path"])) =~ secret_value
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "redacts inherited personal access tokens" do
+    env_key = "GITHUB_PAT"
+    secret_value = "github-personal-access-secret"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
       assert {:ok, certificate} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
@@ -629,9 +730,9 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
-  test "redacts inherited personal access tokens" do
-    env_key = "GITHUB_PAT"
-    secret_value = "github-personal-access-secret"
+  test "redacts inherited generic cryptographic key variables" do
+    env_key = "SIGNING_KEY"
+    secret_value = "generic-signing-secret"
     previous_value = System.get_env(env_key)
     System.put_env(env_key, secret_value)
 
