@@ -1642,6 +1642,33 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "unrelated validation environment changes do not retry unparsed command failures" do
+    env_key = "CI"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "first-run")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho 'unparsed product failure'\nexit 9\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "second-run")
+
+      assert {:blocked, {:unchanged_failed_validation, fingerprint}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert fingerprint == first["validation_fingerprint"]
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "unrelated process metadata does not create a new infrastructure retry identity" do
     env_key = "SYMPHONY_VALIDATION_TEST_AUTHORITY"
     previous_value = System.get_env(env_key)

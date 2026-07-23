@@ -17,6 +17,8 @@ defmodule SymphonyElixir.ValidationController do
   @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
   @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
   @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
+  @repair_env_key ~r/^(?:(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO)$/i
+  @repair_provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG)(?:$|_)/i
 
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
@@ -534,7 +536,7 @@ defmodule SymphonyElixir.ValidationController do
               miu["id"],
               head_sha,
               command,
-              environment_fingerprint(workspace)
+              repair_environment_fingerprint()
             ) ->
           {:halt, {:blocked, {:unchanged_failed_validation, product_attempt["validation_fingerprint"]}}}
 
@@ -605,6 +607,7 @@ defmodule SymphonyElixir.ValidationController do
       "command" => redacted_validation_command(command),
       "command_hash" => "sha256:" <> sha256(command),
       "environment_fingerprint" => environment_fingerprint(workspace),
+      "repair_environment_fingerprint" => repair_environment_fingerprint(),
       "validation_fingerprint" => fingerprint,
       "status" => status,
       "reason_class" => reason_class,
@@ -782,6 +785,16 @@ defmodule SymphonyElixir.ValidationController do
     |> Map.new()
   end
 
+  defp repair_environment_fingerprint do
+    System.get_env()
+    |> Enum.filter(fn {key, _value} ->
+      sensitive_env_key?(key) or Regex.match?(@repair_env_key, key) or
+        Regex.match?(@repair_provider_env_key, key)
+    end)
+    |> Map.new()
+    |> ControllerEvidence.fingerprint()
+  end
+
   defp sensitive_env_key?(key), do: Regex.match?(@sensitive_env_key, key)
 
   defp sensitive_environment_values(command_env) do
@@ -856,7 +869,7 @@ defmodule SymphonyElixir.ValidationController do
          miu_id,
          head_sha,
          command,
-         current_environment
+         current_repair_environment
        ) do
     command_hash = "sha256:" <> sha256(command)
 
@@ -869,12 +882,16 @@ defmodule SymphonyElixir.ValidationController do
         attempt["miu_id"] == miu_id and
         attempt["head_sha"] == head_sha and
         attempt["command_hash"] == command_hash and
-        product_failure_blocks_environment_retry?(attempt, current_environment)
+        product_failure_blocks_environment_retry?(attempt, current_repair_environment)
     end)
   end
 
-  defp product_failure_blocks_environment_retry?(%{"reason_class" => "command_failed"} = attempt, current),
-    do: attempt["environment_fingerprint"] == current
+  defp product_failure_blocks_environment_retry?(%{"reason_class" => "command_failed"} = attempt, current) do
+    case attempt["repair_environment_fingerprint"] do
+      previous when is_binary(previous) -> previous == current
+      _missing_from_older_evidence -> true
+    end
+  end
 
   defp product_failure_blocks_environment_retry?(_attempt, _current), do: true
 
