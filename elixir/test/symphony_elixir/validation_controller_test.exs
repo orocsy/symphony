@@ -349,6 +349,48 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts secrets from leading environment assignments" do
+    env_key = "SYMPHONY_VALIDATION_LOCAL_API_KEY"
+    secret_value = "command-local-secret"
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\necho \"$#{env_key}\"\necho '3 tests, 0 failures'\n"
+      )
+
+    issue = %{
+      issue
+      | description:
+          String.replace(
+            issue.description,
+            "- ./fake-test",
+            "- #{env_key}=#{secret_value} ./fake-test"
+          )
+    }
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ secret_value
+      assert evidence =~ "[REDACTED:#{env_key}]"
+      refute event["command"] =~ secret_value
+      assert event["command"] =~ "#{env_key}=[REDACTED:#{env_key}]"
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "does not sign a MIU when validation leaves the worktree dirty" do
     {workspace, issue} =
       workspace_and_issue("3 tests, 0 failures",
@@ -508,6 +550,43 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "redacts overlapping secret values split across port chunks" do
+    short_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
+    long_key = "NPM_CONFIG__AUTH"
+    previous_short = System.get_env(short_key)
+    previous_long = System.get_env(long_key)
+    System.put_env(short_key, "abcd")
+    System.put_env(long_key, "abcdef")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\nprintf 'abcd'\nsleep 0.05\nprintf 'ef\\n'\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ "abcdef"
+      refute evidence =~ "[REDACTED:#{short_key}]ef"
+      assert evidence =~ "[REDACTED:#{long_key}]"
+    after
+      restore_env(short_key, previous_short)
+      restore_env(long_key, previous_long)
+      File.rm_rf(workspace)
+    end
+  end
+
   test "redacts database URLs and access-key identifiers" do
     database_key = "DATABASE_URL"
     access_key = "MEDIA_ACCESS_KEY_ID"
@@ -614,6 +693,40 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
       refute evidence =~ secret_value
+      assert evidence =~ "[REDACTED:#{env_key}]"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "redacts a multibyte secret split across port output chunks" do
+    env_key = "SYMPHONY_VALIDATION_TEST_TOKEN"
+    secret_value = <<0xC3, 0xA9>> <> "-secret"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, secret_value)
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\nprintf '\\303'\nsleep 0.05\nprintf '\\251-secret\\n'\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      [event_id] = certificate["validation_event_ids"]
+
+      event =
+        workspace
+        |> Path.join(".orocsy/delivery/events/events.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event_id"] == event_id))
+
+      evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
+      refute evidence =~ secret_value
+      assert String.valid?(evidence)
       assert evidence =~ "[REDACTED:#{env_key}]"
     after
       restore_env(env_key, previous_value)
@@ -1491,6 +1604,33 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
       assert first["reason_class"] == "command_failed"
       System.put_env(env_key, "http://valid-proxy.example.test")
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["miu_id"] == "COD-700-MIU-1"
+    after
+      restore_env(env_key, previous_value)
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "TLS trust changes allow an unparsed command failure retry" do
+    env_key = "SSL_CERT_FILE"
+    previous_value = System.get_env(env_key)
+    System.put_env(env_key, "/tmp/expired-ca.pem")
+
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures",
+        script_body: "#!/bin/sh\n[ \"$#{env_key}\" = /tmp/valid-ca.pem ] || { echo 'TLS trust rejected'; exit 9; }\necho '3 tests, 0 failures'\n"
+      )
+
+    try do
+      assert {:error, {:validation_failed, first}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert first["reason_class"] == "command_failed"
+      System.put_env(env_key, "/tmp/valid-ca.pem")
 
       assert {:ok, certificate} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")

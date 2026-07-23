@@ -15,7 +15,7 @@ defmodule SymphonyElixir.ValidationController do
   @infrastructure_failure_classes ~w(command_launch_failed command_timed_out)
   @product_failure_classes ~w(command_failed test_count_unavailable zero_tests_collected tests_failed)
   @sensitive_env_key ~r/(?:^PGPASSWORD$|(?:^|[_-])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|auth(?:entication|orization)?|credentials?|password|pwd|private[_-]?key|secrets?|tokens?|(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql)[_-]?(?:url|uri)|dsn|connection[_-]?string)(?:$|[_-]))/i
-  @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
+  @validation_env_key ~r/^(?:PATH|PATHEXT|HOME|SHELL|TMPDIR|LANG|LC_.+|XDG_.+|CI|(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO|NODE_.+|NPM_.+|PNPM_.+|YARN_.+|BUN_.+|DENO_.+|MIX_.+|HEX_.+|ERL_.+|ELIXIR_.+|PYTHON.*|PIP_.+|POETRY_.+|UV_.+|VIRTUAL_ENV|JAVA_HOME|GRADLE_.+|MAVEN_.+|GO(?:ENV|FLAGS|PATH|ROOT|WORK)|CARGO_.+|RUST.+|RUBY.*|RBENV_.+|BUNDLE_.+|GEM_.+|PLAYWRIGHT_.+|CC|CXX)$/i
   @provider_env_key ~r/(?:^|_)(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE|CONFIG|ENV|MODE)(?:$|_)/i
 
   @spec process_requests(Issue.t(), String.t()) ::
@@ -602,7 +602,7 @@ defmodule SymphonyElixir.ValidationController do
       "contract_hash" => compiled.contract_hash,
       "miu_id" => miu_id,
       "head_sha" => head_sha,
-      "command" => command,
+      "command" => redacted_validation_command(command),
       "command_hash" => "sha256:" <> sha256(command),
       "environment_fingerprint" => environment_fingerprint(workspace),
       "validation_fingerprint" => fingerprint,
@@ -626,8 +626,8 @@ defmodule SymphonyElixir.ValidationController do
         executable = resolve_executable(executable, workspace)
         port = open_command_port(executable, args, workspace, env)
 
-        sensitive_values = sensitive_environment_values()
-        carry_bytes = max_sensitive_environment_value_bytes(sensitive_values) + 1
+        sensitive_values = sensitive_environment_values(env)
+        carry_bytes = max_sensitive_environment_value_bytes(sensitive_values)
 
         {raw_output, output, exit_code, timed_out?} =
           collect_command(
@@ -782,17 +782,41 @@ defmodule SymphonyElixir.ValidationController do
     |> Map.new()
   end
 
-  defp redact_sensitive_environment_values(output, sensitive_values) when is_binary(output) do
-    sensitive_values
-    |> Enum.reduce(output, fn {key, value}, redacted ->
-      redact_environment_value(redacted, key, value)
-    end)
-  end
-
   defp sensitive_env_key?(key), do: Regex.match?(@sensitive_env_key, key)
 
-  defp sensitive_environment_values do
+  defp sensitive_environment_values(command_env) do
     System.get_env()
+    |> Map.merge(environment_assignments(command_env))
+    |> sensitive_values()
+  end
+
+  defp redacted_validation_command(command) do
+    command_env =
+      command
+      |> OptionParser.split()
+      |> split_env_assignments()
+      |> elem(0)
+
+    sensitive_values =
+      command_env
+      |> environment_assignments()
+      |> sensitive_values()
+
+    {redacted, ""} = redact_stream_prefix(command, sensitive_values, 0)
+    redacted
+  end
+
+  defp environment_assignments(assignments) do
+    assignments
+    |> Enum.map(fn assignment ->
+      [key, value] = String.split(assignment, "=", parts: 2)
+      {key, value}
+    end)
+    |> Map.new()
+  end
+
+  defp sensitive_values(environment) do
+    environment
     |> Enum.filter(fn {key, value} ->
       sensitive_env_key?(key) and is_binary(value) and value != ""
     end)
@@ -803,15 +827,6 @@ defmodule SymphonyElixir.ValidationController do
     sensitive_values
     |> Enum.map(fn {_key, value} -> byte_size(value) end)
     |> Enum.max(fn -> 0 end)
-  end
-
-  defp redact_environment_value(output, key, value) when byte_size(value) >= 4 do
-    String.replace(output, value, "[REDACTED:#{key}]")
-  end
-
-  defp redact_environment_value(output, key, value) do
-    pattern = Regex.compile!("(?<![[:alnum:]_])#{Regex.escape(value)}(?![[:alnum:]_])")
-    Regex.replace(pattern, output, "[REDACTED:#{key}]")
   end
 
   defp failed_fingerprint(workspace, fingerprint) do
@@ -1276,13 +1291,10 @@ defmodule SymphonyElixir.ValidationController do
 
     receive do
       {^port, {:data, data}} ->
-        data = String.replace_invalid(data)
-
         {redacted, redaction_tail} =
           redaction_tail
           |> Kernel.<>(data)
-          |> redact_sensitive_environment_values(sensitive_values)
-          |> split_redaction_tail(carry_bytes)
+          |> redact_stream_prefix(sensitive_values, carry_bytes)
 
         collect_command(
           port,
@@ -1297,7 +1309,7 @@ defmodule SymphonyElixir.ValidationController do
 
       {^port, {:exit_status, exit_code}} ->
         output = flush_redaction_tail(output, redaction_tail, sensitive_values)
-        {raw_output, output, exit_code, false}
+        {String.replace_invalid(raw_output), String.replace_invalid(output), exit_code, false}
     after
       remaining_ms ->
         Port.close(port)
@@ -1305,35 +1317,81 @@ defmodule SymphonyElixir.ValidationController do
         output = flush_redaction_tail(output, redaction_tail, sensitive_values)
 
         {
-          bounded_capture(raw_output <> timeout_output, @max_capture_bytes),
-          bounded_capture(output <> timeout_output, @max_capture_bytes),
+          raw_output
+          |> Kernel.<>(timeout_output)
+          |> bounded_capture(@max_capture_bytes)
+          |> String.replace_invalid(),
+          output
+          |> Kernel.<>(timeout_output)
+          |> bounded_capture(@max_capture_bytes)
+          |> String.replace_invalid(),
           124,
           true
         }
     end
   end
 
-  defp split_redaction_tail(output, carry_bytes) when byte_size(output) <= carry_bytes,
-    do: {"", output}
+  defp redact_stream_prefix(output, [], _carry_bytes), do: {output, ""}
 
-  defp split_redaction_tail(output, carry_bytes) do
-    prefix_bytes = utf8_boundary_at_or_before(output, byte_size(output) - carry_bytes)
-    tail_bytes = byte_size(output) - prefix_bytes
-    {binary_part(output, 0, prefix_bytes), binary_part(output, prefix_bytes, tail_bytes)}
+  defp redact_stream_prefix(output, sensitive_values, carry_bytes) do
+    redact_stream_prefix(output, sensitive_values, carry_bytes, [])
   end
 
-  defp utf8_boundary_at_or_before(_output, candidate) when candidate <= 0, do: 0
+  defp redact_stream_prefix("", _sensitive_values, _carry_bytes, output),
+    do: {IO.iodata_to_binary(Enum.reverse(output)), ""}
 
-  defp utf8_boundary_at_or_before(output, candidate) do
-    if String.valid?(binary_part(output, 0, candidate)) do
-      candidate
-    else
-      utf8_boundary_at_or_before(output, candidate - 1)
+  defp redact_stream_prefix(input, _sensitive_values, carry_bytes, output)
+       when byte_size(input) <= carry_bytes do
+    {IO.iodata_to_binary(Enum.reverse(output)), input}
+  end
+
+  defp redact_stream_prefix(input, sensitive_values, carry_bytes, output) do
+    case sensitive_prefix(input, sensitive_values) do
+      {key, value} ->
+        value_bytes = byte_size(value)
+        rest_bytes = byte_size(input) - value_bytes
+        rest = binary_part(input, value_bytes, rest_bytes)
+
+        redact_stream_prefix(
+          rest,
+          sensitive_values,
+          carry_bytes,
+          ["[REDACTED:#{key}]" | output]
+        )
+
+      nil ->
+        emit_bytes = safe_plain_prefix_bytes(input, sensitive_values, carry_bytes)
+        emitted = binary_part(input, 0, emit_bytes)
+        rest = binary_part(input, emit_bytes, byte_size(input) - emit_bytes)
+        redact_stream_prefix(rest, sensitive_values, carry_bytes, [emitted | output])
+    end
+  end
+
+  defp sensitive_prefix(input, sensitive_values) do
+    Enum.find(sensitive_values, fn {_key, value} ->
+      value_bytes = byte_size(value)
+      byte_size(input) >= value_bytes and binary_part(input, 0, value_bytes) == value
+    end)
+  end
+
+  defp safe_plain_prefix_bytes(input, sensitive_values, carry_bytes) do
+    max_emit = byte_size(input) - carry_bytes
+
+    sensitive_values
+    |> Enum.reduce(nil, fn {_key, value}, earliest ->
+      case :binary.match(input, value) do
+        {index, _length} when is_nil(earliest) or index < earliest -> index
+        _ -> earliest
+      end
+    end)
+    |> case do
+      nil -> max_emit
+      index -> min(max_emit, index)
     end
   end
 
   defp flush_redaction_tail(output, redaction_tail, sensitive_values) do
-    redacted_tail = redact_sensitive_environment_values(redaction_tail, sensitive_values)
+    {redacted_tail, ""} = redact_stream_prefix(redaction_tail, sensitive_values, 0)
     bounded_capture(output <> redacted_tail, @max_capture_bytes)
   end
 
