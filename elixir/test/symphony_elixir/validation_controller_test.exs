@@ -577,8 +577,11 @@ defmodule SymphonyElixir.ValidationControllerTest do
         |> Enum.find(&(&1["event_id"] == event_id))
 
       evidence = File.read!(Path.join(workspace, event["bounded_log_path"]))
-      refute evidence =~ String.slice(secret_value, div(byte_size(secret_value), 2)..-1//1)
-      assert evidence =~ "[REDACTED:#{env_key}]"
+      half = div(byte_size(secret_value), 2)
+      refute evidence =~ secret_value
+      refute evidence =~ String.slice(secret_value, 0, half)
+      refute evidence =~ String.slice(secret_value, half..-1//1)
+      assert event["tests"] == %{"collected" => 3, "passed" => 3, "failed" => 0}
     after
       restore_env(env_key, previous_value)
       File.rm_rf(workspace)
