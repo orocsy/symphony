@@ -249,6 +249,57 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch gate parks browser-provider corrections for runtime controller handling" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-browser-controller-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-browser-controller-correction",
+        identifier: "COD-BROWSER-CONTROLLER",
+        title: "Browser controller correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260723000000_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260723000000_browser",
+          "status" => "open",
+          "source" => "codex.review-rework",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Focused Playwright validation could not launch Chrome",
+          "findings" => [
+            "tests/e2e/desktop-guest-setup.spec.ts did not execute because Chrome exited with SIGABRT."
+          ],
+          "required_corrections" => [
+            "Retry the exact focused Playwright command outside the worker sandbox."
+          ]
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "open stale scope correction prevents redispatch when head and policy hash are unchanged" do
     workspace_root =
       Path.join(

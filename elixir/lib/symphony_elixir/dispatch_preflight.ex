@@ -1695,22 +1695,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp playwright_correction_guidance(open_corrections) when is_list(open_corrections) do
-    text =
-      open_corrections
-      |> Enum.flat_map(fn correction ->
-        [
-          correction["summary"],
-          correction["findings"],
-          correction["required_corrections"]
-        ]
-        |> List.flatten()
-      end)
-      |> Enum.filter(&is_binary/1)
-      |> Enum.join("\n")
-      |> String.downcase()
-
-    if String.contains?(text, ["playwright", "chrome", "chromium"]) and
-         String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"]) do
+    if Enum.any?(open_corrections, &playwright_browser_correction?/1) do
       "For Playwright browser validation blocked by the Codex worker sandbox, do not rerun Playwright or seek browser escalation inside the worker. When the prompt includes a `Runtime Contract final handoff gate`, commit and push the scoped fix, append `handoff.requested`, and let Symphony's validation controller run Playwright outside the worker sandbox. For a legacy ticket without that gate, record one concrete environment blocker and stop."
     else
       ""
@@ -1718,6 +1703,24 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp playwright_correction_guidance(_open_corrections), do: ""
+
+  @spec playwright_browser_correction?(map()) :: boolean()
+  def playwright_browser_correction?(%{} = correction) do
+    text =
+      [
+        correction["summary"],
+        correction["findings"],
+        correction["required_corrections"]
+      ]
+      |> correction_string_values()
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    String.contains?(text, ["playwright", "chrome", "chromium"]) and
+      String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"])
+  end
+
+  def playwright_browser_correction?(_correction), do: false
 
   defp executable_available?(executables, name) do
     get_in(executables, [name, "available"]) == true

@@ -5233,6 +5233,7 @@ defmodule SymphonyElixir.Orchestrator do
     normalize_correction_value(correction["status"]) == "open" and
       normalize_correction_value(correction["next_action"]) == "retry" and
       is_nil(correction["resolved_at"]) and
+      not DispatchPreflight.playwright_browser_correction?(correction) and
       retry_fingerprint_changed?(correction, workspace_path) and
       actionable_code_or_test_correction?(correction)
   end

@@ -2312,28 +2312,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp open_playwright_browser_correction?(workspace) when is_binary(workspace) do
     workspace
     |> Workspace.open_blocking_corrections_in_workspace()
-    |> Enum.any?(fn correction ->
-      text =
-        correction
-        |> correction_text()
-        |> String.downcase()
-
-      String.contains?(text, ["playwright", "chrome", "chromium"]) and
-        String.contains?(text, ["sandbox", "sigabrt", "local-browsers", "executable missing"])
-    end)
+    |> Enum.any?(&DispatchPreflight.playwright_browser_correction?/1)
   end
 
   defp open_playwright_browser_correction?(_workspace), do: false
-
-  defp correction_text(value) when is_map(value) do
-    value
-    |> Map.values()
-    |> Enum.map_join("\n", &correction_text/1)
-  end
-
-  defp correction_text(value) when is_list(value), do: Enum.map_join(value, "\n", &correction_text/1)
-  defp correction_text(value) when is_binary(value), do: value
-  defp correction_text(_value), do: ""
 
   defp symlinked_vitest_full_test_command?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
