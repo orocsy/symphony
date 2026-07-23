@@ -351,10 +351,16 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
   test "resolves validation executables from the captured PATH assignment" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+    shadow_path_entry = ".orocsy/non-executable-bin"
+    shadow_bin_dir = Path.join(workspace, shadow_path_entry)
     path_entry = ".orocsy/captured-bin"
     bin_dir = Path.join(workspace, path_entry)
     executable = Path.join(bin_dir, "captured-test")
+    shadow_executable = Path.join(shadow_bin_dir, "captured-test")
+    File.mkdir_p!(shadow_bin_dir)
     File.mkdir_p!(bin_dir)
+    File.write!(shadow_executable, "#!/bin/sh\nexit 9\n")
+    File.chmod!(shadow_executable, 0o644)
     File.write!(executable, "#!/bin/sh\necho '3 tests, 0 failures'\n")
     File.chmod!(executable, 0o755)
 
@@ -364,7 +370,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
           String.replace(
             issue.description,
             "- ./fake-test",
-            "- PATH=#{path_entry} captured-test"
+            "- PATH=#{shadow_path_entry}:#{path_entry} captured-test"
           )
     }
 

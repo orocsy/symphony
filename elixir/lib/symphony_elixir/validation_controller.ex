@@ -1367,7 +1367,15 @@ defmodule SymphonyElixir.ValidationController do
         else: directory
 
     candidate = Path.join(directory, executable)
-    if File.regular?(candidate), do: candidate
+    if executable_file?(candidate), do: candidate
+  end
+
+  defp executable_file?(candidate) do
+    case {:os.type(), File.stat(candidate)} do
+      {{:win32, _name}, {:ok, %{type: :regular}}} -> true
+      {_os, {:ok, %{type: :regular, mode: mode}}} -> Bitwise.band(mode, 0o111) != 0
+      _missing_or_non_regular -> false
+    end
   end
 
   defp path_separator do
