@@ -24,6 +24,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   @spec prepare(String.t(), Issue.t() | map()) :: {:ok, map()} | {:error, term()}
   def prepare(workspace, issue) when is_binary(workspace) do
     with :ok <- ensure_dirs(workspace),
+         :ok <- consume_turn_policy_patches(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements) do
       prepare_with_inspection(workspace, issue, requirements, inspection, false)
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   def prepare_review_delta_recovery(workspace, %Issue{} = issue, inspection)
       when is_binary(workspace) and is_map(inspection) do
     with :ok <- ensure_dirs(workspace),
+         :ok <- consume_turn_policy_patches(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          true <- review_delta_recovery?(workspace, issue, requirements, inspection) do
       prepare_with_inspection(workspace, issue, requirements, inspection, true)

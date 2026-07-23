@@ -6284,6 +6284,80 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight consumes active turn grants abandoned by a stopped worker" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-preflight-stale-turn-grant-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-stale-turn-grant",
+        identifier: "MT-STALE-TURN-GRANT",
+        title: "Expire abandoned turn grant",
+        state: "Rework",
+        branch_name: "orocsy/mt-stale-turn-grant",
+        description: """
+        ## Ticket Type
+
+        Implementation
+
+        ## Write Scope
+
+        - `src/features/landing/LandingExperience.tsx`
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      patch = %{
+        "schema_version" => 1,
+        "patch_id" => "scope_access_stale_turn",
+        "status" => "active",
+        "decision" => "allow_once",
+        "target" => "read_context",
+        "entries" => [
+          %{
+            "path" => "tests/unit/desktop-guest-setup.test.tsx",
+            "source" => "scope_access.auto.direct_import",
+            "operation" => "read",
+            "expires" => "turn"
+          }
+        ]
+      }
+
+      assert {:ok, written_patch} =
+               SymphonyElixir.ScopeAccess.Controller.write_policy_patch(workspace, patch)
+
+      assert written_patch["status"] == "active"
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      persisted_patch =
+        workspace
+        |> Path.join(written_patch["path"])
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert persisted_patch["status"] == "consumed"
+
+      refute Enum.any?(
+               get_in(preflight, ["requirements", "scope_bundle", "read_context"]) || [],
+               &(&1["path"] == "tests/unit/desktop-guest-setup.test.tsx")
+             )
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight falls back when issue requirements are partial" do
     test_root =
       Path.join(
