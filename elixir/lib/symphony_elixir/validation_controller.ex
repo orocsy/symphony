@@ -21,6 +21,16 @@ defmodule SymphonyElixir.ValidationController do
   @repair_env_key ~r/^(?:(?:HTTP|HTTPS|ALL|NO)_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|GIT_SSL_CAINFO)$/i
   @repair_provider_env_key ~r/^(?!(?:CI|BUILD|RUNNER|JOB|WORKFLOW|STEP)_)[A-Z][A-Z0-9_]*_(?:BASE_URL|ENDPOINT|HOST|PORT|REGION|PROFILE)$/i
 
+  if Mix.env() == :test do
+    @spec merge_effective_environment_for_test(map(), map(), term()) :: map()
+    def merge_effective_environment_for_test(inherited, command, os_type),
+      do: merge_effective_environment(inherited, command, os_type)
+
+    @spec executable_names_for_test(String.t(), String.t(), term()) :: [String.t()]
+    def executable_names_for_test(executable, path_ext, os_type),
+      do: executable_names(executable, path_ext, os_type)
+  end
+
   @spec process_requests(Issue.t(), String.t()) ::
           :none | {:ok, map()} | {:error, term()} | {:blocked, term()}
   def process_requests(%Issue{} = issue, workspace) when is_binary(workspace) do
@@ -668,7 +678,16 @@ defmodule SymphonyElixir.ValidationController do
     case OptionParser.split(command) do
       parts when parts != [] ->
         {_env, [executable | args]} = split_env_assignments(parts)
-        executable = resolve_executable(executable, workspace, environment.executable_path)
+
+        executable =
+          resolve_executable(
+            executable,
+            environment.executable_names,
+            workspace,
+            environment.executable_path,
+            environment.os_type
+          )
+
         port = open_command_port(executable, args, workspace, environment.child_environment)
 
         sensitive_values = environment.sensitive_values
@@ -818,12 +837,20 @@ defmodule SymphonyElixir.ValidationController do
       |> elem(0)
       |> environment_assignments()
 
-    effective_environment = Map.merge(System.get_env(), command_env)
+    os_type = :os.type()
+    effective_environment = merge_effective_environment(System.get_env(), command_env, os_type)
     sensitive_values = sensitive_values(effective_environment)
 
     %{
       child_environment: Enum.map(effective_environment, fn {key, value} -> "#{key}=#{value}" end),
+      executable_names:
+        executable_names(
+          command |> OptionParser.split() |> split_env_assignments() |> elem(1) |> hd(),
+          Map.get(effective_environment, "PATHEXT", ""),
+          os_type
+        ),
       executable_path: Map.get(effective_environment, "PATH", ""),
+      os_type: os_type,
       environment_fingerprint: environment_fingerprint(workspace, effective_environment),
       repair_environment_fingerprint: repair_environment_fingerprint(effective_environment),
       sensitive_values: sensitive_values,
@@ -899,6 +926,38 @@ defmodule SymphonyElixir.ValidationController do
     end)
     |> Map.new()
   end
+
+  defp merge_effective_environment(inherited, command, {:win32, _name}) do
+    inherited
+    |> normalize_windows_environment()
+    |> Map.merge(normalize_windows_environment(command))
+  end
+
+  defp merge_effective_environment(inherited, command, _unix),
+    do: Map.merge(inherited, command)
+
+  defp normalize_windows_environment(environment) do
+    Map.new(environment, fn {key, value} -> {String.upcase(key), value} end)
+  end
+
+  defp executable_names(executable, path_ext, {:win32, _name}) do
+    if Path.extname(executable) == "" do
+      path_ext
+      |> String.split(";", trim: true)
+      |> Enum.map(fn extension ->
+        extension = if String.starts_with?(extension, "."), do: extension, else: "." <> extension
+        executable <> extension
+      end)
+      |> case do
+        [] -> Enum.map(~w(.COM .EXE .BAT .CMD), &(executable <> &1))
+        names -> names
+      end
+    else
+      [executable]
+    end
+  end
+
+  defp executable_names(executable, _path_ext, _unix), do: [executable]
 
   defp sensitive_values(environment) do
     environment
@@ -1341,39 +1400,48 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
-  defp resolve_executable(executable, workspace, executable_path) do
-    cond do
-      String.starts_with?(executable, "./") -> Path.expand(executable, workspace)
-      Path.type(executable) == :absolute -> executable
-      String.contains?(executable, "/") -> Path.expand(executable, workspace)
-      path = find_executable(executable, executable_path, workspace) -> path
-      true -> raise "validation executable not found: #{executable}"
-    end
+  defp resolve_executable(executable, names, workspace, executable_path, os_type) do
+    resolved =
+      if String.starts_with?(executable, "./") or Path.type(executable) == :absolute or
+           String.contains?(executable, "/") do
+        Enum.find_value(names, fn name ->
+          name
+          |> Path.expand(workspace)
+          |> executable_path_candidate(os_type)
+        end)
+      else
+        find_executable(names, executable_path, workspace, os_type)
+      end
+
+    resolved || raise "validation executable not found: #{executable}"
   end
 
-  defp find_executable(executable, executable_path, workspace) do
+  defp find_executable(names, executable_path, workspace, os_type) do
     executable_path
     |> String.split(path_separator())
     |> Enum.find_value(fn
-      "" -> executable_candidate(workspace, executable, workspace)
-      directory -> executable_candidate(directory, executable, workspace)
+      "" -> executable_candidate(workspace, names, workspace, os_type)
+      directory -> executable_candidate(directory, names, workspace, os_type)
     end)
   end
 
-  defp executable_candidate(directory, executable, workspace) do
+  defp executable_candidate(directory, names, workspace, os_type) do
     directory =
       if Path.type(directory) == :relative,
         do: Path.expand(directory, workspace),
         else: directory
 
-    candidate = Path.join(directory, executable)
-    if executable_file?(candidate), do: candidate
+    Enum.find_value(names, fn name ->
+      directory
+      |> Path.join(name)
+      |> executable_path_candidate(os_type)
+    end)
   end
 
-  defp executable_file?(candidate) do
-    case {:os.type(), File.stat(candidate)} do
-      {{:win32, _name}, {:ok, %{type: :regular}}} -> true
-      {_os, {:ok, %{type: :regular, mode: mode}}} -> Bitwise.band(mode, 0o111) != 0
+  defp executable_path_candidate(candidate, os_type) do
+    case {os_type, File.stat(candidate)} do
+      {{:win32, _name}, {:ok, %{type: :regular}}} -> candidate
+      {_os, {:ok, %{type: :regular, mode: mode}}} when Bitwise.band(mode, 0o111) != 0 -> candidate
       _missing_or_non_regular -> false
     end
   end

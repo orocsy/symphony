@@ -384,6 +384,34 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "merges Windows environment overrides case-insensitively" do
+    inherited = %{"Path" => "C:\\system-bin", "PATHEXT" => ".EXE;.CMD"}
+    command = %{"PATH" => "C:\\project-bin"}
+
+    assert %{"PATH" => "C:\\project-bin", "PATHEXT" => ".EXE;.CMD"} ==
+             ValidationController.merge_effective_environment_for_test(
+               inherited,
+               command,
+               {:win32, :nt}
+             )
+  end
+
+  test "expands Windows executable names from captured PATHEXT" do
+    assert ["git.EXE", "git.CMD"] ==
+             ValidationController.executable_names_for_test(
+               "git",
+               ".EXE;.CMD",
+               {:win32, :nt}
+             )
+
+    assert ["git.exe"] ==
+             ValidationController.executable_names_for_test(
+               "git.exe",
+               ".EXE;.CMD",
+               {:win32, :nt}
+             )
+  end
+
   test "redacts secrets from leading environment assignments" do
     env_key = "SYMPHONY_VALIDATION_LOCAL_API_KEY"
     secret_value = "command-local-secret"
