@@ -2747,6 +2747,82 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "remote token budget handoff verifies the selected worker workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-token-budget-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace = Path.join(test_root, "workspaces/COD-REMOTE-HANDOFF")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+      branch = "orocsy/cod-remote-handoff"
+
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace)
+
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+      File.write!(Path.join(workspace, "README.md"), "remote handoff\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Remote handoff"], cd: workspace)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: Path.join(test_root, "workspaces")
+      )
+
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-remote-token-budget-handoff",
+          identifier: "COD-REMOTE-HANDOFF",
+          state: "Rework",
+          title: "Remote token handoff",
+          description: "The remote worker pushed its validated correction.",
+          branch_name: branch,
+          labels: []
+        })
+
+      issue_runtime_handoff_certificate!(workspace, issue)
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      for argument in "$@"; do
+        command="$argument"
+      done
+      exec /bin/bash -c "$command"
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      assert Orchestrator.fresh_clean_pushed_handoff_stop_for_test(
+               %{
+                 workspace_path: workspace,
+                 worker_host: "worker-a",
+                 started_at: started_at,
+                 issue: issue
+               },
+               "handoff_recovery"
+             )
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "token budget worker with fresh upstream progress schedules recovery retry" do
     test_root =
       Path.join(
@@ -15766,6 +15842,25 @@ defmodule SymphonyElixir.CoreTest do
       assert get_in(patch, ["entries", Access.at(0), "path"]) == "src/features/landing/GuestStartScreen.tsx"
       assert get_in(patch, ["entries", Access.at(0), "source"]) == "scope_access.auto.direct_import"
 
+      tampered_patch =
+        put_in(
+          patch,
+          ["entries"],
+          [
+            %{
+              "path" => "src/server/private-secrets.ts",
+              "source" => "scope_access.auto.direct_import",
+              "operation" => "read",
+              "expires" => "turn"
+            }
+          ]
+        )
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/policy-patches/tampered.json"),
+        Jason.encode!(tampered_patch)
+      )
+
       assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
       active_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
       assert active_patch["status"] == "active"
@@ -15785,6 +15880,10 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
                entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
                  entry["source"] == "scope_access.auto.direct_import"
+             end)
+
+      refute Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
+               entry["path"] == "src/server/private-secrets.ts"
              end)
 
       File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))

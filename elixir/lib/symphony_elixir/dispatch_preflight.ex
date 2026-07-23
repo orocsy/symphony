@@ -129,6 +129,34 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   def read_authoritative(_workspace), do: :none
 
+  @spec read_authoritative(String.t() | nil, String.t() | nil) ::
+          {:ok, map()} | :none | {:error, term()}
+  def read_authoritative(workspace, nil), do: read_authoritative(workspace)
+
+  def read_authoritative(workspace, worker_host)
+      when is_binary(workspace) and is_binary(worker_host) do
+    case Workspace.read_file_in_workspace(workspace, @preflight_path, worker_host) do
+      {:ok, body} ->
+        with {:ok, %{} = preflight} <- Jason.decode(body),
+             true <- ControllerEvidence.valid?(preflight) do
+          {:ok, preflight}
+        else
+          false -> {:error, :invalid_controller_signature}
+          _ -> {:error, :invalid_dispatch_preflight}
+        end
+
+      {:error, :enoent} ->
+        :none
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error -> {:error, {:authoritative_preflight_read_failed, Exception.message(error)}}
+  end
+
+  def read_authoritative(_workspace, _worker_host), do: :none
+
   defp read_raw(workspace) do
     path = Path.join(workspace, @preflight_path)
 
@@ -147,7 +175,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   @spec consume_turn_policy_patches(String.t() | nil) :: :ok
   def consume_turn_policy_patches(workspace) when is_binary(workspace) do
     workspace
-    |> policy_patches()
+    |> active_policy_patch_files()
     |> Enum.each(&consume_turn_policy_patch(workspace, &1))
 
     prune_persisted_turn_policy_patch_entries(workspace)
@@ -1894,17 +1922,19 @@ defmodule SymphonyElixir.DispatchPreflight do
         preflight
 
       patches ->
-        requirements =
+        {requirements, applied_patches} =
           preflight
           |> Map.get("requirements", %{})
           |> apply_policy_patches_to_requirements(patches)
 
-        policy_hash = policy_hash(requirements)
-
-        preflight
-        |> Map.put("requirements", requirements)
-        |> Map.put("policy_hash", policy_hash)
-        |> Map.put("policy_patches", Enum.map(patches, &policy_patch_summary/1))
+        if applied_patches == [] do
+          preflight
+        else
+          preflight
+          |> Map.put("requirements", requirements)
+          |> Map.put("policy_hash", policy_hash(requirements))
+          |> Map.put("policy_patches", Enum.map(applied_patches, &policy_patch_summary/1))
+        end
     end
   end
 
@@ -1956,9 +1986,15 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp policy_patches(workspace) when is_binary(workspace) do
     workspace
+    |> active_policy_patch_files()
+    |> Enum.filter(&authenticated_scope_access_patch?/1)
+    |> Enum.sort_by(&{&1["created_at"] || "", &1["patch_id"] || ""})
+  end
+
+  defp active_policy_patch_files(workspace) when is_binary(workspace) do
+    workspace
     |> Path.join(Path.join(ScopeAccess.Controller.policy_patch_dir(), "*.json"))
     |> Path.wildcard()
-    |> Enum.sort()
     |> Enum.flat_map(&read_policy_patch/1)
     |> Enum.filter(&active_policy_patch?/1)
   end
@@ -1985,6 +2021,61 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp active_policy_patch?(%{"status" => status}) when status in ["active", "applied"], do: true
   defp active_policy_patch?(%{"status" => status}) when is_binary(status), do: false
   defp active_policy_patch?(_patch), do: true
+
+  defp authenticated_scope_access_patch?(patch) when is_map(patch) do
+    patch["source"] == "symphony.runtime.scope-access-controller" and
+      patch["decision"] == "allow_once" and
+      policy_patch_target(patch) == "read_context" and
+      is_binary(patch["patch_id"]) and patch["patch_id"] != "" and
+      is_binary(patch["policy_hash_before"]) and patch["policy_hash_before"] != "" and
+      same_patch_request_policy?(patch) and
+      valid_scope_access_patch_entries?(patch) and
+      ControllerEvidence.valid?(patch)
+  end
+
+  defp authenticated_scope_access_patch?(_patch), do: false
+
+  defp same_patch_request_policy?(%{
+         "policy_hash_before" => policy_hash,
+         "request" => %{"policy_hash" => policy_hash}
+       }),
+       do: true
+
+  defp same_patch_request_policy?(_patch), do: false
+
+  defp valid_scope_access_patch_entries?(%{
+         "entries" => entries,
+         "request" => %{"paths" => requested_paths}
+       })
+       when is_list(entries) and entries != [] and is_list(requested_paths) do
+    entry_paths =
+      entries
+      |> Enum.flat_map(fn
+        %{"path" => path, "operation" => operation}
+        when is_binary(path) and path != "" and operation in ["read", "search"] ->
+          [normalize_policy_patch_path(path)]
+
+        _ ->
+          []
+      end)
+      |> Enum.sort()
+
+    request_paths =
+      requested_paths
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.map(&normalize_policy_patch_path/1)
+      |> Enum.sort()
+
+    length(entry_paths) == length(entries) and entry_paths == request_paths
+  end
+
+  defp valid_scope_access_patch_entries?(_patch), do: false
+
+  defp normalize_policy_patch_path(path) when is_binary(path) do
+    path
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+  end
 
   defp drop_inactive_turn_policy_patch_entries(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
     active_patch_ids = active_policy_patch_ids(workspace)
@@ -2135,14 +2226,48 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp turn_policy_patch?(_patch), do: false
 
   defp apply_policy_patches_to_requirements(requirements, patches) when is_map(requirements) do
-    Enum.reduce(patches, ensure_scope_bundle(requirements), fn patch, acc ->
-      patch
-      |> policy_patch_entries()
-      |> Enum.reduce(acc, fn {target, entries}, requirements ->
-        put_scope_bundle_entries(requirements, target, entries)
+    Enum.reduce(patches, {ensure_scope_bundle(requirements), []}, fn patch, {acc, applied} ->
+      if applicable_policy_patch?(patch, acc) do
+        updated =
+          patch
+          |> policy_patch_entries()
+          |> Enum.reduce(acc, fn {target, entries}, requirements ->
+            put_scope_bundle_entries(requirements, target, entries)
+          end)
+
+        {updated, applied ++ [patch]}
+      else
+        {acc, applied}
+      end
+    end)
+  end
+
+  defp applicable_policy_patch?(patch, requirements) do
+    patch["policy_hash_before"] == policy_hash(requirements) or
+      policy_patch_already_applied?(patch, requirements)
+  end
+
+  defp policy_patch_already_applied?(%{"patch_id" => patch_id, "entries" => entries}, requirements)
+       when is_binary(patch_id) and is_list(entries) do
+    current_entries =
+      requirements
+      |> scope_bundle()
+      |> Map.get("read_context", [])
+
+    Enum.all?(entries, fn %{"path" => path} ->
+      normalized = normalize_policy_patch_path(path)
+
+      Enum.any?(current_entries, fn
+        %{"path" => current_path, "policy_patch_id" => ^patch_id} ->
+          normalize_policy_patch_path(current_path) == normalized
+
+        _ ->
+          false
       end)
     end)
   end
+
+  defp policy_patch_already_applied?(_patch, _requirements), do: false
 
   defp policy_patch_entries(%{"entries" => entries} = patch) when is_list(entries) do
     target = policy_patch_target(patch)

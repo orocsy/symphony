@@ -438,6 +438,11 @@ defmodule SymphonyElixir.Orchestrator do
     def runtime_failure_comment_for_test(%Issue{} = issue, correction, failure) do
       runtime_failure_comment(issue, correction, failure)
     end
+
+    @doc false
+    def fresh_clean_pushed_handoff_stop_for_test(running_entry, mode) when is_map(running_entry) do
+      fresh_clean_pushed_handoff_stop?(running_entry, mode)
+    end
   end
 
   @doc false
@@ -855,15 +860,17 @@ defmodule SymphonyElixir.Orchestrator do
     _error -> false
   end
 
-  defp meaningful_git_dirty_paths(workspace) do
-    case System.cmd("git", ["status", "--porcelain=v1"], cd: workspace, stderr_to_stdout: true) do
-      {status, 0} ->
+  defp meaningful_git_dirty_paths(workspace), do: meaningful_git_dirty_paths(workspace, nil)
+
+  defp meaningful_git_dirty_paths(workspace, worker_host) do
+    case git_output_on_host(workspace, ["status", "--porcelain=v1"], worker_host) do
+      {:ok, status} ->
         status
         |> String.split("\n", trim: true)
         |> Enum.flat_map(&porcelain_status_paths/1)
         |> Enum.reject(&generated_runtime_path?/1)
 
-      {_error, _exit_code} ->
+      {:error, _reason} ->
         []
     end
   rescue
@@ -2608,14 +2615,21 @@ defmodule SymphonyElixir.Orchestrator do
     error -> {:error, {:git_exception, args, Exception.message(error)}}
   end
 
-  defp git_head_committed_at(workspace) when is_binary(workspace) do
-    case git_output(workspace, ["log", "-1", "--format=%cI", "HEAD"]) do
+  defp git_output_on_host(workspace, args, nil), do: git_output(workspace, args)
+
+  defp git_output_on_host(workspace, args, worker_host) when is_binary(worker_host),
+    do: Workspace.git_output_in_workspace(workspace, args, worker_host)
+
+  defp git_head_committed_at(workspace), do: git_head_committed_at(workspace, nil)
+
+  defp git_head_committed_at(workspace, worker_host) when is_binary(workspace) do
+    case git_output_on_host(workspace, ["log", "-1", "--format=%cI", "HEAD"], worker_host) do
       {:ok, output} -> output |> String.trim() |> datetime_from_iso8601()
       _ -> nil
     end
   end
 
-  defp git_head_committed_at(_workspace), do: nil
+  defp git_head_committed_at(_workspace, _worker_host), do: nil
 
   defp latest_review_feedback_at(feedback) when is_list(feedback) do
     feedback
@@ -5072,15 +5086,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normal_completion_handoff_stop?(%{workspace_path: workspace} = running_entry)
        when is_binary(workspace) do
+    worker_host = Map.get(running_entry, :worker_host)
+
     cond do
       workflow_blocked_by_open_correction?(running_entry) ->
         false
 
       true ->
-        case DispatchPreflight.read(workspace) do
+        case handoff_dispatch_preflight(workspace, worker_host) do
           {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
-            pushed_validated_handoff_stop?(workspace, Map.get(running_entry, :issue)) or
-              review_classification_handoff_stop?(workspace)
+            pushed_validated_handoff_stop?(workspace, Map.get(running_entry, :issue), worker_host) or
+              (is_nil(worker_host) and review_classification_handoff_stop?(workspace))
 
           _ ->
             false
@@ -5094,9 +5110,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp token_budget_pushed_handoff_stop?(reason, %{workspace_path: workspace} = running_entry)
        when is_binary(workspace) do
+    worker_host = Map.get(running_entry, :worker_host)
+
     with %{kind: "token-budget"} <- classify_agent_failure(reason),
          false <- workflow_blocked_by_open_correction?(running_entry),
-         {:ok, %{"mode" => mode}} <- DispatchPreflight.read(workspace) do
+         {:ok, %{"mode" => mode}} <- handoff_dispatch_preflight(workspace, worker_host) do
       fresh_clean_pushed_handoff_stop?(running_entry, mode)
     else
       _ -> false
@@ -5112,17 +5130,19 @@ defmodule SymphonyElixir.Orchestrator do
            workspace_path: workspace,
            started_at: %DateTime{} = started_at,
            issue: %Issue{} = issue
-         },
+         } = running_entry,
          mode
        )
        when is_binary(workspace) and mode in ["review_rework", "integration_check", "handoff_recovery"] do
-    with [] <- meaningful_git_dirty_paths(workspace),
-         {:ok, branch_output} <- git_output(workspace, ["branch", "--show-current"]),
+    worker_host = Map.get(running_entry, :worker_host)
+
+    with [] <- meaningful_git_dirty_paths(workspace, worker_host),
+         {:ok, branch_output} <- git_output_on_host(workspace, ["branch", "--show-current"], worker_host),
          branch = String.trim(branch_output),
          true <- handoff_branch_name?(branch),
-         %DateTime{} = committed_at <- git_head_committed_at(workspace),
+         %DateTime{} = committed_at <- git_head_committed_at(workspace, worker_host),
          true <- datetime_at_or_after?(committed_at, started_at),
-         true <- pushed_validated_handoff_stop?(workspace, issue) do
+         true <- pushed_validated_handoff_stop?(workspace, issue, worker_host) do
       true
     else
       _ -> false
@@ -5133,11 +5153,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp fresh_clean_pushed_handoff_stop?(_running_entry, _mode), do: false
 
-  defp pushed_validated_handoff_stop?(workspace, %Issue{} = issue) when is_binary(workspace) do
-    match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace))
+  defp pushed_validated_handoff_stop?(workspace, %Issue{} = issue, worker_host)
+       when is_binary(workspace) do
+    match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace, worker_host))
   end
 
-  defp pushed_validated_handoff_stop?(_workspace, _issue), do: false
+  defp pushed_validated_handoff_stop?(_workspace, _issue, _worker_host), do: false
+
+  defp handoff_dispatch_preflight(workspace, nil), do: DispatchPreflight.read(workspace)
+
+  defp handoff_dispatch_preflight(workspace, worker_host) when is_binary(worker_host),
+    do: DispatchPreflight.read_authoritative(workspace, worker_host)
 
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
     with {:ok, classification} <- read_review_classification_handoff(workspace),

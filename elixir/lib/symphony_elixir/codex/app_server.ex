@@ -2443,7 +2443,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp unwrap_shell_login_command(_command), do: ""
 
   defp pure_scope_read_command?(command) when is_binary(command) do
-    not String.contains?(command, ["$(", "`", "&&", "||", ";"]) and
+    not command_chain_operator_outside_quotes?(command) and
+      not String.contains?(command, ["$(", "`"]) and
       Regex.match?(
         ~r/\A(?:sed\s+-n|(?:cat|head|tail|nl|rg|grep|ls)\s|git\s+(?:diff|log|ls-files)(?:\s|$))/,
         command
@@ -2519,9 +2520,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp playwright_test_command?(_command), do: false
 
   defp open_playwright_browser_correction?(workspace, worker_host) when is_binary(workspace) do
-    workspace
-    |> Workspace.open_blocking_corrections_in_workspace(worker_host)
-    |> Enum.any?(&DispatchPreflight.playwright_browser_correction?/1)
+    case Workspace.inspect_blocking_corrections_in_workspace(workspace, worker_host) do
+      {:ok, corrections} ->
+        Enum.any?(corrections, &DispatchPreflight.playwright_browser_correction?/1)
+
+      {:error, _reason} ->
+        is_binary(worker_host)
+    end
   end
 
   defp open_playwright_browser_correction?(_workspace, _worker_host), do: false
@@ -3079,9 +3084,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     ["command", "summary", "message", "details", "detail", "body", "tool", "step"]
     |> Enum.reduce(command, fn flag, acc ->
       acc
-      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1REDACTED")
     end)
   end
 
@@ -3089,12 +3094,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     ["summary", "finding", "required-correction"]
     |> Enum.reduce(command, fn flag, acc ->
       acc
-      |> String.replace(~r/(--#{flag}=)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}=)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}=)[^\s]+/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}=)"(?:\\.|[^"\\])*"/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}=)'(?:\\.|[^'\\])*'/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}=)[^\s]+/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1REDACTED")
     end)
   end
 
@@ -3509,6 +3514,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     next = List.first(rest)
 
     cond do
+      char in ["\n", "\r", ">", "<"] ->
+        true
+
       char == ";" ->
         true
 
@@ -3519,6 +3527,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         true
 
       char == "&" and next == "&" ->
+        true
+
+      char == "&" ->
         true
 
       true ->

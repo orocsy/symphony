@@ -7,7 +7,14 @@ defmodule SymphonyElixir.HandoffCertificate do
   head.
   """
 
-  alias SymphonyElixir.{Config, ControllerEvidence, Linear.Issue, ReviewMonitor, RuntimeContract}
+  alias SymphonyElixir.{
+    Config,
+    ControllerEvidence,
+    Linear.Issue,
+    ReviewMonitor,
+    RuntimeContract,
+    Workspace
+  }
 
   @certificate_path ".orocsy/delivery/state/handoff-ready.json"
   @authority "symphony.runtime.handoff-controller"
@@ -66,38 +73,48 @@ defmodule SymphonyElixir.HandoffCertificate do
 
   @spec current(Issue.t(), String.t()) :: {:ok, map()} | {:stale, atom()} | :not_ready
   def current(%Issue{} = issue, workspace) when is_binary(workspace) do
-    path = Path.join(workspace, @certificate_path)
-
-    if File.regular?(path) do
-      with {:ok, certificate} <- read(path),
-           {:ok, compiled} <- structured_contract(issue),
-           :ok <- verify_static_fields(certificate, issue, compiled),
-           {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
-           :ok <- equal_or_stale(branch, certificate["branch"], :branch_mismatch),
-           {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
-           :ok <- equal_or_stale(head_sha, certificate["head_sha"], :head_mismatch),
-           true <- clean_worktree?(workspace) || {:stale, :dirty_worktree},
-           {:ok, remote_head} <- remote_branch_head(branch),
-           :ok <- equal_or_stale(head_sha, remote_head["head_sha"], :unpushed_head),
-           :ok <- equal_or_stale(certificate["remote_repo"], remote_head["repo"], :remote_repo_mismatch),
-           {:ok, pr} <- open_pull_request(remote_head["repo"], branch),
-           :ok <- verify_pull_request(pr, compiled.contract, head_sha),
-           :ok <- equal_or_stale(certificate["pr_number"], pr["number"], :pull_request_mismatch),
-           :ok <- equal_or_stale(certificate["pr_url"], pr["html_url"], :pull_request_mismatch) do
-        {:ok, certificate}
-      else
-        :none -> {:stale, :legacy_or_missing_runtime_contract}
-        {:error, _reason} -> {:stale, :certificate_unverifiable}
-        {:stale, reason} -> {:stale, reason}
-        false -> {:stale, :certificate_unverifiable}
-        _ -> {:stale, :certificate_unverifiable}
-      end
-    else
-      :not_ready
-    end
+    current(issue, workspace, nil)
   end
 
   def current(_issue, _workspace), do: :not_ready
+
+  @spec current(Issue.t(), String.t(), String.t() | nil) ::
+          {:ok, map()} | {:stale, atom()} | :not_ready
+  def current(%Issue{} = issue, workspace, worker_host) when is_binary(workspace) do
+    case read_certificate(workspace, worker_host) do
+      {:ok, certificate} ->
+        with {:ok, compiled} <- structured_contract(issue),
+             :ok <- verify_static_fields(certificate, issue, compiled),
+             {:ok, branch} <- git(workspace, ["branch", "--show-current"], worker_host),
+             :ok <- equal_or_stale(branch, certificate["branch"], :branch_mismatch),
+             {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"], worker_host),
+             :ok <- equal_or_stale(head_sha, certificate["head_sha"], :head_mismatch),
+             true <- clean_worktree?(workspace, worker_host) || {:stale, :dirty_worktree},
+             {:ok, remote_head} <- remote_branch_head(branch),
+             :ok <- equal_or_stale(head_sha, remote_head["head_sha"], :unpushed_head),
+             :ok <- equal_or_stale(certificate["remote_repo"], remote_head["repo"], :remote_repo_mismatch),
+             {:ok, pr} <- open_pull_request(remote_head["repo"], branch),
+             :ok <- verify_pull_request(pr, compiled.contract, head_sha),
+             :ok <- equal_or_stale(certificate["pr_number"], pr["number"], :pull_request_mismatch),
+             :ok <- equal_or_stale(certificate["pr_url"], pr["html_url"], :pull_request_mismatch) do
+          {:ok, certificate}
+        else
+          :none -> {:stale, :legacy_or_missing_runtime_contract}
+          {:error, _reason} -> {:stale, :certificate_unverifiable}
+          {:stale, reason} -> {:stale, reason}
+          false -> {:stale, :certificate_unverifiable}
+          _ -> {:stale, :certificate_unverifiable}
+        end
+
+      {:error, :enoent} ->
+        :not_ready
+
+      {:error, _reason} ->
+        {:stale, :certificate_unverifiable}
+    end
+  end
+
+  def current(_issue, _workspace, _worker_host), do: :not_ready
 
   @spec latest_signed_head(Issue.t(), String.t()) :: {:ok, String.t()} | {:stale, atom()} | :not_ready
   def latest_signed_head(%Issue{} = issue, workspace) when is_binary(workspace) do
@@ -193,8 +210,34 @@ defmodule SymphonyElixir.HandoffCertificate do
     end
   end
 
-  defp clean_worktree?(workspace) do
-    case git(workspace, ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).orocsy/"]) do
+  defp read_certificate(workspace, nil) do
+    with {:ok, body} <- File.read(Path.join(workspace, @certificate_path)),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(body) do
+      {:ok, decoded}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_certificate}
+    end
+  end
+
+  defp read_certificate(workspace, worker_host) when is_binary(worker_host) do
+    with {:ok, body} <- Workspace.read_file_in_workspace(workspace, @certificate_path, worker_host),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(body) do
+      {:ok, decoded}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_certificate}
+    end
+  end
+
+  defp clean_worktree?(workspace), do: clean_worktree?(workspace, nil)
+
+  defp clean_worktree?(workspace, worker_host) do
+    case git(
+           workspace,
+           ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).orocsy/"],
+           worker_host
+         ) do
       {:ok, status} -> String.trim(status) == ""
       _ -> false
     end
@@ -274,10 +317,21 @@ defmodule SymphonyElixir.HandoffCertificate do
     end
   end
 
-  defp git(workspace, args) do
+  defp git(workspace, args, worker_host \\ nil)
+
+  defp git(workspace, args, nil) do
     case System.cmd("git", args, cd: workspace, stderr_to_stdout: true) do
       {output, 0} -> {:ok, String.trim(output)}
       {output, status} -> {:error, {:git_failed, args, status, String.trim(output)}}
+    end
+  rescue
+    error -> {:error, {:git_exception, Exception.message(error)}}
+  end
+
+  defp git(workspace, args, worker_host) when is_binary(worker_host) do
+    case Workspace.git_output_in_workspace(workspace, args, worker_host) do
+      {:ok, output} -> {:ok, String.trim(output)}
+      {:error, reason} -> {:error, reason}
     end
   rescue
     error -> {:error, {:git_exception, Exception.message(error)}}

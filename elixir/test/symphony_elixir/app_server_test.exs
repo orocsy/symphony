@@ -4732,6 +4732,45 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "remote command guard fails closed when correction inspection fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-playwright-inspection-failure-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace = Path.join(test_root, "MT-REMOTE-PLAYWRIGHT-INSPECTION-FAILURE")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+      File.mkdir_p!(workspace)
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' 'remote correction lookup failed' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      command =
+        "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
+
+      assert {:error, ^command, "playwright_browser_correction_requires_runtime_controller_handoff"} =
+               AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "hard command guards cannot be overridden by an embedded safe read" do
     test_root =
       Path.join(
@@ -4760,6 +4799,15 @@ defmodule SymphonyElixir.AppServerTest do
                  workspace,
                  destructive_command,
                  "(^|\\s|[\"'])(rm|sudo|chmod|chown)(\\s|$)"
+               )
+
+      multiline_command = "rg token tests/unit/named.test.ts\nrm -rf ."
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 multiline_command,
+                 "(^|\\s|[\"'])rg(\\s|$)"
                )
     after
       File.rm_rf(test_root)
