@@ -201,7 +201,7 @@ defmodule SymphonyElixir.AgentRunner do
           )
         after
           AppServer.stop_session(session)
-          consume_policy_violation_patches_after_turn(workspace, opts)
+          consume_turn_policy_patches(workspace)
         end
       end
 
@@ -279,15 +279,13 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp consume_policy_violation_patches_after_turn(workspace, opts) when is_binary(workspace) and is_list(opts) do
-    if Keyword.has_key?(opts, :policy_violation) do
-      DispatchPreflight.consume_turn_policy_patches(workspace)
-    end
+  defp consume_turn_policy_patches(workspace) when is_binary(workspace) do
+    DispatchPreflight.consume_turn_policy_patches(workspace)
   rescue
     _error -> :ok
   end
 
-  defp consume_policy_violation_patches_after_turn(_workspace, _opts), do: :ok
+  defp consume_turn_policy_patches(_workspace), do: :ok
 
   defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),
@@ -498,6 +496,7 @@ defmodule SymphonyElixir.AgentRunner do
              on_message: codex_message_handler(codex_update_recipient, issue),
              turn_number: turn_number
            ) do
+      consume_turn_policy_patches(workspace)
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
       case process_runtime_transition_requests(workspace, issue, issue_state_fetcher) do

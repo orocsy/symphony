@@ -961,9 +961,131 @@ defmodule SymphonyElixir.AppServerTest do
       assert requested["dispatch_mode"] == "review_rework"
 
       assert decided["decision"] == "block"
-      assert decided["reason_class"] == "read_context_controller_not_enabled"
+      assert decided["reason_class"] == "not_safe_read_context"
       assert get_in(decided, ["policy_patch", "target"]) == "read_context"
       assert get_in(decided, ["policy_patch", "paths"]) == ["src/features/landing/GuestStartScreen.tsx"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "command guard allows controller-approved exact reads without restarting the app-server session" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-same-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-SAME-SESSION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      source_path = "src/features/landing/LandingExperience.tsx"
+      context_path = "tests/unit/desktop-guest-setup.test.tsx"
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(Path.join(workspace, Path.dirname(source_path)))
+      File.mkdir_p!(Path.join(workspace, Path.dirname(context_path)))
+
+      File.write!(
+        Path.join(workspace, source_path),
+        "import \"../../../tests/unit/desktop-guest-setup.test.tsx\";\n" <>
+          "export function LandingExperience() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, context_path), "export const expectedState = true;\n")
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-SAME-SESSION",
+          "write_scope" => [
+            %{
+              "path" => source_path,
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-SAME-SESSION",
+          "branch" => "orocsy/mt-scope-same-session",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => [source_path],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-same-session"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-same-session"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-same-session",
+        identifier: "MT-SCOPE-SAME-SESSION",
+        title: "Scope access same session",
+        description: "A proven exact read should not discard the active worker context.",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-SAME-SESSION",
+        labels: []
+      }
+
+      assert {:ok, result} = AppServer.run(workspace, "Continue the scoped fix", issue)
+      assert result.thread_id == "thread-scope-same-session"
+
+      events = delivery_events!(workspace)
+      assert Enum.count(events, &(&1["event"] == "scope.access.requested")) == 1
+
+      assert decided = Enum.find(events, &(&1["event"] == "scope.access.decided"))
+      assert decided["decision"] == "allow_once"
+      assert decided["status"] == "allowed"
+      assert decided["reason_class"] == "safe_read_context"
+      assert decided["paths"] == [context_path]
+
+      [patch_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
+      patch = patch_path |> File.read!() |> Jason.decode!()
+      assert patch["status"] == "active"
     after
       File.rm_rf(test_root)
     end

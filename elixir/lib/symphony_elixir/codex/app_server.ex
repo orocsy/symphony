@@ -17,6 +17,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     Workspace
   }
 
+  alias SymphonyElixir.ScopeAccess.Controller, as: ScopeAccessController
+
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
@@ -1997,16 +1999,47 @@ defmodule SymphonyElixir.Codex.AppServer do
       true ->
         case forbidden_command_violation(payload, command_guard) do
           {:error, command, pattern} ->
-            record_scope_access_events(command_guard, command, pattern)
+            case resolve_scope_access_violation(command_guard, command, pattern) do
+              {:allow, decision} ->
+                record_scope_access_events(command_guard, command, pattern, decision)
 
-            emit_message(
-              on_message,
-              :forbidden_command,
-              %{payload: payload, raw: payload_string, command: command, pattern: pattern},
-              metadata
-            )
+                handle_allowed_turn_method(
+                  port,
+                  on_message,
+                  payload,
+                  payload_string,
+                  method,
+                  timeout_ms,
+                  tool_executor,
+                  auto_approve_requests,
+                  metadata,
+                  command_guard
+                )
 
-            {:error, {:forbidden_command, command, pattern}}
+              {:deny, decision} ->
+                record_scope_access_events(command_guard, command, pattern, decision)
+
+                emit_message(
+                  on_message,
+                  :forbidden_command,
+                  %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+                  metadata
+                )
+
+                {:error, {:forbidden_command, command, pattern}}
+
+              :defer ->
+                record_scope_access_events(command_guard, command, pattern)
+
+                emit_message(
+                  on_message,
+                  :forbidden_command,
+                  %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+                  metadata
+                )
+
+                {:error, {:forbidden_command, command, pattern}}
+            end
 
           :ok ->
             handle_allowed_turn_method(
@@ -2228,14 +2261,36 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp record_scope_access_events(_command_guard, _command, _pattern), do: :ok
 
-  defp scope_access_events(workspace, command, pattern) do
-    ScopeAccess.events(command, pattern, scope_access_policy_bundle(workspace), scope_access_attrs(workspace))
+  defp record_scope_access_events(%{workspace: workspace}, command, pattern, decision)
+       when is_binary(workspace) and is_binary(command) and is_binary(pattern) and is_map(decision) do
+    workspace
+    |> scope_access_events(command, pattern, decision)
+    |> Enum.each(&append_scope_access_event(workspace, &1))
+  rescue
+    error ->
+      Logger.warning("Failed to record resolved scope access events: #{Exception.message(error)}")
+      :ok
   end
 
-  defp scope_access_policy_bundle(workspace) when is_binary(workspace) do
+  defp record_scope_access_events(command_guard, command, pattern, _decision),
+    do: record_scope_access_events(command_guard, command, pattern)
+
+  defp scope_access_events(workspace, command, pattern) do
+    ScopeAccess.events(command, pattern, scope_access_policy(workspace), scope_access_attrs(workspace))
+  end
+
+  defp scope_access_events(workspace, command, pattern, decision) do
+    ScopeAccess.events(
+      command,
+      pattern,
+      scope_access_policy(workspace),
+      scope_access_attrs(workspace),
+      decision
+    )
+  end
+
+  defp scope_access_policy(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"requirements" => %{"scope_bundle" => bundle}}} when is_map(bundle) -> bundle
-      {:ok, %{"requirements" => requirements}} when is_map(requirements) -> requirements
       {:ok, preflight} when is_map(preflight) -> preflight
       _ -> %{}
     end
@@ -2243,7 +2298,49 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> %{}
   end
 
-  defp scope_access_policy_bundle(_workspace), do: %{}
+  defp scope_access_policy(_workspace), do: %{}
+
+  defp resolve_scope_access_violation(
+         %{workspace: workspace, worker_host: nil},
+         command,
+         pattern
+       )
+       when is_binary(workspace) and is_binary(command) and
+              pattern != @review_rework_dirty_validated_handoff_recheck_pattern do
+    policy = scope_access_policy(workspace)
+
+    case ScopeAccess.classify_command(command, policy) do
+      %{} = request ->
+        case ScopeAccessController.decide(request, policy, workspace) do
+          {:allow_once, patch} ->
+            case ScopeAccessController.write_policy_patch(workspace, patch) do
+              {:ok, written_patch} ->
+                {:allow, written_patch}
+
+              {:error, reason} ->
+                decision =
+                  request
+                  |> ScopeAccess.decision_for()
+                  |> Map.put("reason_class", "policy_patch_write_failed")
+                  |> Map.put("error", inspect(reason))
+
+                {:deny, decision}
+            end
+
+          {decision, correction_attrs} when decision in [:block, :escalate] ->
+            {:deny, correction_attrs}
+        end
+
+      _ ->
+        :defer
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to resolve scope access in app server: #{Exception.message(error)}")
+      :defer
+  end
+
+  defp resolve_scope_access_violation(_command_guard, _command, _pattern), do: :defer
 
   defp scope_access_attrs(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
