@@ -2708,7 +2708,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp bounded_git_log_metadata_allowed?(command) when is_binary(command) do
     case Regex.run(
-           ~r/(?:^|[\s"'])git\s+log\s+-(\d{1,2})\s+--oneline(?:\s+--no-decorate)?(?=["']|$)/,
+           ~r/(?:^|[\s"'])git\s+log\s+-(\d{1,2})\s+--oneline(?:\s+--(?:no-)?decorate)?(?=["']|$)/,
            command,
            capture: :all_but_first
          ) do

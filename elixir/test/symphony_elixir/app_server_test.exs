@@ -1284,6 +1284,12 @@ defmodule SymphonyElixir.AppServerTest do
                  "/bin/zsh -lc 'git log -4 --oneline'"
                )
 
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "/bin/zsh -lc 'git log -5 --oneline --decorate'"
+               )
+
       assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
                AppServer.command_policy_violation_for_test(workspace, "git log --oneline")
 
