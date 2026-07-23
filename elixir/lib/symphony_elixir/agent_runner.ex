@@ -316,7 +316,7 @@ defmodule SymphonyElixir.AgentRunner do
          _max_policy_recoveries,
          _worker_host
        ),
-       do: :stop
+       do: {:parked, nil}
 
   defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, worker_host)
        when is_binary(worker_host),

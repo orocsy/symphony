@@ -15092,7 +15092,7 @@ defmodule SymphonyElixir.CoreTest do
       labels: []
     }
 
-    assert :stop =
+    assert {:parked, nil} =
              AgentRunner.policy_violation_recovery_action_for_test(
                System.tmp_dir!(),
                issue,
@@ -15102,7 +15102,7 @@ defmodule SymphonyElixir.CoreTest do
                2
              )
 
-    assert :stop =
+    assert {:parked, nil} =
              AgentRunner.policy_violation_recovery_action_for_test(
                System.tmp_dir!(),
                issue,
