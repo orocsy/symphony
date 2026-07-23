@@ -63,6 +63,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @review_rework_command_chain_pattern "command_chain_operator_outside_quotes"
   @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
   @review_rework_dirty_validated_handoff_recheck_pattern "dirty_validated_handoff_recheck_before_commit"
+  @review_rework_git_log_pattern "(^|\\s|[\"'])git\\s+log(\\s|$)"
   @review_rework_forbidden_command_patterns [
     @review_rework_command_chain_pattern,
     @review_rework_dirty_validated_handoff_recheck_pattern,
@@ -70,7 +71,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     "(^|\\s|[\"'])grep(\\s|$)",
     "(^|\\s|[\"'])gh\\s+api(\\s|$)",
     "(^|\\s|[\"'])find(\\s|$)",
-    "(^|\\s|[\"'])git\\s+log(\\s|$)",
+    @review_rework_git_log_pattern,
     "(^|\\s|[\"'])git\\s+diff\\s+--stat(\\s|$)",
     @review_rework_git_diff_base_pattern,
     "(^|\\s|[\"'])git\\s+ls-files(\\s|$)",
@@ -160,10 +161,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
-    forbidden_command_patterns = effective_forbidden_command_patterns(workspace, forbidden_command_patterns)
+    configured_forbidden_command_patterns = forbidden_command_patterns
+    forbidden_command_patterns = effective_forbidden_command_patterns(workspace, configured_forbidden_command_patterns)
 
     command_guard = %{
       patterns: forbidden_command_patterns,
+      configured_patterns: configured_forbidden_command_patterns,
       workspace: workspace,
       fresh_checkpoint_stop_enabled: dispatch_preflight_mode(workspace) == "fresh_implementation",
       fresh_checkpoint_present_at_turn_start: fresh_implementation_checkpoint_ready?(workspace)
@@ -691,16 +694,72 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   def effective_forbidden_command_patterns_for(_workspace), do: []
 
+  @spec bounded_git_log_exception_available?(String.t()) :: boolean()
+  def bounded_git_log_exception_available?(workspace) when is_binary(workspace) do
+    bounded_git_log_exception_available?(
+      workspace,
+      Config.settings!().codex.forbidden_command_patterns
+    )
+  rescue
+    _error -> false
+  end
+
+  def bounded_git_log_exception_available?(_workspace), do: false
+
   if Mix.env() == :test do
+    @spec command_policy_violation_for_test(String.t(), String.t()) ::
+            :ok | {:error, String.t(), String.t()}
     def command_policy_violation_for_test(workspace, command) do
+      command_policy_violation_for_test(
+        workspace,
+        command,
+        Config.settings!().codex.forbidden_command_patterns
+      )
+    end
+
+    @spec command_policy_violation_for_test(String.t(), String.t(), [String.t()]) ::
+            :ok | {:error, String.t(), String.t()}
+    def command_policy_violation_for_test(workspace, command, configured_patterns)
+        when is_list(configured_patterns) do
       payload = %{"params" => %{"msg" => %{"command" => command}}}
-      patterns = effective_forbidden_command_patterns_for(workspace)
-      forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace})
+      patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
+
+      forbidden_command_violation(payload, %{
+        patterns: patterns,
+        configured_patterns: configured_patterns,
+        workspace: workspace
+      })
+    end
+
+    @spec bounded_git_log_exception_available_for_test(String.t(), [String.t()]) :: boolean()
+    def bounded_git_log_exception_available_for_test(workspace, configured_patterns)
+        when is_list(configured_patterns) do
+      bounded_git_log_exception_available?(workspace, configured_patterns)
     end
 
     def worker_thread_overrides_for_test(params, workspace),
       do: maybe_put_worker_thread_overrides(params, workspace)
   end
+
+  defp bounded_git_log_exception_available?(workspace, configured_patterns)
+       when is_binary(workspace) and is_list(configured_patterns) do
+    payload = %{
+      "params" => %{
+        "msg" => %{"command" => "/bin/zsh -lc 'git log -5 --oneline --decorate'"}
+      }
+    }
+
+    patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
+
+    dispatch_preflight_mode(workspace) == "review_rework" and
+      forbidden_command_violation(payload, %{
+        patterns: patterns,
+        configured_patterns: configured_patterns,
+        workspace: workspace
+      }) == :ok
+  end
+
+  defp bounded_git_log_exception_available?(_workspace, _configured_patterns), do: false
 
   defp effective_forbidden_command_patterns(workspace, patterns) when is_binary(workspace) and is_list(patterns) do
     case dispatch_preflight_mode(workspace) do
@@ -2064,7 +2123,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace}) when is_list(patterns) do
+  defp forbidden_command_violation(payload, %{patterns: patterns, workspace: workspace} = command_guard)
+       when is_list(patterns) do
     command = command_text(payload)
     command_for_patterns = command_for_forbidden_patterns(command)
 
@@ -2091,6 +2151,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         cond do
           match == @review_rework_git_diff_base_pattern and
               scope_audit_allowed?(command_for_patterns, workspace) ->
+            :ok
+
+          match == @review_rework_git_log_pattern and
+            not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+              bounded_git_log_metadata_allowed?(command_for_patterns, workspace) ->
             :ok
 
           gh_api_pattern?(match) and integration_check_readonly_gh_api_allowed?(command_for_patterns, workspace) ->
@@ -2140,6 +2205,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp forbidden_command_violation(_payload, _patterns), do: :ok
+
+  defp configured_forbidden_command_match?(command, %{configured_patterns: patterns})
+       when is_binary(command) and is_list(patterns) do
+    not is_nil(first_matching_command_pattern(command, patterns))
+  end
+
+  defp configured_forbidden_command_match?(_command, _command_guard), do: false
 
   defp record_scope_access_events(%{workspace: workspace}, command, pattern)
        when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
@@ -2700,6 +2772,57 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp grep_pattern?(_pattern), do: false
   defp rg_pattern?(pattern) when is_binary(pattern), do: String.contains?(pattern, "rg")
   defp rg_pattern?(_pattern), do: false
+
+  defp bounded_git_log_metadata_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    dispatch_preflight_mode(workspace) == "review_rework" and
+      command
+      |> worker_command_tokens()
+      |> bounded_git_log_metadata_tokens?()
+  end
+
+  defp bounded_git_log_metadata_allowed?(_command, _workspace), do: false
+
+  defp worker_command_tokens(command) do
+    case OptionParser.split(command) do
+      [shell, "-lc", inner]
+      when shell in ["zsh", "bash", "sh", "/bin/zsh", "/bin/bash", "/bin/sh"] ->
+        OptionParser.split(inner)
+
+      tokens ->
+        tokens
+    end
+  rescue
+    _error -> []
+  end
+
+  defp bounded_git_log_metadata_tokens?(["git", "log" | args]) do
+    count_args = Enum.filter(args, &Regex.match?(~r/^-\d{1,2}$/, &1))
+    oneline_count = Enum.count(args, &(&1 == "--oneline"))
+    decorate_count = Enum.count(args, &(&1 in ["--decorate", "--no-decorate"]))
+
+    length(count_args) == 1 and
+      oneline_count == 1 and
+      decorate_count <= 1 and
+      length(args) == 2 + decorate_count and
+      Enum.all?(args, fn arg ->
+        arg == "--oneline" or
+          arg in ["--decorate", "--no-decorate"] or
+          Regex.match?(~r/^-\d{1,2}$/, arg)
+      end) and
+      bounded_git_log_count?(hd(count_args))
+  end
+
+  defp bounded_git_log_metadata_tokens?(_tokens), do: false
+
+  defp bounded_git_log_count?("-" <> count) do
+    case Integer.parse(count) do
+      {value, ""} -> value in 1..20
+      _ -> false
+    end
+  end
+
+  defp bounded_git_log_count?(_count), do: false
 
   defp integration_check_allowed_ref_names(preflight) when is_map(preflight) do
     requirements =

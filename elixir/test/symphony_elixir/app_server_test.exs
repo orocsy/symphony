@@ -1278,6 +1278,59 @@ defmodule SymphonyElixir.AppServerTest do
                  "git diff --name-only --no-renames origin/main...HEAD"
                )
 
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "/bin/zsh -lc 'git log -4 --oneline'"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "/bin/zsh -lc 'git log -5 --oneline --decorate'"
+               )
+
+      assert AppServer.bounded_git_log_exception_available_for_test(workspace, [])
+
+      refute AppServer.bounded_git_log_exception_available_for_test(
+               workspace,
+               ["(^|\\s|[\"'])git(\\s|$)"]
+             )
+
+      refute AppServer.bounded_git_log_exception_available_for_test(
+               workspace,
+               ["(^|\\s|[\"'])git\\s+log\\s+-5"]
+             )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log\\s+-5"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log\\s+-5"]
+               )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
+               )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log --oneline")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log -21 --oneline")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log -4 --oneline --patch")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -4 --oneline'' --patch"
+               )
+
       assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
                AppServer.command_policy_violation_for_test(
                  workspace,
@@ -1292,6 +1345,24 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git diff -- src/main/Button.tsx")
       assert :ok = AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "foo|bar" README.md))
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["README.md", "src/main/Button.tsx"]
+          }
+        })
+      )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
+               )
     after
       File.rm_rf(workspace)
     end
