@@ -2570,9 +2570,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp unsafe_scope_read_option?(command) when is_binary(command) do
     (String.starts_with?(command, "sed ") and not safe_sed_print_slice?(command)) or
       (String.starts_with?(command, "rg ") and
-         Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|pre(?:-glob)?|ignore-file)(?:=|\s|$))/, command)) or
+         Regex.match?(
+           ~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|pre(?:-glob)?|ignore-file|hostname-bin)(?:=|\s|$))/,
+           command
+         )) or
       (String.starts_with?(command, "grep ") and
          Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, command)) or
+      (Regex.match?(~r/\Agit\s+(?:diff|log)(?:\s|$)/, command) and
+         not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, command) and
+                Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, command))) or
       (String.starts_with?(command, "git ") and
          Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, command))
   end

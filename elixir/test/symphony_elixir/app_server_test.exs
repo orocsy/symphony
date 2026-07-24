@@ -916,7 +916,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-read"}}}'
-            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git diff --stat -- src/features/landing/GuestStartScreen.tsx"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
           *)
@@ -946,7 +946,8 @@ defmodule SymphonyElixir.AppServerTest do
       assert {:error, {:forbidden_command, command, pattern}} =
                AppServer.run(workspace, "Fix review feedback", issue)
 
-      assert command == "git diff --stat -- src/features/landing/GuestStartScreen.tsx"
+      assert command ==
+               "git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"
       assert pattern =~ "git\\s+diff\\s+--stat"
 
       events = delivery_events!(workspace)
@@ -4921,9 +4922,19 @@ defmodule SymphonyElixir.AppServerTest do
 
       refute AppServer.pure_scope_read_command_for_test("rg --file=/tmp/private-patterns tests/unit/named.test.ts")
 
+      refute AppServer.pure_scope_read_command_for_test("rg --pretty --hyperlink-format=file://{host}{path} --hostname-bin=./scripts/helper token tests/unit/named.test.ts")
+
       refute AppServer.pure_scope_read_command_for_test("grep --file=apps/private.ts token tests/unit/named.test.ts")
 
       refute AppServer.pure_scope_read_command_for_test("grep --exclude-from apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git diff -- tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("git diff --no-ext-diff --no-textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git log -p -- tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("git log -p --no-ext-diff --no-textconv -- tests/unit/named.test.ts")
 
       refute AppServer.pure_scope_read_command_for_test("sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts")
 

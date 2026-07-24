@@ -118,24 +118,27 @@ defmodule SymphonyElixir.HandoffCertificate do
 
   @spec latest_signed_head(Issue.t(), String.t()) :: {:ok, String.t()} | {:stale, atom()} | :not_ready
   def latest_signed_head(%Issue{} = issue, workspace) when is_binary(workspace) do
-    path = Path.join(workspace, @certificate_path)
-
-    if File.regular?(path) do
-      with {:ok, certificate} <- read(path),
-           {:ok, compiled} <- structured_contract(issue),
-           :ok <- verify_static_fields(certificate, issue, compiled),
-           head_sha when is_binary(head_sha) and head_sha != "" <- certificate["head_sha"] do
-        {:ok, head_sha}
-      else
-        {:stale, reason} -> {:stale, reason}
-        _ -> {:stale, :certificate_unverifiable}
-      end
-    else
-      :not_ready
-    end
+    latest_signed_head(issue, workspace, nil)
   end
 
   def latest_signed_head(_issue, _workspace), do: :not_ready
+
+  @spec latest_signed_head(Issue.t(), String.t(), String.t() | nil) ::
+          {:ok, String.t()} | {:stale, atom()} | :not_ready
+  def latest_signed_head(%Issue{} = issue, workspace, worker_host) when is_binary(workspace) do
+    with {:ok, certificate} <- read_certificate(workspace, worker_host),
+         {:ok, compiled} <- structured_contract(issue),
+         :ok <- verify_static_fields(certificate, issue, compiled),
+         head_sha when is_binary(head_sha) and head_sha != "" <- certificate["head_sha"] do
+      {:ok, head_sha}
+    else
+      {:error, :enoent} -> :not_ready
+      {:stale, reason} -> {:stale, reason}
+      _ -> {:stale, :certificate_unverifiable}
+    end
+  end
+
+  def latest_signed_head(_issue, _workspace, _worker_host), do: :not_ready
 
   @spec path() :: String.t()
   def path, do: @certificate_path
@@ -199,15 +202,6 @@ defmodule SymphonyElixir.HandoffCertificate do
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, Jason.encode!(certificate) <> "\n", [:append])
     :ok
-  end
-
-  defp read(path) do
-    with {:ok, body} <- File.read(path),
-         {:ok, decoded} when is_map(decoded) <- Jason.decode(body) do
-      {:ok, decoded}
-    else
-      _ -> {:error, :invalid_certificate}
-    end
   end
 
   defp read_certificate(workspace, nil) do

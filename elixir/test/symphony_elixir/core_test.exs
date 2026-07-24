@@ -2843,7 +2843,8 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
 
       write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: Path.join(test_root, "workspaces")
+        workspace_root: Path.join(test_root, "workspaces"),
+        review_monitor_enabled: false
       )
 
       issue =
@@ -2879,6 +2880,15 @@ defmodule SymphonyElixir.CoreTest do
                },
                "handoff_recovery"
              )
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        completed: MapSet.new([issue.id]),
+        completed_issue_revisions: %{issue.id => {"rework", nil}},
+        completed_issue_worker_hosts: %{issue.id => "worker-a"}
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
       File.rm_rf(test_root)
     end

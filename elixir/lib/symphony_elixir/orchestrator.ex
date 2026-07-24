@@ -67,6 +67,7 @@ defmodule SymphonyElixir.Orchestrator do
       running: %{},
       completed: MapSet.new(),
       completed_issue_revisions: %{},
+      completed_issue_worker_hosts: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
@@ -2799,14 +2800,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp completed_pushed_handoff_hold?(
          %Issue{} = issue,
-         %State{completed: completed, completed_issue_revisions: revisions}
+         %State{
+           completed: completed,
+           completed_issue_revisions: revisions,
+           completed_issue_worker_hosts: worker_hosts
+         }
        ) do
     monitor = Config.settings!().review_monitor
 
     not monitor.enabled and
       MapSet.member?(completed, issue.id) and
       completed_issue_revision_matches?(issue, revisions) and
-      current_signed_handoff_head?(issue)
+      current_signed_handoff_head?(issue, Map.get(worker_hosts, issue.id))
   end
 
   defp completed_pushed_handoff_hold?(_issue, _state), do: false
@@ -2816,10 +2821,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp completed_issue_revision_matches?(_issue, _revisions), do: false
 
-  defp current_signed_handoff_head?(%Issue{} = issue) do
-    with {:ok, workspace} <- Workspace.path_for_issue(issue),
-         {:ok, signed_head} <- HandoffCertificate.latest_signed_head(issue, workspace),
-         {:ok, current_head} <- git_output(workspace, ["rev-parse", "HEAD"]) do
+  defp current_signed_handoff_head?(%Issue{} = issue, worker_host) do
+    with {:ok, workspace} <- Workspace.path_for_issue(issue, worker_host),
+         {:ok, signed_head} <- HandoffCertificate.latest_signed_head(issue, workspace, worker_host),
+         {:ok, current_head} <- git_output_on_host(workspace, ["rev-parse", "HEAD"], worker_host) do
       signed_head == String.trim(current_head)
     else
       _ -> false
@@ -3085,26 +3090,36 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
-  defp complete_issue(%State{} = state, %Issue{} = issue) do
+  defp complete_issue(%State{} = state, {%Issue{} = issue, worker_host}) do
     %{
       state
       | completed: MapSet.put(state.completed, issue.id),
         completed_issue_revisions: Map.put(state.completed_issue_revisions, issue.id, completed_issue_revision(issue)),
+        completed_issue_worker_hosts: Map.put(state.completed_issue_worker_hosts, issue.id, worker_host),
         retry_attempts: Map.delete(state.retry_attempts, issue.id)
     }
   end
+
+  defp complete_issue(%State{} = state, %Issue{} = issue), do: complete_issue(state, {issue, nil})
+
+  defp complete_issue(%State{} = state, {issue_id, _worker_host}) when is_binary(issue_id),
+    do: complete_issue(state, issue_id)
 
   defp complete_issue(%State{} = state, issue_id) do
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
         completed_issue_revisions: Map.delete(state.completed_issue_revisions, issue_id),
+        completed_issue_worker_hosts: Map.delete(state.completed_issue_worker_hosts, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end
 
-  defp completion_issue(%{issue: %Issue{} = issue}, _issue_id), do: issue
-  defp completion_issue(_running_entry, issue_id), do: issue_id
+  defp completion_issue(%{issue: %Issue{} = issue} = running_entry, _issue_id),
+    do: {issue, Map.get(running_entry, :worker_host)}
+
+  defp completion_issue(running_entry, issue_id),
+    do: {issue_id, Map.get(running_entry, :worker_host)}
 
   defp completed_issue_revision(%Issue{} = issue) do
     updated_at =
