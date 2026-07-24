@@ -4781,6 +4781,48 @@ defmodule SymphonyElixir.AppServerTest do
     try do
       workspace = Path.join(test_root, "MT-HARD-GUARD")
       File.mkdir_p!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["tests/unit/named.test.ts"],
+            "scope_bundle" => %{
+              "write_scope" => [],
+              "read_context" => [
+                %{
+                  "path" => "tests/unit/named.test.ts",
+                  "operation" => "read",
+                  "source" => "local_issue_brief.read_context"
+                }
+              ],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      hidden_operand_command = "rg token .env tests/unit/named.test.ts"
+
+      assert {:error, ^hidden_operand_command, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 hidden_operand_command,
+                 []
+               )
+
+      hidden_dash_operand_command = "rg token -- -secret tests/unit/named.test.ts"
+
+      assert {:error, ^hidden_dash_operand_command, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 hidden_dash_operand_command,
+                 []
+               )
 
       command =
         ~S|python3 .codex/delivery/bin/orocsy.py --repo . inbox create --summary "$(cat tests/unit/named.test.ts)"|

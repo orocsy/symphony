@@ -2702,6 +2702,7 @@ defmodule SymphonyElixir.CoreTest do
           title: "Desktop guest setup handoff",
           description: "The worker pushed its validated correction.",
           branch_name: branch,
+          updated_at: DateTime.add(started_at, -60, :second),
           labels: []
         })
 
@@ -2755,6 +2756,11 @@ defmodule SymphonyElixir.CoreTest do
       assert MapSet.member?(state.completed, issue_id)
       refute Map.has_key?(state.retry_attempts, issue_id)
       refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      assert Orchestrator.completed_issue_revision_matches_for_test(issue, state)
+
+      reentered_issue = %{issue | updated_at: DateTime.utc_now()}
+      refute Orchestrator.completed_issue_revision_matches_for_test(reentered_issue, state)
+
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
     after
       File.rm_rf(test_root)
@@ -6651,7 +6657,17 @@ defmodule SymphonyElixir.CoreTest do
         "patch_id" => "scope_access_stale_turn",
         "status" => "active",
         "decision" => "allow_once",
+        "decision_class" => "allow_once",
+        "reason_class" => "safe_read_context",
+        "source" => "symphony.runtime.scope-access-controller",
         "target" => "read_context",
+        "operation" => "add",
+        "policy_hash_before" => "sha256:stale-turn-policy",
+        "request" => %{
+          "operation" => "read",
+          "paths" => ["tests/unit/desktop-guest-setup.test.tsx"],
+          "policy_hash" => "sha256:stale-turn-policy"
+        },
         "entries" => [
           %{
             "path" => "tests/unit/desktop-guest-setup.test.tsx",
@@ -6667,6 +6683,21 @@ defmodule SymphonyElixir.CoreTest do
 
       assert written_patch["status"] == "active"
 
+      unsigned_path =
+        Path.join([
+          workspace,
+          SymphonyElixir.ScopeAccess.Controller.policy_patch_dir(),
+          "unsigned-active.json"
+        ])
+
+      unsigned_patch =
+        written_patch
+        |> Map.drop(["controller_signature"])
+        |> Map.put("patch_id", "scope_access_unsigned_turn")
+        |> Map.put("path", Path.relative_to(unsigned_path, workspace))
+
+      File.write!(unsigned_path, Jason.encode!(unsigned_patch, pretty: true) <> "\n")
+
       assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       persisted_patch =
@@ -6676,6 +6707,9 @@ defmodule SymphonyElixir.CoreTest do
         |> Jason.decode!()
 
       assert persisted_patch["status"] == "consumed"
+      assert SymphonyElixir.ControllerEvidence.valid?(persisted_patch)
+
+      assert unsigned_path |> File.read!() |> Jason.decode!() |> Map.fetch!("status") == "active"
 
       refute Enum.any?(
                get_in(preflight, ["requirements", "scope_bundle", "read_context"]) || [],
@@ -15911,6 +15945,7 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = SymphonyElixir.DispatchPreflight.consume_turn_policy_patches(workspace)
       consumed_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
       assert consumed_patch["status"] == "consumed"
+      assert SymphonyElixir.ControllerEvidence.valid?(consumed_patch)
 
       assert {:ok, expired_preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
 
@@ -23131,6 +23166,58 @@ defmodule SymphonyElixir.CoreTest do
                ]
              })
     end
+  end
+
+  test "structured file corrections are actionable without an imperative verb whitelist" do
+    for instruction <- [
+          "Use a null guard in src/components/ui/bottom-sheet.tsx.",
+          "Ensure src/components/ui/bottom-sheet.tsx handles nil.",
+          "Guard the access in src/components/ui/bottom-sheet.tsx.",
+          "Use the authenticated path in elixir/lib/symphony_elixir/dispatch_preflight.ex."
+        ] do
+      assert SymphonyElixir.RescueSupervisor.explicit_structured_code_change_request_for_test(%{
+               "required_corrections" => [instruction]
+             })
+    end
+
+    refute SymphonyElixir.RescueSupervisor.explicit_structured_code_change_request_for_test(%{
+             "required_corrections" => [
+               "Wait for the Codex review response for src/components/ui/bottom-sheet.tsx."
+             ]
+           })
+  end
+
+  test "dirty handoff recovery filters review feedback through implementation scope" do
+    in_scope = %{
+      type: :thread,
+      payload: %{
+        "path" => "src/features/swipe/SwipeExperience.tsx",
+        "body" => "Fix active card identity."
+      }
+    }
+
+    protected_out_of_scope = %{
+      type: :thread,
+      payload: %{
+        "path" => "src/features/profile/ProfileScreen.tsx",
+        "body" => "Change unrelated profile layout."
+      }
+    }
+
+    requirements = %{
+      "ticket_type" => "implementation",
+      "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+      "shared_files" => [
+        "src/features/profile/ProfileScreen.tsx (read-only; owned by the Profile lane)"
+      ],
+      "out_of_scope" => ["src/features/profile/ProfileScreen.tsx"]
+    }
+
+    assert [^in_scope] =
+             SymphonyElixir.DispatchPreflight.handoff_recovery_feedback_for_test(
+               %{feedback: [in_scope, protected_out_of_scope]},
+               requirements
+             )
   end
 
   defp pending_review_correction_fixture(test_root, issue_id, correction_attrs \\ %{}) do

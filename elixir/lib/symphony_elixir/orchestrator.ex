@@ -66,6 +66,7 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_token,
       running: %{},
       completed: MapSet.new(),
+      completed_issue_revisions: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
@@ -168,14 +169,14 @@ defmodule SymphonyElixir.Orchestrator do
                   Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; open Orocsy correction blocks continuation until resolved")
 
                   state
-                  |> complete_issue(issue_id)
+                  |> complete_issue(completion_issue(running_entry, issue_id))
                   |> release_issue_claim(issue_id)
 
                 normal_completion_handoff_stop?(running_entry) ->
                   Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; pushed handoff checkpoint blocks continuation until review/Linear state changes")
 
                   state
-                  |> complete_issue(issue_id)
+                  |> complete_issue(completion_issue(running_entry, issue_id))
                   |> release_issue_claim(issue_id)
 
                 true ->
@@ -189,7 +190,7 @@ defmodule SymphonyElixir.Orchestrator do
                       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
                       state
-                      |> complete_issue(issue_id)
+                      |> complete_issue(completion_issue(running_entry, issue_id))
                       |> schedule_issue_retry(issue_id, 1, %{
                         identifier: running_entry.identifier,
                         delay_type: :continuation,
@@ -207,7 +208,7 @@ defmodule SymphonyElixir.Orchestrator do
                   )
 
                   state
-                  |> complete_issue(issue_id)
+                  |> complete_issue(completion_issue(running_entry, issue_id))
                   |> release_issue_claim(issue_id)
 
                 provider_usage_limit_failure?(reason) ->
@@ -230,7 +231,7 @@ defmodule SymphonyElixir.Orchestrator do
                   Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; open Orocsy correction blocks retry until resolved")
 
                   state
-                  |> complete_issue(issue_id)
+                  |> complete_issue(completion_issue(running_entry, issue_id))
                   |> release_issue_claim(issue_id)
 
                 normal_completion_handoff_stop?(running_entry) ->
@@ -239,7 +240,7 @@ defmodule SymphonyElixir.Orchestrator do
                   )
 
                   state
-                  |> complete_issue(issue_id)
+                  |> complete_issue(completion_issue(running_entry, issue_id))
                   |> release_issue_claim(issue_id)
 
                 true ->
@@ -442,6 +443,11 @@ defmodule SymphonyElixir.Orchestrator do
     @doc false
     def fresh_clean_pushed_handoff_stop_for_test(running_entry, mode) when is_map(running_entry) do
       fresh_clean_pushed_handoff_stop?(running_entry, mode)
+    end
+
+    @doc false
+    def completed_issue_revision_matches_for_test(%Issue{} = issue, %State{} = state) do
+      completed_issue_revision_matches?(issue, state.completed_issue_revisions)
     end
   end
 
@@ -682,7 +688,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
         |> terminate_running_issue(issue_id, false)
-        |> complete_issue(issue_id)
+        |> complete_issue(completion_issue(running_entry, issue_id))
 
       validation_blocker_guard? ->
         identifier = Map.get(running_entry, :identifier, issue_id)
@@ -741,7 +747,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
         |> terminate_running_issue(issue_id, false)
-        |> complete_issue(issue_id)
+        |> complete_issue(completion_issue(running_entry, issue_id))
 
       is_integer(elapsed_ms) and is_integer(quiet_ms) and quiet_ms > timeout_ms and
           durable_progress_guard_tokens >= min_tokens ->
@@ -1369,7 +1375,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_resolve_before_dispatch(%State{} = state, %Issue{} = issue) do
     case maybe_complete_review_classification_handoff(issue) do
       {:completed, _handoff} ->
-        {:resolved, complete_issue(state, issue.id)}
+        {:resolved, complete_issue(state, issue)}
 
       {:blocked, _reason} ->
         {:blocked, state}
@@ -1377,7 +1383,7 @@ defmodule SymphonyElixir.Orchestrator do
       :not_ready ->
         case maybe_complete_pushed_review_handoff(issue) do
           {:completed, _handoff} ->
-            {:resolved, complete_issue(state, issue.id)}
+            {:resolved, complete_issue(state, issue)}
 
           {:blocked, _reason} ->
             {:blocked, state}
@@ -1385,7 +1391,7 @@ defmodule SymphonyElixir.Orchestrator do
           :not_ready ->
             case maybe_handle_orchestration_review_pending(issue) do
               {:completed, _handoff} ->
-                {:resolved, complete_issue(state, issue.id)}
+                {:resolved, complete_issue(state, issue)}
 
               {:blocked, _reason} ->
                 {:blocked, state}
@@ -2773,7 +2779,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed, completed: completed} = state,
+         %State{running: running, claimed: claimed} = state,
          active_states,
          terminal_states
        ) do
@@ -2781,7 +2787,7 @@ defmodule SymphonyElixir.Orchestrator do
       !issue_blocked_by_non_terminal?(issue, terminal_states) and
       workflow_correction_gate_allows_dispatch?(issue) and
       !review_rework_review_request_pending?(issue) and
-      !completed_pushed_handoff_hold?(issue, completed) and
+      !completed_pushed_handoff_hold?(issue, state) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -2791,15 +2797,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
 
-  defp completed_pushed_handoff_hold?(%Issue{} = issue, completed) do
+  defp completed_pushed_handoff_hold?(
+         %Issue{} = issue,
+         %State{completed: completed, completed_issue_revisions: revisions}
+       ) do
     monitor = Config.settings!().review_monitor
 
     not monitor.enabled and
       MapSet.member?(completed, issue.id) and
+      completed_issue_revision_matches?(issue, revisions) and
       current_signed_handoff_head?(issue)
   end
 
-  defp completed_pushed_handoff_hold?(_issue, _completed), do: false
+  defp completed_pushed_handoff_hold?(_issue, _state), do: false
+
+  defp completed_issue_revision_matches?(%Issue{} = issue, revisions) when is_map(revisions),
+    do: Map.get(revisions, issue.id) == completed_issue_revision(issue)
+
+  defp completed_issue_revision_matches?(_issue, _revisions), do: false
 
   defp current_signed_handoff_head?(%Issue{} = issue) do
     with {:ok, workspace} <- Workspace.path_for_issue(issue),
@@ -3070,12 +3085,36 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
+  defp complete_issue(%State{} = state, %Issue{} = issue) do
+    %{
+      state
+      | completed: MapSet.put(state.completed, issue.id),
+        completed_issue_revisions: Map.put(state.completed_issue_revisions, issue.id, completed_issue_revision(issue)),
+        retry_attempts: Map.delete(state.retry_attempts, issue.id)
+    }
+  end
+
   defp complete_issue(%State{} = state, issue_id) do
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
+        completed_issue_revisions: Map.delete(state.completed_issue_revisions, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
+  end
+
+  defp completion_issue(%{issue: %Issue{} = issue}, _issue_id), do: issue
+  defp completion_issue(_running_entry, issue_id), do: issue_id
+
+  defp completed_issue_revision(%Issue{} = issue) do
+    updated_at =
+      case issue.updated_at do
+        %DateTime{} = value -> DateTime.to_iso8601(value)
+        value when is_binary(value) -> value
+        _ -> nil
+      end
+
+    {normalize_issue_state(issue.state || ""), updated_at}
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)

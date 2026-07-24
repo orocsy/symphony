@@ -175,7 +175,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   @spec consume_turn_policy_patches(String.t() | nil) :: :ok
   def consume_turn_policy_patches(workspace) when is_binary(workspace) do
     workspace
-    |> active_policy_patch_files()
+    |> policy_patches()
     |> Enum.each(&consume_turn_policy_patch(workspace, &1))
 
     prune_persisted_turn_policy_patch_entries(workspace)
@@ -1140,7 +1140,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
-    requirements = add_review_scope_bundle_entries(requirements, if(test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])))
+    feedback = handoff_recovery_feedback(inspection, requirements)
+    requirements = add_review_scope_bundle_entries(requirements, feedback)
     all_open_corrections = all_open_correction_summaries(workspace)
     open_corrections = handoff_recovery_correction_summaries(all_open_corrections)
     correction_active? = open_corrections != []
@@ -1150,8 +1151,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       all_open_corrections
       |> List.first()
       |> retryable_controller_validation_correction?()
-
-    feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
       "schema_version" => 1,
@@ -2015,7 +2014,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         case Jason.decode(body) do
           {:ok, %{} = patch} ->
             workspace = path |> Path.dirname() |> Path.dirname() |> Path.dirname() |> Path.dirname()
-            [Map.put_new(patch, "path", Path.relative_to(path, workspace))]
+            [Map.put(patch, "path", Path.relative_to(path, workspace))]
 
           _ ->
             []
@@ -2219,6 +2218,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       patch
       |> Map.put("status", "consumed")
       |> Map.put_new("consumed_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> ControllerEvidence.sign()
       |> then(&File.write!(path, Jason.encode!(&1, pretty: true) <> "\n"))
     end
   rescue
@@ -2226,6 +2226,17 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp consume_turn_policy_patch(_workspace, _patch), do: :ok
+
+  defp handoff_recovery_feedback(inspection, requirements) do
+    if test_spec_issue?(requirements),
+      do: [],
+      else: review_feedback_for_requirements(inspection, requirements)
+  end
+
+  if Code.ensure_loaded?(Mix) and Mix.env() == :test do
+    def handoff_recovery_feedback_for_test(inspection, requirements),
+      do: handoff_recovery_feedback(inspection, requirements)
+  end
 
   defp turn_policy_patch?(%{"decision" => "allow_once"}), do: true
 

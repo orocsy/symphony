@@ -2369,7 +2369,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       case ScopeAccess.classify_command(command, policy) do
         %{} = request ->
-          if request["broad"] == true or scope_access_command_eligible?(command, request) do
+          if request["broad"] == true or
+               scope_access_command_eligible?(command, request) do
             case ScopeAccessController.decide(request, policy, workspace) do
               {:allow_once, patch} ->
                 if scope_access_command_eligible?(command, request) do
@@ -2424,7 +2425,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            "operation" => operation,
            "command_class" => command_class,
            "broad" => false
-         }
+         } = request
        )
        when operation in ["read", "search"] and
               command_class in [
@@ -2434,12 +2435,99 @@ defmodule SymphonyElixir.Codex.AppServer do
                 "git_diff",
                 "git_discovery"
               ] do
-    command
-    |> unwrap_shell_login_command()
-    |> pure_scope_read_command?()
+    normalized = unwrap_shell_login_command(command)
+    pure_scope_read_command?(normalized) and all_scope_read_operands_classified?(normalized, request)
   end
 
   defp scope_access_command_eligible?(_command, _request), do: false
+
+  defp all_scope_read_operands_classified?(
+         command,
+         %{"paths" => requested_paths, "command_class" => command_class}
+       )
+       when is_binary(command) and is_list(requested_paths) and is_binary(command_class) do
+    case scope_read_operand_paths(command, command_class) do
+      paths when is_list(paths) and paths != [] ->
+        normalized_requested = requested_paths |> Enum.map(&normalize_scope_operand_path/1) |> MapSet.new()
+        normalized_operands = paths |> Enum.map(&normalize_scope_operand_path/1) |> MapSet.new()
+        normalized_operands == normalized_requested
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp all_scope_read_operands_classified?(_command, _request), do: false
+
+  defp scope_read_operand_paths(command, command_class) when is_binary(command) do
+    case {command_class, OptionParser.split(command)} do
+      {"bounded_file_read", ["sed" | args]} ->
+        args |> Enum.reject(&scope_read_option_token?/1) |> List.last() |> List.wrap()
+
+      {"bounded_file_read", [tool | args]} when tool in ["cat", "head", "tail", "nl"] ->
+        scope_read_non_option_operands(args)
+
+      {"bounded_file_search", [tool | args]} when tool in ["rg", "grep"] ->
+        args
+        |> scope_read_non_option_operands()
+        |> case do
+          [_pattern | paths] -> paths
+          _ -> []
+        end
+
+      {"directory_listing", ["ls" | args]} ->
+        scope_read_non_option_operands(args)
+
+      {command_class, ["git", _subcommand | args]}
+      when command_class in ["git_diff", "git_discovery"] ->
+        git_scope_read_operands(args)
+
+      _ ->
+        :unclassified
+    end
+  end
+
+  defp scope_read_operand_paths(_command, _command_class), do: :unclassified
+
+  defp git_scope_read_operands(args) when is_list(args) do
+    case Enum.split_while(args, &(&1 != "--")) do
+      {_options, ["--" | paths]} -> Enum.reject(paths, &(&1 == ""))
+      _ -> :unclassified
+    end
+  end
+
+  defp scope_read_non_option_operands(args) when is_list(args) do
+    {operands, _after_options?} =
+      Enum.reduce(args, {[], false}, fn token, {operands, after_options?} ->
+        cond do
+          token == "--" -> {operands, true}
+          after_options? -> {[token | operands], true}
+          scope_read_option_token?(token) -> {operands, false}
+          Regex.match?(~r/\A\d+\z/, token) -> {operands, false}
+          true -> {[token | operands], false}
+        end
+      end)
+
+    Enum.reverse(operands)
+  end
+
+  defp scope_read_non_option_operands(_args), do: []
+
+  defp scope_read_option_token?(token) when is_binary(token),
+    do: token == "--" or String.starts_with?(token, "-")
+
+  defp scope_read_option_token?(_token), do: true
+
+  defp normalize_scope_operand_path(path) when is_binary(path) do
+    path
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+    |> String.trim_trailing("/")
+  end
+
+  defp normalize_scope_operand_path(_path), do: ""
 
   defp unwrap_shell_login_command(command) when is_binary(command) do
     normalized =
