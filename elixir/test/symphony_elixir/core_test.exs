@@ -16240,9 +16240,12 @@ defmodule SymphonyElixir.CoreTest do
         })
       )
 
-      grep_command = ~s(grep -nE "test|describe" #{test_path})
+      grep_command = ~s(grep -nE 'test|describe' #{test_path})
       sed_command = ~s(sed -n '1,160p' #{test_path})
       compound_command = grep_command <> " && " <> sed_command
+      wrapped_grep_command = ~s(/bin/zsh -lc "#{grep_command}")
+      wrapped_sed_command = ~s(/bin/zsh -lc "#{sed_command}")
+      wrapped_compound_command = ~s(/bin/zsh -lc "#{compound_command}")
 
       forbidden_patterns = [
         "(^|\\s|[\"'])grep(\\s|$)",
@@ -16251,9 +16254,14 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
       assert :ok = AppServer.command_policy_violation_for_test(workspace, sed_command, forbidden_patterns)
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_grep_command, forbidden_patterns)
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, forbidden_patterns)
 
       assert {:error, ^compound_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, compound_command, forbidden_patterns)
+
+      assert {:error, ^wrapped_compound_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_compound_command, forbidden_patterns)
     after
       File.rm_rf(test_root)
     end

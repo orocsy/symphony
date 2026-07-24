@@ -3632,6 +3632,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp command_chain_operator_outside_quotes?(command) when is_binary(command) do
     command
+    |> unwrap_shell_login_command()
     |> String.graphemes()
     |> chain_operator_scan(nil, nil)
   end
