@@ -66,6 +66,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
   @review_rework_dirty_validated_handoff_recheck_pattern "dirty_validated_handoff_recheck_before_commit"
   @review_rework_git_log_pattern "(^|\\s|[\"'])git\\s+log(\\s|$)"
+  @handoff_recovery_exact_read_pattern "handoff_recovery_exact_read_scope"
   @review_rework_forbidden_command_patterns [
     @review_rework_command_chain_pattern,
     @review_rework_dirty_validated_handoff_recheck_pattern,
@@ -2196,6 +2197,8 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_list(patterns) do
     command = command_text(payload)
     command_for_patterns = command_for_forbidden_patterns(command)
+    configured_pattern = configured_forbidden_command_pattern(command_for_patterns, command_guard)
+    structured_handoff_read? = structured_handoff_read_candidate?(command_for_patterns, workspace)
 
     cond do
       is_nil(command) ->
@@ -2215,6 +2218,16 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       dirty_validated_handoff_recheck_before_commit?(command_for_patterns, workspace) ->
         {:error, command, @review_rework_dirty_validated_handoff_recheck_pattern}
+
+      structured_handoff_read? and is_binary(configured_pattern) ->
+        {:error, command, configured_pattern}
+
+      structured_handoff_read? and
+          structured_handoff_exact_read_allowed?(command_for_patterns, workspace) ->
+        :ok
+
+      structured_handoff_read? ->
+        {:error, command, @handoff_recovery_exact_read_pattern}
 
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
@@ -2240,16 +2253,16 @@ defmodule SymphonyElixir.Codex.AppServer do
             :ok
 
           grep_pattern?(match) and
-            not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+            configured_scope_exception_allowed?(command_for_patterns, command_guard, workspace) and
               scoped_file_grep_allowed?(command_for_patterns, workspace) ->
             :ok
 
           rg_pattern?(match) and
-            not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+            configured_scope_exception_allowed?(command_for_patterns, command_guard, workspace) and
               scoped_file_rg_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+          configured_scope_exception_allowed?(command_for_patterns, command_guard, workspace) and
               review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
             :ok
 
@@ -2282,10 +2295,21 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp configured_forbidden_command_match?(command, %{configured_patterns: patterns})
        when is_binary(command) and is_list(patterns) do
-    not is_nil(first_matching_command_pattern(command, patterns))
+    not is_nil(configured_forbidden_command_pattern(command, %{configured_patterns: patterns}))
   end
 
   defp configured_forbidden_command_match?(_command, _command_guard), do: false
+
+  defp configured_forbidden_command_pattern(command, %{configured_patterns: patterns})
+       when is_binary(command) and is_list(patterns),
+       do: first_matching_command_pattern(command, patterns)
+
+  defp configured_forbidden_command_pattern(_command, _command_guard), do: nil
+
+  defp configured_scope_exception_allowed?(command, command_guard, workspace) do
+    dispatch_preflight_mode(workspace) != "handoff_recovery" or
+      not configured_forbidden_command_match?(command, command_guard)
+  end
 
   defp record_scope_access_events(%{workspace: workspace}, command, pattern)
        when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
@@ -2420,6 +2444,7 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_binary(pattern) and is_binary(workspace) do
     pattern in @review_rework_forbidden_command_patterns or
       pattern in @fresh_implementation_forbidden_command_patterns or
+      pattern == @handoff_recovery_exact_read_pattern or
       pattern in review_rework_path_guard_patterns(workspace)
   end
 
@@ -2958,6 +2983,28 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp handoff_recovery_exact_read_allowed?(_command, _preflight, _workspace), do: false
 
+  defp structured_handoff_read_candidate?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    structured_handoff_recovery?(workspace) and
+      (is_binary(exact_read_command_class(unwrap_shell_login_command(command))) or
+         command_chain_operator_outside_quotes?(command))
+  end
+
+  defp structured_handoff_read_candidate?(_command, _workspace), do: false
+
+  defp structured_handoff_exact_read_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    with {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp structured_handoff_exact_read_allowed?(_command, _workspace), do: false
+
   defp runtime_contract_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}})
        when is_map(bundle) do
     [
@@ -3001,7 +3048,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          true <- MapSet.member?(allowed_paths, normalized_path),
          false <- Path.type(normalized_path) == :absolute,
          {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
-         {:ok, canonical_target} <- PathSafety.canonicalize(Path.join(workspace, normalized_path)) do
+         {:ok, canonical_target} <- PathSafety.canonicalize(Path.join(workspace, normalized_path)),
+         true <- File.regular?(canonical_target) do
       canonical_target != canonical_workspace and
         String.starts_with?(canonical_target, canonical_workspace <> "/")
     else

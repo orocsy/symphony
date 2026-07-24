@@ -748,7 +748,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert {:error, _command, pattern} =
                AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "header" src))
 
-      assert pattern =~ "rg"
+      assert pattern == "handoff_recovery_exact_read_scope"
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
 
       base_params = %{

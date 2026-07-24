@@ -16200,6 +16200,10 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      File.mkdir_p!(Path.join(workspace, "tests/e2e/declared-dir"))
+      File.mkdir_p!(Path.join(workspace, "config"))
+      File.mkdir_p!(Path.join(workspace, "priv"))
+      File.mkdir_p!(Path.join(workspace, ".github/workflows"))
       File.mkdir_p!(state_dir)
 
       File.write!(
@@ -16209,6 +16213,10 @@ defmodule SymphonyElixir.CoreTest do
 
       File.write!(Path.join(workspace, "tests/e2e/derived-helper.ts"), "export {};\n")
       File.write!(Path.join(workspace, "tests/e2e/knowledge-helper.ts"), "export {};\n")
+      File.write!(Path.join(workspace, "tests/e2e/declared-dir/child.ts"), "export {};\n")
+      File.write!(Path.join(workspace, "config/config.exs"), "import Config\n")
+      File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
+      File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
       File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
 
       scope_bundle =
@@ -16244,6 +16252,30 @@ defmodule SymphonyElixir.CoreTest do
             %{
               "path" => "tests/e2e/knowledge-helper.ts",
               "source" => "knowledge_ledger.shared_context",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/declared-dir",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "config/config.exs",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "priv/data.json",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => ".github/workflows/ci.yml",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
               "operation" => "read",
               "expires" => "turn"
             }
@@ -16329,6 +16361,21 @@ defmodule SymphonyElixir.CoreTest do
       assert compound_scope_access["decision"] == "allow_once"
       assert compound_scope_access["reason_class"] == "safe_read_context"
 
+      cross_root_chain =
+        "cat config/config.exs && sed -n '1,20p' priv/data.json && cat .github/workflows/ci.yml"
+
+      cross_root_request = SymphonyElixir.ScopeAccess.classify_command(cross_root_chain, preflight)
+
+      assert cross_root_request["command_class"] == "bounded_read_chain"
+
+      assert cross_root_request["paths"] == [
+               "config/config.exs",
+               "priv/data.json",
+               ".github/workflows/ci.yml"
+             ]
+
+      refute cross_root_request["broad"]
+
       mixed_chain = grep_command <> " && rm -f #{test_path}"
       mixed_request = SymphonyElixir.ScopeAccess.classify_command(mixed_chain, preflight)
 
@@ -16400,6 +16447,8 @@ defmodule SymphonyElixir.CoreTest do
 
       rg_encoding_command = "rg -n -E utf-8 test #{test_path}"
       rg_follow_command = "rg -nL test #{test_path}"
+      rg_command = "rg -n test #{test_path}"
+      configured_rg_pattern = "(^|\\s|[\"'])rg(\\s|$)"
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, rg_encoding_command, [])
@@ -16407,15 +16456,39 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, ^rg_follow_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, rg_follow_command, [])
 
+      assert {:error, ^rg_command, ^configured_rg_pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 rg_command,
+                 [configured_rg_pattern]
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, "cat config/config.exs", [])
+
+      undeclared_cat = "cat /etc/passwd"
+      directory_rg = "rg -n test tests/e2e/declared-dir"
+      mutating_chain = sed_command <> " && rm -f #{test_path}"
+
+      assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, undeclared_cat, [])
+
+      assert {:error, ^directory_rg, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, directory_rg, [])
+
+      assert {:error, ^mutating_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, mutating_chain, [])
+
       preflight_path = Path.join(state_dir, "dispatch-preflight.json")
       review_preflight = preflight_path |> File.read!() |> Jason.decode!() |> Map.put("mode", "review_rework")
       File.write!(preflight_path, Jason.encode!(review_preflight))
 
-      rg_command = "rg -n test #{test_path}"
-      configured_rg_pattern = "(^|\\s|[\"'])rg(\\s|$)"
-
-      assert {:error, ^rg_command, ^configured_rg_pattern} =
-               AppServer.command_policy_violation_for_test(workspace, rg_command, [configured_rg_pattern])
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 rg_command,
+                 [configured_rg_pattern]
+               )
 
       piped_read = sed_command <> "|tee tests/e2e/unscoped-output.spec.ts"
       unspaced_chain = sed_command <> ";rm -rf target"
