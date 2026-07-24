@@ -45,6 +45,7 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp command_request(command, policy_bundle) do
     [
+      &bounded_read_chain_request/2,
       &shell_chain_request/2,
       &sed_read_request/2,
       &simple_read_request/2,
@@ -59,6 +60,34 @@ defmodule SymphonyElixir.ScopeAccess do
     ]
     |> Enum.find_value(fn classifier -> classifier.(command, policy_bundle) end)
   end
+
+  defp bounded_read_chain_request(command, policy_bundle) do
+    with {:ok, segments} when length(segments) > 1 <- split_read_chain(command),
+         requests when length(requests) == length(segments) <-
+           Enum.map(segments, &bounded_read_segment_request(&1, policy_bundle)),
+         true <- Enum.all?(requests, &bounded_exact_read_request?/1) do
+      paths = requests |> Enum.flat_map(& &1["paths"]) |> Enum.uniq()
+      request(command, "read", "bounded_read_chain", paths, false, policy_bundle)
+    else
+      _ -> nil
+    end
+  end
+
+  defp bounded_read_segment_request(command, policy_bundle) do
+    [
+      &sed_read_request/2,
+      &simple_read_request/2,
+      &rg_search_request/2,
+      &grep_search_request/2
+    ]
+    |> Enum.find_value(fn classifier -> classifier.(command, policy_bundle) end)
+  end
+
+  defp bounded_exact_read_request?(%{"operation" => operation, "paths" => [_ | _], "broad" => false})
+       when operation in ["read", "search"],
+       do: true
+
+  defp bounded_exact_read_request?(_request), do: false
 
   defp shell_chain_request(command, policy_bundle) do
     if command_chain_operator?(command) do
@@ -364,6 +393,7 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp command_chain_operator?(command) when is_binary(command) do
     command
+    |> unwrap_shell_payload()
     |> strip_quoted_text()
     |> String.contains?(["&&", "||", ";", "|"])
   end
@@ -375,6 +405,83 @@ defmodule SymphonyElixir.ScopeAccess do
     |> String.replace(~r/"(?:\\.|[^"\\])*"/, ~s(""))
     |> String.replace(~r/'(?:\\.|[^'\\])*'/, "''")
   end
+
+  defp split_read_chain(command) when is_binary(command) do
+    command
+    |> unwrap_shell_payload()
+    |> String.graphemes()
+    |> split_read_chain_chars(nil, false, [], [], false)
+  end
+
+  defp split_read_chain(_command), do: :error
+
+  defp split_read_chain_chars([], nil, false, current, parts, true) do
+    case chain_segment(current) do
+      "" -> :error
+      segment -> {:ok, Enum.reverse([segment | parts])}
+    end
+  end
+
+  defp split_read_chain_chars([], _quote, _escaped?, _current, _parts, _found?), do: :error
+
+  defp split_read_chain_chars([char | rest], quote, true, current, parts, found?) do
+    split_read_chain_chars(rest, quote, false, [char, "\\" | current], parts, found?)
+  end
+
+  defp split_read_chain_chars(["\\" | rest], quote, false, current, parts, found?)
+       when quote in ["'", "\""] do
+    split_read_chain_chars(rest, quote, true, current, parts, found?)
+  end
+
+  defp split_read_chain_chars([char | rest], nil, false, current, parts, found?)
+       when char in ["'", "\""] do
+    split_read_chain_chars(rest, char, false, [char | current], parts, found?)
+  end
+
+  defp split_read_chain_chars([char | rest], char, false, current, parts, found?) do
+    split_read_chain_chars(rest, nil, false, [char | current], parts, found?)
+  end
+
+  defp split_read_chain_chars(["&", "&" | rest], nil, false, current, parts, _found?) do
+    case chain_segment(current) do
+      "" -> :error
+      segment -> split_read_chain_chars(rest, nil, false, [], [segment | parts], true)
+    end
+  end
+
+  defp split_read_chain_chars([char | _rest], nil, false, _current, _parts, _found?)
+       when char in ["&", "|", ";", "<", ">", "`"],
+       do: :error
+
+  defp split_read_chain_chars(["$", "(" | _rest], nil, false, _current, _parts, _found?),
+    do: :error
+
+  defp split_read_chain_chars([char | rest], quote, false, current, parts, found?) do
+    split_read_chain_chars(rest, quote, false, [char | current], parts, found?)
+  end
+
+  defp chain_segment(chars), do: chars |> Enum.reverse() |> Enum.join() |> String.trim()
+
+  defp unwrap_shell_payload(command) when is_binary(command) do
+    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(.+)\z/, String.trim(command), capture: :all_but_first) do
+      [payload] -> unquote_shell_payload(String.trim(payload))
+      _ -> command
+    end
+  end
+
+  defp unwrap_shell_payload(command), do: command
+
+  defp unquote_shell_payload(<<quote::binary-size(1), rest::binary>>) when quote in ["'", "\""] do
+    if String.ends_with?(rest, quote) do
+      rest
+      |> binary_part(0, byte_size(rest) - 1)
+      |> String.replace("\\#{quote}", quote)
+    else
+      quote <> rest
+    end
+  end
+
+  defp unquote_shell_payload(payload), do: payload
 
   defp normalize_paths(paths) when is_list(paths) do
     paths

@@ -16267,6 +16267,16 @@ defmodule SymphonyElixir.CoreTest do
         })
       )
 
+      issue = %Issue{
+        id: "issue-handoff-split-read",
+        identifier: "MT-HANDOFF-SPLIT-READ",
+        title: "Recover a bounded compound read",
+        description: "Split an exact read chain after the command guard denies its compound form.",
+        state: "Rework",
+        branch_name: "orocsy/mt-handoff-split-read",
+        labels: []
+      }
+
       grep_command = ~s(grep -nE 'test|describe' #{test_path})
       sed_command = ~s(sed -n '1,160p' #{test_path})
       compound_command = grep_command <> " && " <> sed_command
@@ -16288,8 +16298,48 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, [])
       assert :ok = AppServer.command_policy_violation_for_test(workspace, quoted_bash_grep, [])
 
-      assert {:error, ^compound_command, _pattern} =
+      assert {:error, ^compound_command, compound_pattern} =
                AppServer.command_policy_violation_for_test(workspace, compound_command, [])
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+      compound_request = SymphonyElixir.ScopeAccess.classify_command(compound_command, preflight)
+
+      assert compound_request["operation"] == "read"
+      assert compound_request["command_class"] == "bounded_read_chain"
+      assert compound_request["paths"] == [test_path]
+      refute compound_request["broad"]
+
+      wrapped_request =
+        SymphonyElixir.ScopeAccess.classify_command(wrapped_compound_command, preflight)
+
+      assert wrapped_request["command_class"] == "bounded_read_chain"
+      assert wrapped_request["paths"] == [test_path]
+      refute wrapped_request["broad"]
+
+      assert {:retry, 1, compound_scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 compound_command,
+                 compound_pattern,
+                 0,
+                 1
+               )
+
+      assert compound_scope_access["decision"] == "allow_once"
+      assert compound_scope_access["reason_class"] == "safe_read_context"
+
+      mixed_chain = grep_command <> " && rm -f #{test_path}"
+      mixed_request = SymphonyElixir.ScopeAccess.classify_command(mixed_chain, preflight)
+
+      assert mixed_request["operation"] == "unknown"
+      assert mixed_request["command_class"] == "shell_chain"
+      assert mixed_request["broad"]
+
+      assert {:block, mixed_correction} =
+               SymphonyElixir.ScopeAccess.Controller.decide(mixed_request, preflight, workspace)
+
+      assert get_in(mixed_correction, [:guard, "reason_class"]) == "unclassified_scope_request"
 
       assert {:error, ^wrapped_compound_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, wrapped_compound_command, [])
@@ -16347,6 +16397,15 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^grep_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
+
+      rg_encoding_command = "rg -n -E utf-8 test #{test_path}"
+      rg_follow_command = "rg -nL test #{test_path}"
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, rg_encoding_command, [])
+
+      assert {:error, ^rg_follow_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, rg_follow_command, [])
 
       preflight_path = Path.join(state_dir, "dispatch-preflight.json")
       review_preflight = preflight_path |> File.read!() |> Jason.decode!() |> Map.put("mode", "review_rework")

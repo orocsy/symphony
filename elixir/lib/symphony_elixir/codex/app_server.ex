@@ -2476,7 +2476,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         scope_read_non_option_operands(args)
 
       {"bounded_file_search", [tool | args]} when tool in ["rg", "grep"] ->
-        search_scope_read_operand_paths(args)
+        search_scope_read_operand_paths(tool, args)
 
       {"directory_listing", ["ls" | args]} ->
         scope_read_non_option_operands(args)
@@ -2516,47 +2516,58 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp scope_read_non_option_operands(_args), do: []
 
-  defp search_scope_read_operand_paths(args) when is_list(args) do
-    case parse_search_scope_args(args, false, []) do
+  defp search_scope_read_operand_paths(tool, args)
+       when tool in ["rg", "grep"] and is_list(args) do
+    case parse_search_scope_args(tool, args, false, []) do
       {:ok, true, paths} -> Enum.reverse(paths)
       {:ok, false, paths} -> paths |> Enum.reverse() |> Enum.drop(1)
       _ -> :unclassified
     end
   end
 
-  defp search_scope_read_operand_paths(_args), do: :unclassified
+  defp search_scope_read_operand_paths(_tool, _args), do: :unclassified
 
-  defp parse_search_scope_args([], pattern_from_option?, paths),
+  defp parse_search_scope_args(_tool, [], pattern_from_option?, paths),
     do: {:ok, pattern_from_option?, paths}
 
-  defp parse_search_scope_args(["--" | rest], pattern_from_option?, paths),
+  defp parse_search_scope_args(_tool, ["--" | rest], pattern_from_option?, paths),
     do: {:ok, pattern_from_option?, Enum.reverse(rest) ++ paths}
 
-  defp parse_search_scope_args([option, pattern | rest], _pattern_from_option?, paths)
+  defp parse_search_scope_args(tool, [option, pattern | rest], _pattern_from_option?, paths)
        when option in ["-e", "--regexp"] and is_binary(pattern),
-       do: parse_search_scope_args(rest, true, paths)
+       do: parse_search_scope_args(tool, rest, true, paths)
 
-  defp parse_search_scope_args([option | rest], pattern_from_option?, paths)
+  defp parse_search_scope_args("rg", [option, encoding | rest], pattern_from_option?, paths)
+       when option in ["-E", "--encoding"] and is_binary(encoding),
+       do: parse_search_scope_args("rg", rest, pattern_from_option?, paths)
+
+  defp parse_search_scope_args(tool, [option | rest], pattern_from_option?, paths)
        when is_binary(option) do
     cond do
       Regex.match?(~r/\A-e.+\z/, option) or String.starts_with?(option, "--regexp=") ->
-        parse_search_scope_args(rest, true, paths)
+        parse_search_scope_args(tool, rest, true, paths)
 
-      safe_search_flag?(option) ->
-        parse_search_scope_args(rest, pattern_from_option?, paths)
+      tool == "rg" and
+          (Regex.match?(~r/\A-E.+\z/, option) or String.starts_with?(option, "--encoding=")) ->
+        parse_search_scope_args(tool, rest, pattern_from_option?, paths)
+
+      safe_search_flag?(tool, option) ->
+        parse_search_scope_args(tool, rest, pattern_from_option?, paths)
 
       String.starts_with?(option, "-") ->
         :unclassified
 
       true ->
-        parse_search_scope_args(rest, pattern_from_option?, [option | paths])
+        parse_search_scope_args(tool, rest, pattern_from_option?, [option | paths])
     end
   end
 
-  defp parse_search_scope_args(_args, _pattern_from_option?, _paths), do: :unclassified
+  defp parse_search_scope_args(_tool, _args, _pattern_from_option?, _paths), do: :unclassified
 
-  defp safe_search_flag?(option) when is_binary(option) do
-    Regex.match?(~r/\A-[nEHhIiJLlOoPqsvwxyz]+\z/, option) or
+  defp safe_search_flag?(tool, option) when tool in ["rg", "grep"] and is_binary(option) do
+    safe_short_flags = if tool == "grep", do: ~r/\A-[nEHhIiJLlOoPqsvwxyz]+\z/, else: ~r/\A-[nHhIiJlOoPqsvwxyz]+\z/
+
+    Regex.match?(safe_short_flags, option) or
       option in [
         "--line-number",
         "--extended-regexp",
@@ -2576,7 +2587,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       ]
   end
 
-  defp safe_search_flag?(_option), do: false
+  defp safe_search_flag?(_tool, _option), do: false
 
   defp scope_read_option_token?(token) when is_binary(token),
     do: token == "--" or String.starts_with?(token, "-")
