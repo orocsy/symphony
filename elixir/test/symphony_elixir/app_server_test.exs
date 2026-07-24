@@ -4809,6 +4809,20 @@ defmodule SymphonyElixir.AppServerTest do
                  multiline_command,
                  "(^|\\s|[\"'])rg(\\s|$)"
                )
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n -i '1p' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "git diff --output=/tmp/diff.txt -- tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])git(\\s|$)"
+               )
     after
       File.rm_rf(test_root)
     end

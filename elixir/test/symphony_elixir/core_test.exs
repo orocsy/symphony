@@ -22746,6 +22746,50 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "pending review source is not made actionable by incidental fix path prose" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-review-incidental-path-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(
+          test_root,
+          "issue-pending-review-incidental-path",
+          %{
+            source: "github-codex-review",
+            summary: "Wait for Codex review of the pushed fix in src/features/swipe/SwipeExperience.tsx",
+            findings: [
+              "The fix in src/features/swipe/SwipeExperience.tsx is pushed and the current-head review is pending."
+            ],
+            required_corrections: [
+              "Wait for the Codex review result for the fix in src/features/swipe/SwipeExperience.tsx."
+            ]
+          }
+        )
+
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      request_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "continuation review-rework correction stays parked while external review is pending" do
     test_root =
       Path.join(

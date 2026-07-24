@@ -1349,7 +1349,7 @@ defmodule SymphonyElixir.RescueSupervisor do
     required = correction["required_corrections"] |> string_values() |> Enum.join(" ")
 
     (source in @pending_codex_review_correction_sources and
-       not actionable_code_or_test_correction?(correction)) or
+       not explicit_structured_code_change_request?(correction)) or
       (next_action == "retry" and not actionable_code_or_test_correction?(correction) and
          (String.contains?(summary, "Codex review") or
             String.contains?(findings, "Codex review") or
@@ -1381,6 +1381,20 @@ defmodule SymphonyElixir.RescueSupervisor do
   end
 
   defp actionable_code_or_test_correction?(_correction), do: false
+
+  defp explicit_structured_code_change_request?(%{"required_corrections" => required_corrections}) do
+    required_corrections
+    |> string_values()
+    |> Enum.any?(fn instruction ->
+      normalized = String.downcase(instruction)
+
+      actionable_code_or_test_correction?(%{"required_corrections" => [instruction]}) and
+        Regex.match?(~r/\b(edit|fix|change|modify|update|implement)\b/, normalized) and
+        not Regex.match?(~r/\b(wait|monitor|pending|review result|review response)\b/, normalized)
+    end)
+  end
+
+  defp explicit_structured_code_change_request?(_correction), do: false
 
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->
