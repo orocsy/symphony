@@ -2536,24 +2536,39 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp normalize_scope_operand_path(_path), do: ""
 
   defp unwrap_shell_login_command(command) when is_binary(command) do
-    normalized =
-      command
-      |> unescape_shell_argument_quotes()
-      |> String.trim()
+    command = String.trim(command)
 
-    case OptionParser.split(normalized) do
-      [shell, "-lc", inner]
-      when shell in ["zsh", "bash", "sh", "/bin/zsh", "/bin/bash", "/bin/sh"] ->
-        inner
-
-      _ ->
-        normalized
+    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(.*)\z/s, command, capture: :all_but_first) do
+      [wrapped] -> unwrap_shell_command_argument(wrapped)
+      _ -> command |> unescape_shell_argument_quotes() |> String.trim()
     end
   rescue
     _error -> String.trim(command)
   end
 
   defp unwrap_shell_login_command(_command), do: ""
+
+  defp unwrap_shell_command_argument("\"" <> rest) do
+    if String.ends_with?(rest, "\"") do
+      rest
+      |> binary_part(0, byte_size(rest) - 1)
+      |> String.replace(~r/\\(["\\])/, "\\1")
+    else
+      "\"" <> rest
+    end
+  end
+
+  defp unwrap_shell_command_argument("'" <> rest) do
+    if String.ends_with?(rest, "'") do
+      rest
+      |> binary_part(0, byte_size(rest) - 1)
+      |> String.replace("'\"'\"'", "'")
+    else
+      "'" <> rest
+    end
+  end
+
+  defp unwrap_shell_command_argument(argument), do: String.trim(argument)
 
   defp pure_scope_read_command?(command) when is_binary(command) do
     not command_chain_operator_outside_quotes?(command) and
@@ -2842,7 +2857,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          true <- file_scoped_grep_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
       if mode == "handoff_recovery" do
-        handoff_recovery_grep_paths_allowed?(command, preflight)
+        handoff_recovery_exact_read_allowed?(command, preflight, workspace)
       else
         allowed_paths = preflight |> review_rework_allowed_read_paths(workspace) |> MapSet.new()
         command_paths = command |> search_path_tokens() |> Enum.uniq()
@@ -2857,24 +2872,60 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp scoped_file_grep_allowed?(_command, _workspace), do: false
 
-  defp handoff_recovery_grep_paths_allowed?(command, preflight)
-       when is_binary(command) and is_map(preflight) do
+  defp handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+       when is_binary(command) and is_map(preflight) and is_binary(workspace) do
+    command = unwrap_shell_login_command(command)
     allowed_paths = preflight |> review_rework_scope_bundle_read_paths() |> MapSet.new()
 
-    command_paths =
-      command
-      |> unwrap_shell_login_command()
-      |> scope_read_operand_paths("bounded_file_search")
-
-    is_list(command_paths) and command_paths != [] and
-      Enum.all?(command_paths, fn path ->
-        MapSet.member?(allowed_paths, normalize_scope_operand_path(path))
-      end)
+    with true <- pure_scope_read_command?(command),
+         command_class when is_binary(command_class) <- exact_read_command_class(command),
+         paths when is_list(paths) and paths != [] <- scope_read_operand_paths(command, command_class) do
+      Enum.all?(paths, &exact_handoff_path_allowed?(workspace, &1, allowed_paths))
+    else
+      _ -> false
+    end
   rescue
     _error -> false
   end
 
-  defp handoff_recovery_grep_paths_allowed?(_command, _preflight), do: false
+  defp handoff_recovery_exact_read_allowed?(_command, _preflight, _workspace), do: false
+
+  defp exact_read_command_class(command) when is_binary(command) do
+    case OptionParser.split(command) do
+      [tool | _args] when tool in ["sed", "cat", "head", "tail", "nl"] -> "bounded_file_read"
+      [tool | _args] when tool in ["rg", "grep"] -> "bounded_file_search"
+      _ -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp exact_read_command_class(_command), do: nil
+
+  defp exact_handoff_path_allowed?(workspace, path, allowed_paths)
+       when is_binary(workspace) and is_binary(path) do
+    normalized_path = normalize_scope_operand_path(path)
+
+    with false <- wildcard_path?(normalized_path),
+         true <- MapSet.member?(allowed_paths, normalized_path),
+         false <- Path.type(normalized_path) == :absolute,
+         {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, canonical_target} <- PathSafety.canonicalize(Path.join(workspace, normalized_path)) do
+      canonical_target != canonical_workspace and
+        String.starts_with?(canonical_target, canonical_workspace <> "/")
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp exact_handoff_path_allowed?(_workspace, _path, _allowed_paths), do: false
+
+  defp wildcard_path?(path) when is_binary(path),
+    do: String.contains?(path, ["*", "?", "[", "]", "{", "}"])
+
+  defp wildcard_path?(_path), do: true
 
   defp scoped_file_rg_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
     with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
@@ -2932,20 +2983,33 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp review_rework_missing_referenced_read_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
-    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "handoff_recovery"],
-         true <- simple_file_read_command?(command),
+    case dispatch_preflight_mode(workspace) do
+      "handoff_recovery" ->
+        with {:ok, preflight} <- DispatchPreflight.read(workspace) do
+          handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+        else
+          _ -> false
+        end
+
+      "review_rework" ->
+        review_rework_simple_read_allowed?(command, workspace)
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_missing_referenced_read_allowed?(_command, _workspace), do: false
+
+  defp review_rework_simple_read_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    with true <- simple_file_read_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
-      allowed_paths =
-        preflight
-        |> review_rework_allowed_read_paths(workspace)
-        |> MapSet.new()
-
+      allowed_paths = preflight |> review_rework_allowed_read_paths(workspace) |> MapSet.new()
       reference_text = review_rework_reference_text(preflight, workspace)
-
-      command_paths =
-        command
-        |> paths_from_review_rework_text()
-        |> Enum.uniq()
+      command_paths = command |> paths_from_review_rework_text() |> Enum.uniq()
 
       command_paths != [] and
         Enum.all?(command_paths, fn path ->
@@ -2955,11 +3019,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     else
       _ -> false
     end
-  rescue
-    _error -> false
   end
 
-  defp review_rework_missing_referenced_read_allowed?(_command, _workspace), do: false
+  defp review_rework_simple_read_allowed?(_command, _workspace), do: false
 
   defp simple_file_read_command?(command) when is_binary(command) do
     read_command =

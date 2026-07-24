@@ -16208,6 +16208,7 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       File.write!(Path.join(workspace, "tests/e2e/derived-helper.ts"), "export {};\n")
+      File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
 
       scope_bundle =
         SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
@@ -16223,6 +16224,18 @@ defmodule SymphonyElixir.CoreTest do
           "read_context" => [
             %{
               "path" => test_path,
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/declared-symlink.spec.ts",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/*.spec.ts",
               "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
               "operation" => "read",
               "expires" => "turn"
@@ -16255,6 +16268,7 @@ defmodule SymphonyElixir.CoreTest do
       wrapped_compound_command = ~s(/bin/zsh -lc "#{compound_command}")
       bash_wrapped_compound = ~s(/bin/bash -lc "#{compound_command}")
       sh_wrapped_compound = ~s(sh -lc "#{compound_command}")
+      quoted_bash_grep = ~s(/bin/bash -lc "grep -n \\"test|describe\\" #{test_path}")
 
       forbidden_patterns = [
         "(^|\\s|[\"'])grep(\\s|$)",
@@ -16265,6 +16279,7 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = AppServer.command_policy_violation_for_test(workspace, sed_command, [])
       assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_grep_command, [])
       assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, quoted_bash_grep, [])
 
       assert {:error, ^compound_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, compound_command, [])
@@ -16281,6 +16296,10 @@ defmodule SymphonyElixir.CoreTest do
       unscoped_test_search = "grep -n test tests/e2e/unrelated.spec.ts"
       unclassified_operand_search = grep_command <> " /etc/passwd"
       derived_context_search = "grep -n test tests/e2e/derived-helper.ts"
+      unsafe_option_search = "grep -n -f /etc/passwd #{test_path}"
+      symlink_search = "grep -n test tests/e2e/declared-symlink.spec.ts"
+      glob_search = "grep -n test tests/e2e/*.spec.ts"
+      disguised_mutation = "rm -f grep cat #{test_path} /tmp/sentinel"
 
       assert {:error, ^unscoped_test_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, unscoped_test_search, [])
@@ -16290,6 +16309,18 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^derived_context_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, derived_context_search, [])
+
+      assert {:error, ^unsafe_option_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unsafe_option_search, [])
+
+      assert {:error, ^symlink_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, symlink_search, [])
+
+      assert {:error, ^glob_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, glob_search, [])
+
+      assert {:error, ^disguised_mutation, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, disguised_mutation, [])
 
       assert {:error, ^grep_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
