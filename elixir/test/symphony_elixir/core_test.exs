@@ -16393,6 +16393,15 @@ defmodule SymphonyElixir.CoreTest do
       assert stdin_read_request["command_class"] == "shell_chain"
       assert stdin_read_request["broad"]
 
+      abbreviated_follow_chain =
+        "tail --fol config/config.exs && cat config/config.exs"
+
+      abbreviated_follow_request =
+        SymphonyElixir.ScopeAccess.classify_command(abbreviated_follow_chain, preflight)
+
+      assert abbreviated_follow_request["command_class"] == "shell_chain"
+      assert abbreviated_follow_request["broad"]
+
       sed_write_chain =
         "sed -n '1w /tmp/leak' config/config.exs && cat config/config.exs"
 
@@ -16493,6 +16502,10 @@ defmodule SymphonyElixir.CoreTest do
                AppServer.command_policy_violation_for_test(workspace, "cat config/config.exs", [])
 
       undeclared_cat = "cat /etc/passwd"
+      path_qualified_cat = "/bin/cat /etc/passwd"
+      env_wrapped_cat = "env cat /etc/passwd"
+      path_qualified_scoped_cat = "/bin/cat config/config.exs"
+      env_wrapped_scoped_cat = "env cat config/config.exs"
       numeric_cat = "cat config/config.exs 123"
       numeric_nl = "nl config/config.exs 123"
       stdin_cat = "cat - config/config.exs"
@@ -16517,11 +16530,13 @@ defmodule SymphonyElixir.CoreTest do
       command_wrapped_shell_read = "command bash -c 'cat /etc/passwd'"
       generic_wrapped_shell_read = "nice -n 5 bash -c 'cat /etc/passwd'"
       alternate_shell_read = "/usr/bin/dash -c 'cat /etc/passwd'"
+      single_quote_escape_chain = "cat 'config/config.exs\\' ; rm -f target"
 
       tail_follow = "tail -f config/config.exs"
       tail_retry_follow = "tail -F config/config.exs"
       tail_clustered_follow = "tail -fq config/config.exs"
       tail_clustered_retry_follow = "tail -Fq config/config.exs"
+      tail_abbreviated_follow = "tail --fol config/config.exs"
       finite_tail = "tail -n 5 config/config.exs"
       finite_flagged_head = "head -q -n 5 config/config.exs"
       finite_flagged_tail = "tail -v --lines 5 config/config.exs"
@@ -16542,6 +16557,9 @@ defmodule SymphonyElixir.CoreTest do
       git_diff_order_file =
         "git diff -O /etc/passwd --no-ext-diff --no-textconv -- config/config.exs"
 
+      git_no_index_read =
+        "git diff --no-ext-diff --no-textconv --no-index /etc/passwd -- config/config.exs"
+
       git_ls_files_exclude_file = "git ls-files -X /etc/passwd -- config/config.exs"
 
       quoted_git_diff_order_file =
@@ -16554,6 +16572,18 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, undeclared_cat, [])
+
+      assert {:error, ^path_qualified_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, path_qualified_cat, [])
+
+      assert {:error, ^env_wrapped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_wrapped_cat, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, path_qualified_scoped_cat, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, env_wrapped_scoped_cat, [])
 
       assert {:error, ^numeric_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, numeric_cat, [])
@@ -16606,6 +16636,9 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, ^alternate_shell_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, alternate_shell_read, [])
 
+      assert {:error, ^single_quote_escape_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, single_quote_escape_chain, [])
+
       assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_follow, [])
 
@@ -16617,6 +16650,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^tail_clustered_retry_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_clustered_retry_follow, [])
+
+      assert {:error, ^tail_abbreviated_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_abbreviated_follow, [])
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, finite_tail, [])
@@ -16656,6 +16692,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^git_diff_order_file, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, git_diff_order_file, [])
+
+      assert {:error, ^git_no_index_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_no_index_read, [])
 
       assert {:error, ^git_ls_files_exclude_file, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, git_ls_files_exclude_file, [])

@@ -123,41 +123,38 @@ defmodule SymphonyElixir.ScopeAccess do
   defp simple_read_segment_paths("nl", args), do: optionless_segment_paths(args)
 
   defp simple_read_segment_paths(tool, args) when tool in ["head", "tail"] do
-    if tool == "tail" and Enum.any?(args, &tail_follow_option?/1) do
-      :error
-    else
-      parse_finite_segment_operands(args, [], false)
-    end
+    parse_finite_segment_operands(args, [], false, tool)
   end
 
   defp simple_read_segment_paths(_tool, _args), do: :error
 
-  defp parse_finite_segment_operands([], operands, _after_options?) do
+  defp parse_finite_segment_operands([], operands, _after_options?, _tool) do
     operands |> Enum.reverse() |> optionless_segment_paths()
   end
 
-  defp parse_finite_segment_operands(["--" | rest], operands, false),
-    do: parse_finite_segment_operands(rest, operands, true)
+  defp parse_finite_segment_operands(["--" | rest], operands, false, tool),
+    do: parse_finite_segment_operands(rest, operands, true, tool)
 
-  defp parse_finite_segment_operands([option, count | rest], operands, false)
+  defp parse_finite_segment_operands([option, count | rest], operands, false, tool)
        when option in ["-n", "--lines", "-c", "--bytes"] do
     if finite_count_token?(count),
-      do: parse_finite_segment_operands(rest, operands, false),
+      do: parse_finite_segment_operands(rest, operands, false, tool),
       else: :error
   end
 
-  defp parse_finite_segment_operands([token | rest], operands, after_options?)
+  defp parse_finite_segment_operands([token | rest], operands, after_options?, tool)
        when is_binary(token) do
     cond do
       token == "-" -> :error
-      after_options? -> parse_finite_segment_operands(rest, [token | operands], true)
-      finite_inline_count_option?(token) -> parse_finite_segment_operands(rest, operands, false)
-      String.starts_with?(token, "-") -> parse_finite_segment_operands(rest, operands, false)
-      true -> parse_finite_segment_operands(rest, [token | operands], false)
+      after_options? -> parse_finite_segment_operands(rest, [token | operands], true, tool)
+      finite_inline_count_option?(token) -> parse_finite_segment_operands(rest, operands, false, tool)
+      finite_head_tail_flag?(tool, token) -> parse_finite_segment_operands(rest, operands, false, tool)
+      String.starts_with?(token, "-") -> :error
+      true -> parse_finite_segment_operands(rest, [token | operands], false, tool)
     end
   end
 
-  defp parse_finite_segment_operands(_args, _operands, _after_options?), do: :error
+  defp parse_finite_segment_operands(_args, _operands, _after_options?, _tool), do: :error
 
   defp finite_count_token?(count) when is_binary(count),
     do: Regex.match?(~r/\A[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, count)
@@ -171,13 +168,12 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp finite_inline_count_option?(_option), do: false
 
-  defp tail_follow_option?(option) when is_binary(option) do
-    option in ["--follow", "--retry"] or
-      String.starts_with?(option, "--follow=") or
-      Regex.match?(~r/\A-[^-]*[fF]/, option)
+  defp finite_head_tail_flag?(tool, option) when tool in ["head", "tail"] and is_binary(option) do
+    option in ["-q", "-v", "-z", "--quiet", "--silent", "--verbose", "--zero-terminated"] or
+      Regex.match?(~r/\A-[qvz]+\z/, option)
   end
 
-  defp tail_follow_option?(_option), do: false
+  defp finite_head_tail_flag?(_tool, _option), do: false
 
   defp optionless_segment_paths(args) when is_list(args) do
     if args != [] and Enum.all?(args, &(is_binary(&1) and not String.starts_with?(&1, "-"))),
