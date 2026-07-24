@@ -2853,10 +2853,23 @@ defmodule SymphonyElixir.Codex.AppServer do
       "--no-index"
     ] or
       Regex.match?(~r/\A(?:-O|-X).+\z/, token) or
-      Regex.match?(~r/\A--(?:order-file|exclude-from|pathspec-from-file)=.+\z/, token)
+      Regex.match?(~r/\A--(?:order-file|exclude-from|pathspec-from-file)=.+\z/, token) or
+      abbreviated_git_file_input_token?(token)
   end
 
   defp unsafe_git_file_input_token?(_token), do: false
+
+  defp abbreviated_git_file_input_token?("--" <> _rest = token) do
+    option_name = token |> String.split("=", parts: 2) |> List.first()
+
+    byte_size(option_name) >= 4 and
+      Enum.any?(
+        ["--order-file", "--exclude-from", "--pathspec-from-file", "--no-index"],
+        &String.starts_with?(&1, option_name)
+      )
+  end
+
+  defp abbreviated_git_file_input_token?(_token), do: false
 
   defp safe_sed_print_slice?(command) when is_binary(command) do
     case normalized_read_argv(command) do
@@ -3160,7 +3173,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       (is_binary(exact_read_command_class(unwrap_shell_login_command(command))) or
          git_read_like_candidate?(unwrap_shell_login_command(command)) or
          read_tool_invocation_candidate?(unwrap_shell_login_command(command)) or
-         shell_command_wrapper_candidate?(command) or
+         shell_wrapper_read_candidate?(command) or
          command_parse_failed?(command) or
          command_chain_operator_outside_quotes?(command))
   end
@@ -3236,35 +3249,84 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp exact_git_read_command_class(_command), do: nil
 
   defp git_read_like_candidate?(command) when is_binary(command) do
-    tokens = OptionParser.split(command)
-
-    tokens
-    |> Enum.with_index()
-    |> Enum.any?(fn {token, index} ->
-      Path.basename(token) == "git" and
-        Enum.any?(Enum.drop(tokens, index + 1), &(&1 in ["diff", "log", "ls-files"]))
-    end)
+    case candidate_read_argv(command) do
+      ["git" | args] -> git_candidate_read_subcommand?(args)
+      _ -> false
+    end
   rescue
     _error -> false
   end
 
   defp git_read_like_candidate?(_command), do: false
 
-  defp shell_command_wrapper_candidate?(command) when is_binary(command) do
-    command
-    |> String.trim()
-    |> OptionParser.split()
-    |> Enum.any?(&Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1))
+  defp git_candidate_read_subcommand?([subcommand | _args])
+       when subcommand in ["diff", "log", "ls-files"],
+       do: true
+
+  defp git_candidate_read_subcommand?([option | rest])
+       when option in ["-p", "-P", "--paginate", "--no-pager"],
+       do: git_candidate_read_subcommand?(rest)
+
+  defp git_candidate_read_subcommand?([option, _value | rest])
+       when option in ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"],
+       do: git_candidate_read_subcommand?(rest)
+
+  defp git_candidate_read_subcommand?([option | rest]) when is_binary(option) do
+    cond do
+      not String.starts_with?(option, "-") ->
+        false
+
+      Regex.match?(~r/\A(?:-c|-C).+\z/, option) or
+          Regex.match?(~r/\A--(?:git-dir|work-tree|namespace|config-env)=.+\z/, option) ->
+        git_candidate_read_subcommand?(rest)
+
+      true ->
+        Enum.any?(rest, &(&1 in ["diff", "log", "ls-files"]))
+    end
+  end
+
+  defp git_candidate_read_subcommand?(_args), do: false
+
+  defp shell_wrapper_read_candidate?(command) when is_binary(command) do
+    case shell_command_string_argument(command) do
+      {:ok, payload} ->
+        is_binary(exact_read_command_class(payload)) or
+          git_read_like_candidate?(payload) or
+          read_tool_invocation_candidate?(payload) or
+          command_parse_failed?(payload) or
+          command_chain_operator_outside_quotes?(payload)
+
+      :error ->
+        false
+    end
   rescue
     _error -> false
   end
 
-  defp shell_command_wrapper_candidate?(_command), do: false
+  defp shell_wrapper_read_candidate?(_command), do: false
 
-  defp read_tool_invocation_candidate?(command) when is_binary(command) do
+  defp shell_command_string_argument(command) when is_binary(command) do
     command
     |> OptionParser.split()
-    |> Enum.any?(&(Path.basename(&1) in List.delete(read_tool_names(), "git")))
+    |> shell_command_string_argument_tokens()
+  end
+
+  defp shell_command_string_argument(_command), do: :error
+
+  defp shell_command_string_argument_tokens([_executable | args]) do
+    case Enum.find_index(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1)) do
+      nil -> :error
+      index -> args |> Enum.at(index + 1) |> then(&if(is_binary(&1), do: {:ok, &1}, else: :error))
+    end
+  end
+
+  defp shell_command_string_argument_tokens(_tokens), do: :error
+
+  defp read_tool_invocation_candidate?(command) when is_binary(command) do
+    case candidate_read_argv(command) do
+      [tool | _args] -> tool in List.delete(read_tool_names(), "git")
+      _ -> false
+    end
   rescue
     _error -> false
   end
@@ -3299,6 +3361,16 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp normalized_read_argv(_command), do: :unclassified
 
+  defp candidate_read_argv(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> candidate_read_argv_tokens()
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_read_argv(_command), do: :unclassified
+
   defp normalize_read_argv_tokens([executable | args]) do
     case Path.basename(executable) do
       "env" -> normalize_env_read_argv(args)
@@ -3309,11 +3381,52 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp normalize_read_argv_tokens(_tokens), do: :unclassified
 
+  defp candidate_read_argv_tokens([executable | args]) do
+    case Path.basename(executable) do
+      "env" -> args |> candidate_env_utility_argv() |> normalize_direct_read_argv()
+      "command" -> args |> candidate_command_utility_argv() |> normalize_direct_read_argv()
+      _ -> normalize_direct_read_argv([executable | args])
+    end
+  end
+
+  defp candidate_read_argv_tokens(_tokens), do: :unclassified
+
+  defp candidate_env_utility_argv(["--" | rest]), do: rest
+
+  defp candidate_env_utility_argv([option, _value | rest]) when option in ["-u", "--unset"],
+    do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv([option | rest])
+       when option in ["-i", "--ignore-environment"],
+       do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv([token | rest]) when is_binary(token) do
+    cond do
+      Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token) -> candidate_env_utility_argv(rest)
+      String.starts_with?(token, "-") -> candidate_env_utility_argv(rest)
+      true -> [token | rest]
+    end
+  end
+
+  defp candidate_env_utility_argv(_args), do: :unclassified
+
+  defp candidate_command_utility_argv(["--" | rest]), do: rest
+
+  defp candidate_command_utility_argv([option | rest]) when option in ["-p"],
+    do: candidate_command_utility_argv(rest)
+
+  defp candidate_command_utility_argv(args), do: args
+
   defp normalize_env_read_argv(args) when is_list(args) do
-    args
-    |> drop_optional_delimiter()
-    |> Enum.drop_while(&Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, &1))
-    |> normalize_direct_read_argv()
+    case drop_optional_delimiter(args) do
+      [token | _rest] = argv ->
+        if Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token),
+          do: :unclassified,
+          else: normalize_direct_read_argv(argv)
+
+      _ ->
+        :unclassified
+    end
   end
 
   defp normalize_env_read_argv(_args), do: :unclassified

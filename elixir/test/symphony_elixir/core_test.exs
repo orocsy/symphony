@@ -16402,6 +16402,16 @@ defmodule SymphonyElixir.CoreTest do
       assert abbreviated_follow_request["command_class"] == "shell_chain"
       assert abbreviated_follow_request["broad"]
 
+      normalized_reader_chain =
+        "/bin/cat config/config.exs && env head -n 5 config/config.exs"
+
+      normalized_reader_request =
+        SymphonyElixir.ScopeAccess.classify_command(normalized_reader_chain, preflight)
+
+      assert normalized_reader_request["command_class"] == "bounded_read_chain"
+      assert normalized_reader_request["paths"] == ["config/config.exs"]
+      refute normalized_reader_request["broad"]
+
       sed_write_chain =
         "sed -n '1w /tmp/leak' config/config.exs && cat config/config.exs"
 
@@ -16506,6 +16516,7 @@ defmodule SymphonyElixir.CoreTest do
       env_wrapped_cat = "env cat /etc/passwd"
       path_qualified_scoped_cat = "/bin/cat config/config.exs"
       env_wrapped_scoped_cat = "env cat config/config.exs"
+      env_path_wrapped_rg = "env PATH=. rg -n test config/config.exs"
       numeric_cat = "cat config/config.exs 123"
       numeric_nl = "nl config/config.exs 123"
       stdin_cat = "cat - config/config.exs"
@@ -16531,6 +16542,9 @@ defmodule SymphonyElixir.CoreTest do
       generic_wrapped_shell_read = "nice -n 5 bash -c 'cat /etc/passwd'"
       alternate_shell_read = "/usr/bin/dash -c 'cat /etc/passwd'"
       single_quote_escape_chain = "cat 'config/config.exs\\' ; rm -f target"
+      wrapped_git_status = "/bin/bash -lc 'git status --short --branch'"
+      wrapped_git_add = "/bin/bash -lc 'git add diff'"
+      wrapped_git_commit = "/bin/bash -lc 'git commit -m log'"
 
       tail_follow = "tail -f config/config.exs"
       tail_retry_follow = "tail -F config/config.exs"
@@ -16568,6 +16582,9 @@ defmodule SymphonyElixir.CoreTest do
       quoted_git_ls_files_exclude_file =
         "git ls-files '-X/etc/passwd' -- config/config.exs"
 
+      abbreviated_git_exclude_file =
+        "git ls-files --exclude-f=/etc/passwd -- config/config.exs"
+
       sed_write = "sed -n '1w /tmp/leak' config/config.exs"
 
       assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
@@ -16584,6 +16601,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, env_wrapped_scoped_cat, [])
+
+      assert {:error, ^env_path_wrapped_rg, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_path_wrapped_rg, [])
 
       assert {:error, ^numeric_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, numeric_cat, [])
@@ -16638,6 +16658,15 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^single_quote_escape_chain, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, single_quote_escape_chain, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_status, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_add, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_commit, [])
 
       assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_follow, [])
@@ -16706,6 +16735,13 @@ defmodule SymphonyElixir.CoreTest do
                AppServer.command_policy_violation_for_test(
                  workspace,
                  quoted_git_ls_files_exclude_file,
+                 []
+               )
+
+      assert {:error, ^abbreviated_git_exclude_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 abbreviated_git_exclude_file,
                  []
                )
 

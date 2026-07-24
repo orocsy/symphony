@@ -84,7 +84,7 @@ defmodule SymphonyElixir.ScopeAccess do
   end
 
   defp exact_read_segment(command) when is_binary(command) do
-    case OptionParser.split(command) do
+    case normalized_segment_argv(command) do
       ["sed", "-n", slice, path] ->
         if Regex.match?(~r/\A\d+(?:,\d+)?p\z/, slice),
           do: exact_segment_paths("read", "bounded_file_read", [path]),
@@ -110,6 +110,39 @@ defmodule SymphonyElixir.ScopeAccess do
   end
 
   defp exact_read_segment(_command), do: :error
+
+  defp normalized_segment_argv(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> normalize_segment_tokens()
+  rescue
+    _error -> :unclassified
+  end
+
+  defp normalized_segment_argv(_command), do: :unclassified
+
+  defp normalize_segment_tokens([executable | args]) do
+    case Path.basename(executable) do
+      "env" -> args |> drop_optional_segment_delimiter() |> normalize_direct_segment()
+      "command" -> args |> drop_optional_segment_delimiter() |> normalize_direct_segment()
+      _ -> normalize_direct_segment([executable | args])
+    end
+  end
+
+  defp normalize_segment_tokens(_tokens), do: :unclassified
+
+  defp drop_optional_segment_delimiter(["--" | rest]), do: rest
+  defp drop_optional_segment_delimiter(args), do: args
+
+  defp normalize_direct_segment([executable | args]) do
+    tool = Path.basename(executable)
+
+    if tool in ["sed", "cat", "head", "tail", "nl", "rg", "grep"],
+      do: [tool | args],
+      else: :unclassified
+  end
+
+  defp normalize_direct_segment(_args), do: :unclassified
 
   defp exact_segment_paths(operation, command_class, paths) do
     if Enum.all?(paths, &exact_relative_operand?/1) do
