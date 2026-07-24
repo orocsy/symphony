@@ -80,14 +80,9 @@ defmodule SymphonyElixir.Workspace do
 
   def blocking_correction_in_workspace?(workspace, worker_host)
       when is_binary(workspace) and is_binary(worker_host) do
-    with :ok <- validate_workspace_path(workspace, worker_host),
-         {:ok, {output, 0}} <- run_remote_command(worker_host, remote_blocking_correction_script(workspace), Config.settings!().hooks.timeout_ms) do
-      output
-      |> IO.iodata_to_binary()
-      |> String.split("\n", trim: true)
-      |> Enum.member?("blocked")
-    else
-      _ -> false
+    case inspect_blocking_corrections_in_workspace(workspace, worker_host) do
+      {:ok, corrections} -> corrections != []
+      {:error, _reason} -> false
     end
   end
 
@@ -235,8 +230,15 @@ defmodule SymphonyElixir.Workspace do
       case String.split(body, @remote_correction_marker, parts: 2) do
         [_diagnostics, payload] ->
           case Jason.decode(String.trim(payload)) do
-            {:ok, %{} = correction} -> {:cont, {:ok, [correction | corrections]}}
-            _ -> {:halt, {:error, :invalid_remote_correction_payload}}
+            {:ok, %{} = correction} ->
+              if open_blocking_correction?(correction) do
+                {:cont, {:ok, [correction | corrections]}}
+              else
+                {:cont, {:ok, corrections}}
+              end
+
+            _ ->
+              {:halt, {:error, :invalid_remote_correction_payload}}
           end
 
         _ ->
@@ -1354,22 +1356,6 @@ defmodule SymphonyElixir.Workspace do
 
   defp normalize_correction_field(_value), do: ""
 
-  defp remote_blocking_correction_script(workspace) do
-    [
-      remote_shell_assign("workspace", workspace),
-      "inbox=\"$workspace/.orocsy/delivery/inbox\"",
-      "if [ ! -d \"$inbox\" ]; then exit 0; fi",
-      "for correction in \"$inbox\"/correction_*.json; do",
-      "  [ -f \"$correction\" ] || continue",
-      "  if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"open\"' \"$correction\" && grep -Eq '\"next_action\"[[:space:]]*:[[:space:]]*\"(block|retry|escalate)\"' \"$correction\" && grep -Eq '\"resolved_at\"[[:space:]]*:[[:space:]]*null' \"$correction\"; then",
-      "    printf '%s\\n' blocked",
-      "    exit 0",
-      "  fi",
-      "done"
-    ]
-    |> Enum.join("\n")
-  end
-
   defp remote_open_blocking_corrections_script(workspace) do
     [
       remote_shell_assign("workspace", workspace),
@@ -1377,11 +1363,9 @@ defmodule SymphonyElixir.Workspace do
       "if [ ! -d \"$inbox\" ]; then exit 0; fi",
       "for correction in \"$inbox\"/correction_*.json; do",
       "  [ -f \"$correction\" ] || continue",
-      "  if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"open\"' \"$correction\" && grep -Eq '\"next_action\"[[:space:]]*:[[:space:]]*\"(block|retry|escalate)\"' \"$correction\" && grep -Eq '\"resolved_at\"[[:space:]]*:[[:space:]]*null' \"$correction\"; then",
-      "    printf '%s' '#{@remote_correction_marker}'",
-      "    cat \"$correction\"",
-      "    printf '\\0'",
-      "  fi",
+      "  printf '%s' '#{@remote_correction_marker}'",
+      "  cat \"$correction\"",
+      "  printf '\\0'",
       "done"
     ]
     |> Enum.join("\n")

@@ -2570,7 +2570,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp unsafe_scope_read_option?(command) when is_binary(command) do
     (String.starts_with?(command, "sed ") and not safe_sed_print_slice?(command)) or
       (String.starts_with?(command, "rg ") and
-         Regex.match?(~r/(?:^|\s)--(?:pre(?:-glob)?|ignore-file)(?:=|\s|$)/, command)) or
+         Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|pre(?:-glob)?|ignore-file)(?:=|\s|$))/, command)) or
       (String.starts_with?(command, "grep ") and
          Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, command)) or
       (String.starts_with?(command, "git ") and
@@ -3632,6 +3632,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp command_chain_operator_outside_quotes?(_command), do: false
 
   defp chain_operator_scan([], _quote, _previous), do: false
+
+  defp chain_operator_scan(["\\" | rest], "'", _previous) do
+    chain_operator_scan(rest, "'", "\\")
+  end
 
   defp chain_operator_scan(["\\" | [_escaped | rest]], quote, _previous) do
     chain_operator_scan(rest, quote, "\\")

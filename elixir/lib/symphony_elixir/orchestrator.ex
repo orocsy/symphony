@@ -5411,7 +5411,7 @@ defmodule SymphonyElixir.Orchestrator do
     case {normalized_correction_order(candidate), normalized_correction_order(correction)} do
       {{kind, candidate_value}, {kind, correction_value}}
       when candidate_value != "" and correction_value != "" ->
-        candidate_value >= correction_value
+        candidate_value > correction_value
 
       _ ->
         false

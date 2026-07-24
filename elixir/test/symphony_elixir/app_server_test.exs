@@ -4714,7 +4714,7 @@ defmodule SymphonyElixir.AppServerTest do
       File.write!(fake_ssh, """
       #!/bin/sh
       printf '%s\\n' 'Warning: Permanently added worker-a to the list of known hosts.' >&2
-      printf '%s%s\\0' '__SYMPHONY_CORRECTION__' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","resolved_at":null,"summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
+      printf '%s%s\\0' '__SYMPHONY_CORRECTION__' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
       """)
 
       File.chmod!(fake_ssh, 0o755)
@@ -4917,11 +4917,17 @@ defmodule SymphonyElixir.AppServerTest do
 
       refute AppServer.pure_scope_read_command_for_test("rg --ignore-file=apps/private.ts token tests/unit/named.test.ts")
 
+      refute AppServer.pure_scope_read_command_for_test("rg -f /tmp/private-patterns tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --file=/tmp/private-patterns tests/unit/named.test.ts")
+
       refute AppServer.pure_scope_read_command_for_test("grep --file=apps/private.ts token tests/unit/named.test.ts")
 
       refute AppServer.pure_scope_read_command_for_test("grep --exclude-from apps/private.ts token tests/unit/named.test.ts")
 
       refute AppServer.pure_scope_read_command_for_test("sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test(~S(rg 'x\' ; touch /tmp/pwn; echo '\' tests/unit/named.test.ts))
 
       assert AppServer.pure_scope_read_command_for_test("sed -n '1,120p' tests/unit/named.test.ts")
     after

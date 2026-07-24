@@ -355,6 +355,7 @@ defmodule SymphonyElixir.CoreTest do
           "source" => "symphony.runtime.validation-controller",
           "next_action" => "retry",
           "resolved_at" => nil,
+          "created_at" => "2026-07-23T00:00:01Z",
           "summary" => "Review-rework authoritative Playwright validation failed",
           "findings" => [
             "tests/e2e/desktop-guest-setup.spec.ts failed after Chrome launched."
@@ -373,6 +374,7 @@ defmodule SymphonyElixir.CoreTest do
           "source" => "codex.review-rework",
           "next_action" => "retry",
           "resolved_at" => nil,
+          "created_at" => "2026-07-22T00:00:00Z",
           "summary" => "Focused Playwright validation could not launch Chrome",
           "findings" => ["Chrome exited with SIGABRT before the test executed."],
           "required_corrections" => ["Retry outside the worker sandbox."]
@@ -391,6 +393,7 @@ defmodule SymphonyElixir.CoreTest do
           "source" => "codex.review-rework",
           "next_action" => "retry",
           "resolved_at" => nil,
+          "created_at" => "2026-07-23T00:00:01Z",
           "summary" => "Focused Playwright validation could not launch Chrome",
           "findings" => ["Chrome exited with SIGABRT before the test executed."],
           "required_corrections" => ["Retry outside the worker sandbox."]
