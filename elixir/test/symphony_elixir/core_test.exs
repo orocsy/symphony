@@ -16208,6 +16208,7 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       File.write!(Path.join(workspace, "tests/e2e/derived-helper.ts"), "export {};\n")
+      File.write!(Path.join(workspace, "tests/e2e/knowledge-helper.ts"), "export {};\n")
       File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
 
       scope_bundle =
@@ -16237,6 +16238,12 @@ defmodule SymphonyElixir.CoreTest do
             %{
               "path" => "tests/e2e/*.spec.ts",
               "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/knowledge-helper.ts",
+              "source" => "knowledge_ledger.shared_context",
               "operation" => "read",
               "expires" => "turn"
             }
@@ -16297,9 +16304,12 @@ defmodule SymphonyElixir.CoreTest do
       unclassified_operand_search = grep_command <> " /etc/passwd"
       derived_context_search = "grep -n test tests/e2e/derived-helper.ts"
       unsafe_option_search = "grep -n -f /etc/passwd #{test_path}"
+      option_pattern_unclassified_search = "grep -n -eSECRET /etc/passwd #{test_path}"
+      option_pattern_scoped_search = "grep -n -eSECRET #{test_path}"
       symlink_search = "grep -n test tests/e2e/declared-symlink.spec.ts"
       glob_search = "grep -n test tests/e2e/*.spec.ts"
       disguised_mutation = "rm -f grep cat #{test_path} /tmp/sentinel"
+      knowledge_context_search = "grep -n test tests/e2e/knowledge-helper.ts"
 
       assert {:error, ^unscoped_test_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, unscoped_test_search, [])
@@ -16313,6 +16323,16 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, ^unsafe_option_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, unsafe_option_search, [])
 
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, option_pattern_scoped_search, [])
+
+      assert {:error, ^option_pattern_unclassified_search, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 option_pattern_unclassified_search,
+                 []
+               )
+
       assert {:error, ^symlink_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, symlink_search, [])
 
@@ -16321,6 +16341,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^disguised_mutation, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, disguised_mutation, [])
+
+      assert {:error, ^knowledge_context_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, knowledge_context_search, [])
 
       assert {:error, ^grep_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)

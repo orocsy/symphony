@@ -2476,12 +2476,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         scope_read_non_option_operands(args)
 
       {"bounded_file_search", [tool | args]} when tool in ["rg", "grep"] ->
-        args
-        |> scope_read_non_option_operands()
-        |> case do
-          [_pattern | paths] -> paths
-          _ -> []
-        end
+        search_scope_read_operand_paths(args)
 
       {"directory_listing", ["ls" | args]} ->
         scope_read_non_option_operands(args)
@@ -2520,6 +2515,68 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scope_read_non_option_operands(_args), do: []
+
+  defp search_scope_read_operand_paths(args) when is_list(args) do
+    case parse_search_scope_args(args, false, []) do
+      {:ok, true, paths} -> Enum.reverse(paths)
+      {:ok, false, paths} -> paths |> Enum.reverse() |> Enum.drop(1)
+      _ -> :unclassified
+    end
+  end
+
+  defp search_scope_read_operand_paths(_args), do: :unclassified
+
+  defp parse_search_scope_args([], pattern_from_option?, paths),
+    do: {:ok, pattern_from_option?, paths}
+
+  defp parse_search_scope_args(["--" | rest], pattern_from_option?, paths),
+    do: {:ok, pattern_from_option?, Enum.reverse(rest) ++ paths}
+
+  defp parse_search_scope_args([option, pattern | rest], _pattern_from_option?, paths)
+       when option in ["-e", "--regexp"] and is_binary(pattern),
+       do: parse_search_scope_args(rest, true, paths)
+
+  defp parse_search_scope_args([option | rest], pattern_from_option?, paths)
+       when is_binary(option) do
+    cond do
+      Regex.match?(~r/\A-e.+\z/, option) or String.starts_with?(option, "--regexp=") ->
+        parse_search_scope_args(rest, true, paths)
+
+      safe_search_flag?(option) ->
+        parse_search_scope_args(rest, pattern_from_option?, paths)
+
+      String.starts_with?(option, "-") ->
+        :unclassified
+
+      true ->
+        parse_search_scope_args(rest, pattern_from_option?, [option | paths])
+    end
+  end
+
+  defp parse_search_scope_args(_args, _pattern_from_option?, _paths), do: :unclassified
+
+  defp safe_search_flag?(option) when is_binary(option) do
+    Regex.match?(~r/\A-[nEHhIiJLlOoPqsvwxyz]+\z/, option) or
+      option in [
+        "--line-number",
+        "--extended-regexp",
+        "--fixed-strings",
+        "--ignore-case",
+        "--word-regexp",
+        "--invert-match",
+        "--count",
+        "--files-with-matches",
+        "--files-without-match",
+        "--no-messages",
+        "--text",
+        "--binary",
+        "--null",
+        "--only-matching",
+        "--quiet"
+      ]
+  end
+
+  defp safe_search_flag?(_option), do: false
 
   defp scope_read_option_token?(token) when is_binary(token),
     do: token == "--" or String.starts_with?(token, "-")
@@ -2875,7 +2932,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp handoff_recovery_exact_read_allowed?(command, preflight, workspace)
        when is_binary(command) and is_map(preflight) and is_binary(workspace) do
     command = unwrap_shell_login_command(command)
-    allowed_paths = preflight |> review_rework_scope_bundle_read_paths() |> MapSet.new()
+    allowed_paths = preflight |> runtime_contract_scope_bundle_read_paths() |> MapSet.new()
 
     with true <- pure_scope_read_command?(command),
          command_class when is_binary(command_class) <- exact_read_command_class(command),
@@ -2889,6 +2946,29 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp handoff_recovery_exact_read_allowed?(_command, _preflight, _workspace), do: false
+
+  defp runtime_contract_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+       when is_map(bundle) do
+    [
+      {Map.get(bundle, "write_scope"), ["write", "write-if-conflicted"]},
+      {Map.get(bundle, "read_context"), ["read", "search"]}
+    ]
+    |> Enum.flat_map(fn {entries, allowed_operations} ->
+      entries
+      |> List.wrap()
+      |> Enum.flat_map(fn
+        %{"path" => path, "source" => "runtime_contract." <> _, "operation" => operation}
+        when is_binary(path) and is_binary(operation) ->
+          if operation in allowed_operations, do: [normalize_requirement_path(path)], else: []
+
+        _ ->
+          []
+      end)
+    end)
+    |> Enum.uniq()
+  end
+
+  defp runtime_contract_scope_bundle_read_paths(_preflight), do: []
 
   defp exact_read_command_class(command) when is_binary(command) do
     case OptionParser.split(command) do
