@@ -20,6 +20,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     "continuation-review-rework",
     "review-rework-continuation"
   ]
+  @code_change_verbs ~r/\b(add|delete|edit|fix|change|modify|remove|rename|replace|update|implement)\b/
+  @code_or_test_path ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:package\.json|tsconfig\.json|mix\.exs|mix\.lock|opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|vitest\.config\.[a-z0-9]+)\b|\b(?:src|app|apps|packages|lib|elixir|tests|docs|design|skills|scripts|bin)/[a-z0-9_\-./ ()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|ex|exs|py|sh|css|scss|json|md|yml|yaml|toml|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)}
   @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
@@ -1348,7 +1350,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     findings = correction["findings"] |> string_values() |> Enum.join(" ")
     required = correction["required_corrections"] |> string_values() |> Enum.join(" ")
 
-    source in @pending_codex_review_correction_sources or
+    (source in @pending_codex_review_correction_sources and
+       not explicit_structured_code_change_request?(correction)) or
       (next_action == "retry" and not actionable_code_or_test_correction?(correction) and
          (String.contains?(summary, "Codex review") or
             String.contains?(findings, "Codex review") or
@@ -1361,7 +1364,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     Enum.filter(corrections, &pending_codex_review_correction?/1)
   end
 
-  defp actionable_code_or_test_correction?(%{} = correction) do
+  @spec actionable_code_or_test_correction?(map()) :: boolean()
+  def actionable_code_or_test_correction?(%{} = correction) do
     text =
       [
         correction["summary"],
@@ -1372,14 +1376,38 @@ defmodule SymphonyElixir.RescueSupervisor do
       |> Enum.join(" ")
       |> String.downcase()
 
-    Regex.match?(
-      ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:src|app|apps|packages|lib|tests|docs|design|skills)/[a-z0-9_\-./ ()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)},
-      text
-    ) and
-      Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)
+    code_or_test_path_mentioned?(text) and
+      (Regex.match?(@code_change_verbs, text) or
+         Regex.match?(~r/\b(rerun|run|test|validation|failure|failed|error)\b/, text))
   end
 
-  defp actionable_code_or_test_correction?(_correction), do: false
+  def actionable_code_or_test_correction?(_correction), do: false
+
+  defp explicit_structured_code_change_request?(%{"required_corrections" => required_corrections}) do
+    required_corrections
+    |> string_values()
+    |> Enum.any?(fn instruction ->
+      normalized = String.downcase(instruction)
+
+      code_or_test_path_mentioned?(normalized) and
+        not Regex.match?(
+          ~r/\b(wait|monitor|pending|review result|review response|request(?: a| the)? (?:fresh )?(?:codex )?review|ask for (?:a )?(?:codex )?review)\b/,
+          normalized
+        )
+    end)
+  end
+
+  defp explicit_structured_code_change_request?(_correction), do: false
+
+  defp code_or_test_path_mentioned?(text) when is_binary(text),
+    do: Regex.match?(@code_or_test_path, text)
+
+  defp code_or_test_path_mentioned?(_text), do: false
+
+  if Mix.env() == :test do
+    def explicit_structured_code_change_request_for_test(correction),
+      do: explicit_structured_code_change_request?(correction)
+  end
 
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->

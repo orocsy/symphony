@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.ScopeAccess.Controller do
   @moduledoc false
 
+  alias SymphonyElixir.ControllerEvidence
+
   @policy_patch_dir ".orocsy/delivery/policy-patches"
   @supported_extensions ~w(.ts .tsx .js .jsx .mjs .cjs)
 
@@ -12,6 +14,8 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   @spec decide(map() | nil, map() | nil, String.t() | nil) :: decision()
   def decide(%{"operation" => operation, "paths" => paths} = request, policy, workspace)
       when operation in ["read", "search"] and is_list(paths) do
+    active_patch = active_policy_patch(workspace, request, policy)
+
     cond do
       Map.get(request, "broad") == true ->
         {:block, correction(request, "broad_scope_drift", "The denied command asks for broad project discovery.")}
@@ -19,8 +23,8 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       paths == [] ->
         {:block, correction(request, "missing_exact_path", "The denied command did not name an exact workspace file.")}
 
-      policy_patch_exists?(workspace, request) ->
-        {:block, correction(request, "policy_patch_already_applied", "The same read-only policy patch has already been applied.")}
+      is_map(active_patch) ->
+        {:allow_once, active_patch}
 
       true ->
         case safe_read_entries(request, policy, workspace) do
@@ -56,6 +60,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       patch
       |> Map.put("path", relative_path)
       |> Map.put_new("created_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> ControllerEvidence.sign()
 
     File.write!(path, Jason.encode!(patch, pretty: true) <> "\n")
     {:ok, patch}
@@ -317,13 +322,86 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       Enum.map(@supported_extensions, &Path.join(base, "index#{&1}"))
   end
 
-  defp policy_patch_exists?(workspace, request) when is_binary(workspace) do
-    workspace
-    |> policy_patch_path(patch_id(request))
-    |> File.regular?()
+  defp active_policy_patch(workspace, request, policy) when is_binary(workspace) do
+    expected_patch_id = patch_id(request)
+    path = policy_patch_path(workspace, expected_patch_id)
+
+    with true <- File.regular?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{} = patch} <- Jason.decode(body),
+         true <- Map.get(patch, "status", "active") == "active",
+         true <- ControllerEvidence.valid?(patch),
+         true <- patch["patch_id"] == expected_patch_id,
+         true <- patch["source"] == "symphony.runtime.scope-access-controller",
+         true <- patch["decision"] == "allow_once",
+         true <- same_scope_request?(patch["request"], request),
+         true <- patch["policy_hash_before"] == patch["request"]["policy_hash"],
+         true <- active_patch_policy_matches?(patch, policy),
+         true <- valid_active_entries?(patch["entries"], request["paths"]) do
+      patch
+    else
+      _ -> nil
+    end
   end
 
-  defp policy_patch_exists?(_workspace, _request), do: false
+  defp active_policy_patch(_workspace, _request, _policy), do: nil
+
+  defp same_scope_request?(stored, current) when is_map(stored) and is_map(current) do
+    Map.drop(stored, ["policy_hash"]) == Map.drop(current, ["policy_hash"])
+  end
+
+  defp same_scope_request?(_stored, _current), do: false
+
+  defp active_patch_policy_matches?(patch, policy) do
+    patch["policy_hash_before"] == policy_hash(policy) or
+      active_patch_merged_into_policy?(patch, policy)
+  end
+
+  defp active_patch_merged_into_policy?(%{"patch_id" => patch_id, "entries" => entries}, policy)
+       when is_binary(patch_id) and is_list(entries) do
+    active_entries =
+      policy
+      |> scope_bundle()
+      |> Map.get("read_context", [])
+
+    Enum.all?(entries, fn
+      %{"path" => path} when is_binary(path) ->
+        normalized = normalize_path(path)
+
+        Enum.any?(active_entries, fn
+          %{"path" => active_path, "policy_patch_id" => ^patch_id} ->
+            normalize_path(active_path) == normalized
+
+          _ ->
+            false
+        end)
+
+      _ ->
+        false
+    end)
+  end
+
+  defp active_patch_merged_into_policy?(_patch, _policy), do: false
+
+  defp valid_active_entries?(entries, request_paths)
+       when is_list(entries) and is_list(request_paths) and entries != [] do
+    entry_paths =
+      entries
+      |> Enum.flat_map(fn
+        %{"path" => path, "operation" => operation}
+        when is_binary(path) and operation in ["read", "search"] ->
+          [normalize_path(path)]
+
+        _ ->
+          []
+      end)
+      |> Enum.sort()
+
+    requested_paths = request_paths |> Enum.map(&normalize_path/1) |> Enum.sort()
+    length(entry_paths) == length(entries) and entry_paths == requested_paths
+  end
+
+  defp valid_active_entries?(_entries, _request_paths), do: false
 
   defp policy_patch_path(workspace, patch_id) do
     Path.join([workspace, @policy_patch_dir, "#{safe_patch_id(patch_id)}.json"])

@@ -916,7 +916,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-read"}}}'
-            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git diff --stat -- src/features/landing/GuestStartScreen.tsx"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
           *)
@@ -946,7 +946,8 @@ defmodule SymphonyElixir.AppServerTest do
       assert {:error, {:forbidden_command, command, pattern}} =
                AppServer.run(workspace, "Fix review feedback", issue)
 
-      assert command == "git diff --stat -- src/features/landing/GuestStartScreen.tsx"
+      assert command ==
+               "git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"
       assert pattern =~ "git\\s+diff\\s+--stat"
 
       events = delivery_events!(workspace)
@@ -961,9 +962,144 @@ defmodule SymphonyElixir.AppServerTest do
       assert requested["dispatch_mode"] == "review_rework"
 
       assert decided["decision"] == "block"
-      assert decided["reason_class"] == "read_context_controller_not_enabled"
+      assert decided["reason_class"] == "not_safe_read_context"
       assert get_in(decided, ["policy_patch", "target"]) == "read_context"
       assert get_in(decided, ["policy_patch", "paths"]) == ["src/features/landing/GuestStartScreen.tsx"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "command guard allows controller-approved exact reads without restarting the app-server session" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-same-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-SAME-SESSION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      source_path = "src/features/landing/LandingExperience.tsx"
+      context_path = "tests/unit/desktop-guest-setup.test.tsx"
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(Path.join(workspace, Path.dirname(source_path)))
+      File.mkdir_p!(Path.join(workspace, Path.dirname(context_path)))
+
+      File.write!(
+        Path.join(workspace, source_path),
+        "import \"../../../tests/unit/desktop-guest-setup.test.tsx\";\n" <>
+          "export function LandingExperience() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, context_path), "export const expectedState = true;\n")
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-SAME-SESSION",
+          "write_scope" => [
+            %{
+              "path" => source_path,
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-SAME-SESSION",
+          "branch" => "orocsy/mt-scope-same-session",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => [source_path],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-same-session"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-same-session"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-same-session",
+        identifier: "MT-SCOPE-SAME-SESSION",
+        title: "Scope access same session",
+        description: "A proven exact read should not discard the active worker context.",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-SAME-SESSION",
+        labels: []
+      }
+
+      assert {:ok, result} = AppServer.run(workspace, "Continue the scoped fix", issue)
+      assert result.thread_id == "thread-scope-same-session"
+
+      events = delivery_events!(workspace)
+      assert Enum.count(events, &(&1["event"] == "scope.access.requested")) == 1
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
+
+      decisions = Enum.filter(events, &(&1["event"] == "scope.access.decided"))
+      assert length(decisions) == 1
+
+      assert Enum.all?(decisions, fn decided ->
+               decided["decision"] == "allow_once" and
+                 decided["status"] == "allowed" and
+                 decided["reason_class"] == "safe_read_context" and
+                 decided["paths"] == [context_path]
+             end)
+
+      refute Enum.any?(events, fn event ->
+               event["event"] == "scope.access.decided" and event["status"] == "blocked"
+             end)
+
+      [patch_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
+      patch = patch_path |> File.read!() |> Jason.decode!()
+      assert patch["status"] == "active"
+      assert requested["policy_hash"] == patch["policy_hash_before"]
+      assert hd(decisions)["policy_hash"] == patch["policy_hash_before"]
+      assert requested["request_id"] == hd(decisions)["request_id"]
     after
       File.rm_rf(test_root)
     end
@@ -4540,6 +4676,271 @@ defmodule SymphonyElixir.AppServerTest do
                "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"
 
       assert pattern == "playwright_browser_correction_requires_runtime_controller_handoff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote command guard reads browser corrections from the worker workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-playwright-correction-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REMOTE-PLAYWRIGHT-CORRECTION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REMOTE-PLAYWRIGHT-CORRECTION",
+          "branch" => "orocsy/mt-remote-playwright-correction",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' 'Warning: Permanently added worker-a to the list of known hosts.' >&2
+      printf '%s%s\\0' '__SYMPHONY_CORRECTION__' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      command =
+        "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
+
+      assert {:error, ^command, "playwright_browser_correction_requires_runtime_controller_handoff"} =
+               AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote command guard does not invent a browser correction when inspection fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-playwright-inspection-failure-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace = Path.join(test_root, "MT-REMOTE-PLAYWRIGHT-INSPECTION-FAILURE")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+      File.mkdir_p!(workspace)
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' 'remote correction lookup failed' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      command =
+        "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "hard command guards cannot be overridden by an embedded safe read" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hard-guard-scope-bypass-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-HARD-GUARD")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["tests/unit/named.test.ts"],
+            "scope_bundle" => %{
+              "write_scope" => [],
+              "read_context" => [
+                %{
+                  "path" => "tests/unit/named.test.ts",
+                  "operation" => "read",
+                  "source" => "local_issue_brief.read_context"
+                }
+              ],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      hidden_operand_command = "rg token .env tests/unit/named.test.ts"
+
+      assert {:error, ^hidden_operand_command, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 hidden_operand_command,
+                 []
+               )
+
+      hidden_dash_operand_command = "rg token -- -secret tests/unit/named.test.ts"
+
+      assert {:error, ^hidden_dash_operand_command, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 hidden_dash_operand_command,
+                 []
+               )
+
+      command =
+        ~S|python3 .codex/delivery/bin/orocsy.py --repo . inbox create --summary "$(cat tests/unit/named.test.ts)"|
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 command,
+                 "delivery_inbox_metadata_command_substitution"
+               )
+
+      destructive_command = ~S|rm -f "$(cat tests/unit/named.test.ts)"|
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 destructive_command,
+                 "(^|\\s|[\"'])(rm|sudo|chmod|chown)(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "rg token tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])rg(\\s|$)",
+                 ["(^|\\s|[\"'])rg(\\s|$)"]
+               )
+
+      multiline_command = "rg token tests/unit/named.test.ts\nrm -rf ."
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 multiline_command,
+                 "(^|\\s|[\"'])rg(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n -i '1p' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "git diff --output=/tmp/diff.txt -- tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])git(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n '1p' -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "rg --pre=rm token tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])rg(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "git diff --ext-diff -- tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])git(\\s|$)"
+               )
+
+      refute AppServer.pure_scope_read_command_for_test("git diff --ext-diff -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git diff --textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --pre=rm token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --ignore-file=apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg -f /tmp/private-patterns tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --file=/tmp/private-patterns tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --pretty --hyperlink-format=file://{host}{path} --hostname-bin=./scripts/helper token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("grep --file=apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("grep --exclude-from apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git diff -- tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("git diff --no-ext-diff --no-textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git log -p -- tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("git log -p --no-ext-diff --no-textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test(~S(rg 'x\' ; touch /tmp/pwn; echo '\' tests/unit/named.test.ts))
+
+      assert AppServer.pure_scope_read_command_for_test("sed -n '1,120p' tests/unit/named.test.ts")
     after
       File.rm_rf(test_root)
     end

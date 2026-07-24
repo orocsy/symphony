@@ -203,9 +203,22 @@ defmodule SymphonyElixir.ScopeAccess do
 
   @spec events(String.t(), String.t(), map() | nil, map()) :: [map()]
   def events(command, pattern, policy_bundle, attrs) when is_binary(command) and is_binary(pattern) do
+    scope_access_events(command, pattern, policy_bundle, attrs, nil)
+  end
+
+  def events(_command, _pattern, _policy_bundle, _attrs), do: []
+
+  @spec events(String.t(), String.t(), map() | nil, map(), map() | nil) :: [map()]
+  def events(command, pattern, policy_bundle, attrs, decision)
+      when is_binary(command) and is_binary(pattern) do
+    scope_access_events(command, pattern, policy_bundle, attrs, decision)
+  end
+
+  def events(_command, _pattern, _policy_bundle, _attrs, _decision), do: []
+
+  defp scope_access_events(command, pattern, policy_bundle, attrs, decision) do
     case classify_command(command, policy_bundle) do
       %{} = request ->
-        decision = decision_for(request)
         request_id = request_id(command, pattern, request)
         ts = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
@@ -222,24 +235,45 @@ defmodule SymphonyElixir.ScopeAccess do
             "pattern" => pattern
           })
 
-        [
+        requested =
           base
           |> Map.merge(Map.drop(request, ["policy_patch"]))
           |> Map.put("event", "scope.access.requested")
-          |> Map.put("status", "requested"),
-          base
-          |> Map.merge(request)
-          |> Map.merge(decision)
-          |> Map.put("event", "scope.access.decided")
-          |> Map.put("status", decision["status"])
-        ]
+          |> Map.put("status", "requested")
+
+        case normalize_decision(decision) do
+          %{} = actual_decision ->
+            decided =
+              base
+              |> Map.merge(request)
+              |> Map.merge(actual_decision)
+              |> Map.put("event", "scope.access.decided")
+              |> Map.put(
+                "status",
+                decision_status(actual_decision["decision"]) || actual_decision["status"]
+              )
+
+            [requested, decided]
+
+          nil ->
+            [requested]
+        end
 
       _ ->
         []
     end
   end
 
-  def events(_command, _pattern, _policy_bundle, _attrs), do: []
+  defp normalize_decision(%{} = decision) do
+    decision
+    |> stringify_keys()
+    |> case do
+      %{"guard" => %{} = guard} = attrs -> Map.merge(attrs, stringify_keys(guard))
+      attrs -> attrs
+    end
+  end
+
+  defp normalize_decision(_decision), do: nil
 
   defp request(command, operation, command_class, paths, broad?, policy_bundle) do
     %{
@@ -369,6 +403,7 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp policy_hash(%{"policy_hash" => hash}) when is_binary(hash), do: hash
   defp policy_hash(%{policy_hash: hash}) when is_binary(hash), do: hash
+  defp policy_hash(%{"requirements" => %{"scope_bundle" => %{"policy_hash" => hash}}}) when is_binary(hash), do: hash
   defp policy_hash(%{"scope_bundle" => %{"policy_hash" => hash}}) when is_binary(hash), do: hash
   defp policy_hash(%{scope_bundle: %{policy_hash: hash}}) when is_binary(hash), do: hash
   defp policy_hash(_policy_bundle), do: nil

@@ -25,6 +25,7 @@ defmodule SymphonyElixir.AgentRunner do
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
   @strict_review_rework_policy_violation_recoveries 1
+  @runtime_controller_handoff_policy_pattern "playwright_browser_correction_requires_runtime_controller_handoff"
 
   @type worker_host :: String.t() | nil
 
@@ -116,6 +117,9 @@ defmodule SymphonyElixir.AgentRunner do
     def reconcile_pending_runtime_transition_for_test(workspace, issue, opts),
       do: reconcile_pending_runtime_transition(workspace, issue, opts)
 
+    def reconcile_controller_handoff_after_park_for_test(pattern, workspace, issue, opts),
+      do: reconcile_controller_handoff_after_park(pattern, workspace, issue, opts)
+
     def policy_violation_recovery_action_for_test(
           workspace,
           issue,
@@ -200,7 +204,7 @@ defmodule SymphonyElixir.AgentRunner do
           )
         after
           AppServer.stop_session(session)
-          consume_policy_violation_patches_after_turn(workspace, opts)
+          consume_turn_policy_patches(workspace)
         end
       end
 
@@ -259,7 +263,7 @@ defmodule SymphonyElixir.AgentRunner do
               worker_host
             )
 
-            :ok
+            reconcile_controller_handoff_after_park(pattern, workspace, issue, opts)
 
           :stop ->
             result
@@ -278,15 +282,29 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp consume_policy_violation_patches_after_turn(workspace, opts) when is_binary(workspace) and is_list(opts) do
-    if Keyword.has_key?(opts, :policy_violation) do
-      DispatchPreflight.consume_turn_policy_patches(workspace)
+  defp reconcile_controller_handoff_after_park(
+         @runtime_controller_handoff_policy_pattern,
+         workspace,
+         %Issue{} = issue,
+         opts
+       )
+       when is_binary(workspace) and is_list(opts) do
+    case reconcile_pending_runtime_transition(workspace, issue, opts) do
+      {:error, _reason} = error -> error
+      _transition_result -> :ok
     end
+  end
+
+  defp reconcile_controller_handoff_after_park(_pattern, _workspace, _issue, _opts),
+    do: :ok
+
+  defp consume_turn_policy_patches(workspace) when is_binary(workspace) do
+    DispatchPreflight.consume_turn_policy_patches(workspace)
   rescue
     _error -> :ok
   end
 
-  defp consume_policy_violation_patches_after_turn(_workspace, _opts), do: :ok
+  defp consume_turn_policy_patches(_workspace), do: :ok
 
   defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),
@@ -301,6 +319,17 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp strict_review_rework_implementation_child?(_workspace), do: false
+
+  defp policy_violation_recovery_action(
+         _workspace,
+         _issue,
+         _command,
+         @runtime_controller_handoff_policy_pattern,
+         _recovery_count,
+         _max_policy_recoveries,
+         _worker_host
+       ),
+       do: {:parked, nil}
 
   defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
        when recovery_count >= max_policy_recoveries,
@@ -486,6 +515,7 @@ defmodule SymphonyElixir.AgentRunner do
              on_message: codex_message_handler(codex_update_recipient, issue),
              turn_number: turn_number
            ) do
+      consume_turn_policy_patches(workspace)
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
       case process_runtime_transition_requests(workspace, issue, issue_state_fetcher) do

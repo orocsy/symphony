@@ -24,6 +24,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   @spec prepare(String.t(), Issue.t() | map()) :: {:ok, map()} | {:error, term()}
   def prepare(workspace, issue) when is_binary(workspace) do
     with :ok <- ensure_dirs(workspace),
+         :ok <- consume_turn_policy_patches(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          {:ok, inspection} <- inspect_review(workspace, issue, requirements) do
       prepare_with_inspection(workspace, issue, requirements, inspection, false)
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   def prepare_review_delta_recovery(workspace, %Issue{} = issue, inspection)
       when is_binary(workspace) and is_map(inspection) do
     with :ok <- ensure_dirs(workspace),
+         :ok <- consume_turn_policy_patches(workspace),
          {:ok, requirements} <- requirements_for(workspace, issue),
          true <- review_delta_recovery?(workspace, issue, requirements, inspection) do
       prepare_with_inspection(workspace, issue, requirements, inspection, true)
@@ -126,6 +128,34 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   def read_authoritative(_workspace), do: :none
+
+  @spec read_authoritative(String.t() | nil, String.t() | nil) ::
+          {:ok, map()} | :none | {:error, term()}
+  def read_authoritative(workspace, nil), do: read_authoritative(workspace)
+
+  def read_authoritative(workspace, worker_host)
+      when is_binary(workspace) and is_binary(worker_host) do
+    case Workspace.read_file_in_workspace(workspace, @preflight_path, worker_host) do
+      {:ok, body} ->
+        with {:ok, %{} = preflight} <- Jason.decode(body),
+             true <- ControllerEvidence.valid?(preflight) do
+          {:ok, preflight}
+        else
+          false -> {:error, :invalid_controller_signature}
+          _ -> {:error, :invalid_dispatch_preflight}
+        end
+
+      {:error, :enoent} ->
+        :none
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error -> {:error, {:authoritative_preflight_read_failed, Exception.message(error)}}
+  end
+
+  def read_authoritative(_workspace, _worker_host), do: :none
 
   defp read_raw(workspace) do
     path = Path.join(workspace, @preflight_path)
@@ -437,6 +467,9 @@ defmodule SymphonyElixir.DispatchPreflight do
         "integration_check"
 
       retryable_miu_validation_correction?(workspace) ->
+        "handoff_recovery"
+
+      handoff_recovery_checkpoint?(workspace) and dirty_handoff?(workspace) ->
         "handoff_recovery"
 
       scoped_review_feedback?(inspection, requirements) ->
@@ -899,6 +932,15 @@ defmodule SymphonyElixir.DispatchPreflight do
     dirty_or_ahead_handoff?(workspace) or current_branch_matches_review_head?(workspace, inspection)
   end
 
+  defp dirty_handoff?(workspace) when is_binary(workspace) do
+    case git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]) do
+      {status, 0} -> substantive_status_lines(status) != []
+      _ -> false
+    end
+  end
+
+  defp dirty_handoff?(_workspace), do: false
+
   defp dirty_or_ahead_handoff?(workspace) when is_binary(workspace) do
     case git_command(workspace, ["status", "--short", "--branch", "--untracked-files=all"]) do
       {status, 0} ->
@@ -1098,7 +1140,8 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_preflight(workspace, issue, requirements, inspection) do
-    requirements = add_review_scope_bundle_entries(requirements, if(test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])))
+    feedback = handoff_recovery_feedback(inspection, requirements)
+    requirements = add_review_scope_bundle_entries(requirements, feedback)
     all_open_corrections = all_open_correction_summaries(workspace)
     open_corrections = handoff_recovery_correction_summaries(all_open_corrections)
     correction_active? = open_corrections != []
@@ -1108,8 +1151,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       all_open_corrections
       |> List.first()
       |> retryable_controller_validation_correction?()
-
-    feedback = if test_spec_issue?(requirements), do: [], else: Map.get(inspection, :feedback, [])
 
     %{
       "schema_version" => 1,
@@ -1187,7 +1228,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_correction_task(correction) do
     summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
-    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Edit only the named in-scope files, run focused validation, resolve the correction after evidence is recorded, then continue commit/push/review handoff. Do not use older handoff evidence to skip the correction."
+    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Inspect the existing focused dirty delta first. When that delta already addresses the named correction and current passed evidence covers it, resolve the correction from that evidence and continue commit/push/review handoff without manufacturing another edit or rerunning the same validation. Otherwise edit only the named in-scope files, run focused validation, and resolve the correction after evidence is recorded. Do not use unrelated or stale handoff evidence to skip the correction."
   end
 
   defp handoff_recovery_branch(workspace, issue, requirements, inspection) do
@@ -1496,6 +1537,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_prompt_context(preflight) do
     requirements = preflight["requirements"] || %{}
     review = preflight["review"] || %{}
+    feedback = review["feedback"] || []
     open_corrections = preflight["open_corrections"] || []
     correction_active? = open_corrections != []
 
@@ -1512,7 +1554,11 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Runtime preflight is not worker progress and is not proof that certification, push, or review handoff is complete.
       - First task: #{preflight["first_task"]}
       - Open Orocsy corrections: #{format_corrections(open_corrections)}
+      - Target current-head feedback file(s): #{format_inline_items(feedback_paths(feedback))}
       - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
+
+      Current-head review feedback:
+      #{format_items(feedback)}
 
       Structured recovery limits:
       - The Runtime Contract execution/final handoff gate prepended above is authoritative. Do not substitute `gate.post-miu`, `technical-miu-trace`, or a worker-created validation event.
@@ -1520,6 +1566,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - For a final handoff gate, do not create another MIU commit. Push the canonical branch, verify upstream equality, ensure the PR exists, append `handoff.requested`, and stop.
       - Do not run contract-declared validation inside the Codex worker. The validation controller runs it after the runtime request and writes exact failure evidence into an Orocsy correction when a fix is needed.
       - When a matching MIU validation correction is open, use its supplied command output to make the smallest in-scope fix. Do not manually resolve it; successful controller certification resolves it.
+      - When current-head review feedback is listed, the recovered delta must address that feedback before final handoff certification.
       - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
       """
       |> String.trim()
@@ -1536,18 +1583,23 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Runtime preflight is not worker progress and is not proof that validation, commit, push, or review request is complete.
       - First task: #{preflight["first_task"]}
       - Open Orocsy corrections: #{format_corrections(open_corrections)}
+      - Target current-head feedback file(s): #{format_inline_items(feedback_paths(feedback))}
       - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
       - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
       - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
       - Validation command guidance: #{preflight["validation_command_guidance"] || validation_guidance(preflight["toolchain"], open_corrections)}
 
+      Current-head review feedback:
+      #{format_items(feedback)}
+
       Handoff recovery limits:
-      - If an open Orocsy correction is listed above, it overrides any dirty validated checkpoint. Start from the exact file path named in the correction, and do not commit, push, request review, or use older validation evidence until the correction is fixed or explicitly blocked.
+      - If an open Orocsy correction is listed above, inspect the focused dirty delta against its named paths first. When the existing delta addresses the correction and the checkpoint lists current passed evidence for that unchanged delta, resolve the correction and continue handoff without another edit or duplicate validation. Otherwise start from the exact correction path and do not commit, push, or request review until the correction is fixed or explicitly blocked.
       - Do not restart the MIU from the issue brief or switch to the issue seed branch while local dirty work exists.
       - Do not broaden into unrelated routes, docs, historical sessions, Linear discovery, or PR polling.
       - If the focused diff is complete and the dirty handoff checkpoint already lists current passed validation/gate evidence for those dirty files, do not rerun the same validation command; use the recorded evidence, then commit, push the current branch, and request/update Codex review.
       - If validation evidence is missing, stale, or the focused diff changed after evidence was recorded, run the smallest validation for the dirty files before committing.
       - If focused validation fails and names exact in-scope files, assertions, missing columns, missing exports, or required contract symbols, make that smallest in-scope fix first, rerun the same focused validation, then continue handoff.
+      - When current-head review feedback is listed, do not commit or request review until the focused dirty delta addresses every listed in-scope finding.
       - Record an Orocsy correction and stop only when validation lacks an actionable in-scope target, a required dependency/credential is missing, permissions block the command, or the needed edit is outside the issue write scope.
       """
       |> String.trim()
@@ -1695,22 +1747,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp playwright_correction_guidance(open_corrections) when is_list(open_corrections) do
-    text =
-      open_corrections
-      |> Enum.flat_map(fn correction ->
-        [
-          correction["summary"],
-          correction["findings"],
-          correction["required_corrections"]
-        ]
-        |> List.flatten()
-      end)
-      |> Enum.filter(&is_binary/1)
-      |> Enum.join("\n")
-      |> String.downcase()
-
-    if String.contains?(text, ["playwright", "chrome", "chromium"]) and
-         String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"]) do
+    if Enum.any?(open_corrections, &playwright_browser_correction?/1) do
       "For Playwright browser validation blocked by the Codex worker sandbox, do not rerun Playwright or seek browser escalation inside the worker. When the prompt includes a `Runtime Contract final handoff gate`, commit and push the scoped fix, append `handoff.requested`, and let Symphony's validation controller run Playwright outside the worker sandbox. For a legacy ticket without that gate, record one concrete environment blocker and stop."
     else
       ""
@@ -1718,6 +1755,51 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp playwright_correction_guidance(_open_corrections), do: ""
+
+  @spec playwright_browser_correction?(map()) :: boolean()
+  def playwright_browser_correction?(%{} = correction) do
+    text =
+      [
+        correction["summary"],
+        correction["findings"],
+        correction["required_corrections"]
+      ]
+      |> correction_string_values()
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    browser_command? = String.contains?(text, ["playwright", "chrome", "chromium"])
+
+    launch_context? =
+      String.contains?(text, [
+        "before test",
+        "before the test",
+        "did not execute",
+        "launch",
+        "startup",
+        "starting"
+      ])
+
+    sigabrt_launch_failure? = String.contains?(text, "sigabrt") and launch_context?
+
+    launch_failure? =
+      String.contains?(text, [
+        "could not launch",
+        "cannot launch",
+        "failed to launch",
+        "launch failed",
+        "did not execute because",
+        "executable missing",
+        "local-browsers"
+      ]) or sigabrt_launch_failure?
+
+    environment_failure? =
+      String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"])
+
+    browser_command? and launch_failure? and environment_failure?
+  end
+
+  def playwright_browser_correction?(_correction), do: false
 
   defp executable_available?(executables, name) do
     get_in(executables, [name, "available"]) == true
@@ -1849,17 +1931,19 @@ defmodule SymphonyElixir.DispatchPreflight do
         preflight
 
       patches ->
-        requirements =
+        {requirements, applied_patches} =
           preflight
           |> Map.get("requirements", %{})
           |> apply_policy_patches_to_requirements(patches)
 
-        policy_hash = policy_hash(requirements)
-
-        preflight
-        |> Map.put("requirements", requirements)
-        |> Map.put("policy_hash", policy_hash)
-        |> Map.put("policy_patches", Enum.map(patches, &policy_patch_summary/1))
+        if applied_patches == [] do
+          preflight
+        else
+          preflight
+          |> Map.put("requirements", requirements)
+          |> Map.put("policy_hash", policy_hash(requirements))
+          |> Map.put("policy_patches", Enum.map(applied_patches, &policy_patch_summary/1))
+        end
     end
   end
 
@@ -1911,9 +1995,15 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp policy_patches(workspace) when is_binary(workspace) do
     workspace
+    |> active_policy_patch_files()
+    |> Enum.filter(&authenticated_scope_access_patch?/1)
+    |> Enum.sort_by(&{&1["created_at"] || "", &1["patch_id"] || ""})
+  end
+
+  defp active_policy_patch_files(workspace) when is_binary(workspace) do
+    workspace
     |> Path.join(Path.join(ScopeAccess.Controller.policy_patch_dir(), "*.json"))
     |> Path.wildcard()
-    |> Enum.sort()
     |> Enum.flat_map(&read_policy_patch/1)
     |> Enum.filter(&active_policy_patch?/1)
   end
@@ -1924,7 +2014,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         case Jason.decode(body) do
           {:ok, %{} = patch} ->
             workspace = path |> Path.dirname() |> Path.dirname() |> Path.dirname() |> Path.dirname()
-            [Map.put_new(patch, "path", Path.relative_to(path, workspace))]
+            [Map.put(patch, "path", Path.relative_to(path, workspace))]
 
           _ ->
             []
@@ -1940,6 +2030,61 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp active_policy_patch?(%{"status" => status}) when status in ["active", "applied"], do: true
   defp active_policy_patch?(%{"status" => status}) when is_binary(status), do: false
   defp active_policy_patch?(_patch), do: true
+
+  defp authenticated_scope_access_patch?(patch) when is_map(patch) do
+    patch["source"] == "symphony.runtime.scope-access-controller" and
+      patch["decision"] == "allow_once" and
+      policy_patch_target(patch) == "read_context" and
+      is_binary(patch["patch_id"]) and patch["patch_id"] != "" and
+      is_binary(patch["policy_hash_before"]) and patch["policy_hash_before"] != "" and
+      same_patch_request_policy?(patch) and
+      valid_scope_access_patch_entries?(patch) and
+      ControllerEvidence.valid?(patch)
+  end
+
+  defp authenticated_scope_access_patch?(_patch), do: false
+
+  defp same_patch_request_policy?(%{
+         "policy_hash_before" => policy_hash,
+         "request" => %{"policy_hash" => policy_hash}
+       }),
+       do: true
+
+  defp same_patch_request_policy?(_patch), do: false
+
+  defp valid_scope_access_patch_entries?(%{
+         "entries" => entries,
+         "request" => %{"paths" => requested_paths}
+       })
+       when is_list(entries) and entries != [] and is_list(requested_paths) do
+    entry_paths =
+      entries
+      |> Enum.flat_map(fn
+        %{"path" => path, "operation" => operation}
+        when is_binary(path) and path != "" and operation in ["read", "search"] ->
+          [normalize_policy_patch_path(path)]
+
+        _ ->
+          []
+      end)
+      |> Enum.sort()
+
+    request_paths =
+      requested_paths
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.map(&normalize_policy_patch_path/1)
+      |> Enum.sort()
+
+    length(entry_paths) == length(entries) and entry_paths == request_paths
+  end
+
+  defp valid_scope_access_patch_entries?(_patch), do: false
+
+  defp normalize_policy_patch_path(path) when is_binary(path) do
+    path
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+  end
 
   defp drop_inactive_turn_policy_patch_entries(preflight, workspace) when is_map(preflight) and is_binary(workspace) do
     active_patch_ids = active_policy_patch_ids(workspace)
@@ -2073,6 +2218,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       patch
       |> Map.put("status", "consumed")
       |> Map.put_new("consumed_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> ControllerEvidence.sign()
       |> then(&File.write!(path, Jason.encode!(&1, pretty: true) <> "\n"))
     end
   rescue
@@ -2080,6 +2226,17 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp consume_turn_policy_patch(_workspace, _patch), do: :ok
+
+  defp handoff_recovery_feedback(inspection, requirements) do
+    if test_spec_issue?(requirements),
+      do: [],
+      else: review_feedback_for_requirements(inspection, requirements)
+  end
+
+  if Code.ensure_loaded?(Mix) and Mix.env() == :test do
+    def handoff_recovery_feedback_for_test(inspection, requirements),
+      do: handoff_recovery_feedback(inspection, requirements)
+  end
 
   defp turn_policy_patch?(%{"decision" => "allow_once"}), do: true
 
@@ -2090,14 +2247,48 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp turn_policy_patch?(_patch), do: false
 
   defp apply_policy_patches_to_requirements(requirements, patches) when is_map(requirements) do
-    Enum.reduce(patches, ensure_scope_bundle(requirements), fn patch, acc ->
-      patch
-      |> policy_patch_entries()
-      |> Enum.reduce(acc, fn {target, entries}, requirements ->
-        put_scope_bundle_entries(requirements, target, entries)
+    Enum.reduce(patches, {ensure_scope_bundle(requirements), []}, fn patch, {acc, applied} ->
+      if applicable_policy_patch?(patch, acc) do
+        updated =
+          patch
+          |> policy_patch_entries()
+          |> Enum.reduce(acc, fn {target, entries}, requirements ->
+            put_scope_bundle_entries(requirements, target, entries)
+          end)
+
+        {updated, applied ++ [patch]}
+      else
+        {acc, applied}
+      end
+    end)
+  end
+
+  defp applicable_policy_patch?(patch, requirements) do
+    patch["policy_hash_before"] == policy_hash(requirements) or
+      policy_patch_already_applied?(patch, requirements)
+  end
+
+  defp policy_patch_already_applied?(%{"patch_id" => patch_id, "entries" => entries}, requirements)
+       when is_binary(patch_id) and is_list(entries) do
+    current_entries =
+      requirements
+      |> scope_bundle()
+      |> Map.get("read_context", [])
+
+    Enum.all?(entries, fn %{"path" => path} ->
+      normalized = normalize_policy_patch_path(path)
+
+      Enum.any?(current_entries, fn
+        %{"path" => current_path, "policy_patch_id" => ^patch_id} ->
+          normalize_policy_patch_path(current_path) == normalized
+
+        _ ->
+          false
       end)
     end)
   end
+
+  defp policy_patch_already_applied?(_patch, _requirements), do: false
 
   defp policy_patch_entries(%{"entries" => entries} = patch) when is_list(entries) do
     target = policy_patch_target(patch)

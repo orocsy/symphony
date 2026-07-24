@@ -17,6 +17,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     Workspace
   }
 
+  alias SymphonyElixir.ScopeAccess.Controller, as: ScopeAccessController
+
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
@@ -168,6 +170,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       patterns: forbidden_command_patterns,
       configured_patterns: configured_forbidden_command_patterns,
       workspace: workspace,
+      worker_host: worker_host,
       fresh_checkpoint_stop_enabled: dispatch_preflight_mode(workspace) == "fresh_implementation",
       fresh_checkpoint_present_at_turn_start: fresh_implementation_checkpoint_ready?(workspace)
     }
@@ -719,7 +722,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     @spec command_policy_violation_for_test(String.t(), String.t(), [String.t()]) ::
             :ok | {:error, String.t(), String.t()}
-    def command_policy_violation_for_test(workspace, command, configured_patterns)
+    def command_policy_violation_for_test(workspace, command, configured_patterns) do
+      command_policy_violation_for_test(workspace, command, configured_patterns, nil)
+    end
+
+    @spec command_policy_violation_for_test(
+            String.t(),
+            String.t(),
+            [String.t()],
+            String.t() | nil
+          ) ::
+            :ok | {:error, String.t(), String.t()}
+    def command_policy_violation_for_test(workspace, command, configured_patterns, worker_host)
         when is_list(configured_patterns) do
       payload = %{"params" => %{"msg" => %{"command" => command}}}
       patterns = effective_forbidden_command_patterns(workspace, configured_patterns)
@@ -727,7 +741,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       forbidden_command_violation(payload, %{
         patterns: patterns,
         configured_patterns: configured_patterns,
-        workspace: workspace
+        workspace: workspace,
+        worker_host: worker_host
       })
     end
 
@@ -737,8 +752,24 @@ defmodule SymphonyElixir.Codex.AppServer do
       bounded_git_log_exception_available?(workspace, configured_patterns)
     end
 
+    def pure_scope_read_command_for_test(command) when is_binary(command),
+      do: pure_scope_read_command?(command)
+
     def worker_thread_overrides_for_test(params, workspace),
       do: maybe_put_worker_thread_overrides(params, workspace)
+
+    def scope_access_resolution_for_test(workspace, command, pattern, configured_patterns \\ [])
+        when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
+      resolve_scope_access_violation(
+        %{
+          workspace: workspace,
+          worker_host: nil,
+          configured_patterns: configured_patterns
+        },
+        command,
+        pattern
+      )
+    end
   end
 
   defp bounded_git_log_exception_available?(workspace, configured_patterns)
@@ -1995,16 +2026,53 @@ defmodule SymphonyElixir.Codex.AppServer do
       true ->
         case forbidden_command_violation(payload, command_guard) do
           {:error, command, pattern} ->
-            record_scope_access_events(command_guard, command, pattern)
+            case resolve_scope_access_violation(command_guard, command, pattern) do
+              {:allow, {:scope_access_decision, decision, policy}} ->
+                record_scope_access_events(
+                  command_guard,
+                  command,
+                  pattern,
+                  decision,
+                  policy
+                )
 
-            emit_message(
-              on_message,
-              :forbidden_command,
-              %{payload: payload, raw: payload_string, command: command, pattern: pattern},
-              metadata
-            )
+                handle_allowed_turn_method(
+                  port,
+                  on_message,
+                  payload,
+                  payload_string,
+                  method,
+                  timeout_ms,
+                  tool_executor,
+                  auto_approve_requests,
+                  metadata,
+                  command_guard
+                )
 
-            {:error, {:forbidden_command, command, pattern}}
+              {:deny, decision} ->
+                record_scope_access_events(command_guard, command, pattern, decision)
+
+                emit_message(
+                  on_message,
+                  :forbidden_command,
+                  %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+                  metadata
+                )
+
+                {:error, {:forbidden_command, command, pattern}}
+
+              :defer ->
+                record_scope_access_events(command_guard, command, pattern)
+
+                emit_message(
+                  on_message,
+                  :forbidden_command,
+                  %{payload: payload, raw: payload_string, command: command, pattern: pattern},
+                  metadata
+                )
+
+                {:error, {:forbidden_command, command, pattern}}
+            end
 
           :ok ->
             handle_allowed_turn_method(
@@ -2138,7 +2206,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       open_correction_blocks_review_classification?(command_for_patterns, workspace) ->
         {:error, command, "open_correction_requires_scoped_fix_before_review_feedback_classified"}
 
-      unsafe_playwright_correction_validation?(command_for_patterns, workspace) ->
+      unsafe_playwright_correction_validation?(command_for_patterns, workspace, Map.get(command_guard, :worker_host)) ->
         {:error, command, "playwright_browser_correction_requires_runtime_controller_handoff"}
 
       symlinked_vitest_full_test_command?(command_for_patterns, workspace) ->
@@ -2226,14 +2294,57 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp record_scope_access_events(_command_guard, _command, _pattern), do: :ok
 
-  defp scope_access_events(workspace, command, pattern) do
-    ScopeAccess.events(command, pattern, scope_access_policy_bundle(workspace), scope_access_attrs(workspace))
+  defp record_scope_access_events(%{workspace: workspace}, command, pattern, decision)
+       when is_binary(workspace) and is_binary(command) and is_binary(pattern) and is_map(decision) do
+    workspace
+    |> scope_access_events(command, pattern, decision)
+    |> Enum.each(&append_scope_access_event(workspace, &1))
+  rescue
+    error ->
+      Logger.warning("Failed to record resolved scope access events: #{Exception.message(error)}")
+      :ok
   end
 
-  defp scope_access_policy_bundle(workspace) when is_binary(workspace) do
+  defp record_scope_access_events(command_guard, command, pattern, _decision),
+    do: record_scope_access_events(command_guard, command, pattern)
+
+  defp record_scope_access_events(
+         %{workspace: workspace},
+         command,
+         pattern,
+         decision,
+         policy
+       )
+       when is_binary(workspace) and is_binary(command) and is_binary(pattern) and
+              is_map(decision) and is_map(policy) do
+    command
+    |> ScopeAccess.events(pattern, policy, scope_access_attrs(workspace), decision)
+    |> Enum.each(&append_scope_access_event(workspace, &1))
+  rescue
+    error ->
+      Logger.warning("Failed to record resolved scope access events: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_scope_access_events(command_guard, command, pattern, decision, _policy),
+    do: record_scope_access_events(command_guard, command, pattern, decision)
+
+  defp scope_access_events(workspace, command, pattern) do
+    ScopeAccess.events(command, pattern, scope_access_policy(workspace), scope_access_attrs(workspace))
+  end
+
+  defp scope_access_events(workspace, command, pattern, decision) do
+    ScopeAccess.events(
+      command,
+      pattern,
+      scope_access_policy(workspace),
+      scope_access_attrs(workspace),
+      decision
+    )
+  end
+
+  defp scope_access_policy(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
-      {:ok, %{"requirements" => %{"scope_bundle" => bundle}}} when is_map(bundle) -> bundle
-      {:ok, %{"requirements" => requirements}} when is_map(requirements) -> requirements
       {:ok, preflight} when is_map(preflight) -> preflight
       _ -> %{}
     end
@@ -2241,7 +2352,247 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> %{}
   end
 
-  defp scope_access_policy_bundle(_workspace), do: %{}
+  defp scope_access_policy(_workspace), do: %{}
+
+  defp resolve_scope_access_violation(
+         %{workspace: workspace, worker_host: nil} = command_guard,
+         command,
+         pattern
+       )
+       when is_binary(workspace) and is_binary(command) and
+              pattern != @review_rework_dirty_validated_handoff_recheck_pattern do
+    if configured_forbidden_command_match?(command, command_guard) or
+         not scope_generated_violation?(pattern, workspace) do
+      :defer
+    else
+      policy = scope_access_policy(workspace)
+
+      case ScopeAccess.classify_command(command, policy) do
+        %{} = request ->
+          if request["broad"] == true or
+               scope_access_command_eligible?(command, request) do
+            case ScopeAccessController.decide(request, policy, workspace) do
+              {:allow_once, patch} ->
+                if scope_access_command_eligible?(command, request) do
+                  case ScopeAccessController.write_policy_patch(workspace, patch) do
+                    {:ok, written_patch} ->
+                      {:allow, {:scope_access_decision, written_patch, policy}}
+
+                    {:error, reason} ->
+                      decision =
+                        request
+                        |> ScopeAccess.decision_for()
+                        |> Map.put("reason_class", "policy_patch_write_failed")
+                        |> Map.put("error", inspect(reason))
+
+                      {:deny, decision}
+                  end
+                else
+                  :defer
+                end
+
+              {decision, correction_attrs} when decision in [:block, :escalate] ->
+                {:deny, correction_attrs}
+            end
+          else
+            :defer
+          end
+
+        _ ->
+          :defer
+      end
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to resolve scope access in app server: #{Exception.message(error)}")
+      :defer
+  end
+
+  defp resolve_scope_access_violation(_command_guard, _command, _pattern), do: :defer
+
+  defp scope_generated_violation?(pattern, workspace)
+       when is_binary(pattern) and is_binary(workspace) do
+    pattern in @review_rework_forbidden_command_patterns or
+      pattern in @fresh_implementation_forbidden_command_patterns or
+      pattern in review_rework_path_guard_patterns(workspace)
+  end
+
+  defp scope_generated_violation?(_pattern, _workspace), do: false
+
+  defp scope_access_command_eligible?(
+         command,
+         %{
+           "operation" => operation,
+           "command_class" => command_class,
+           "broad" => false
+         } = request
+       )
+       when operation in ["read", "search"] and
+              command_class in [
+                "bounded_file_read",
+                "bounded_file_search",
+                "directory_listing",
+                "git_diff",
+                "git_discovery"
+              ] do
+    normalized = unwrap_shell_login_command(command)
+    pure_scope_read_command?(normalized) and all_scope_read_operands_classified?(normalized, request)
+  end
+
+  defp scope_access_command_eligible?(_command, _request), do: false
+
+  defp all_scope_read_operands_classified?(
+         command,
+         %{"paths" => requested_paths, "command_class" => command_class}
+       )
+       when is_binary(command) and is_list(requested_paths) and is_binary(command_class) do
+    case scope_read_operand_paths(command, command_class) do
+      paths when is_list(paths) and paths != [] ->
+        normalized_requested = requested_paths |> Enum.map(&normalize_scope_operand_path/1) |> MapSet.new()
+        normalized_operands = paths |> Enum.map(&normalize_scope_operand_path/1) |> MapSet.new()
+        normalized_operands == normalized_requested
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp all_scope_read_operands_classified?(_command, _request), do: false
+
+  defp scope_read_operand_paths(command, command_class) when is_binary(command) do
+    case {command_class, OptionParser.split(command)} do
+      {"bounded_file_read", ["sed" | args]} ->
+        args |> Enum.reject(&scope_read_option_token?/1) |> List.last() |> List.wrap()
+
+      {"bounded_file_read", [tool | args]} when tool in ["cat", "head", "tail", "nl"] ->
+        scope_read_non_option_operands(args)
+
+      {"bounded_file_search", [tool | args]} when tool in ["rg", "grep"] ->
+        args
+        |> scope_read_non_option_operands()
+        |> case do
+          [_pattern | paths] -> paths
+          _ -> []
+        end
+
+      {"directory_listing", ["ls" | args]} ->
+        scope_read_non_option_operands(args)
+
+      {command_class, ["git", _subcommand | args]}
+      when command_class in ["git_diff", "git_discovery"] ->
+        git_scope_read_operands(args)
+
+      _ ->
+        :unclassified
+    end
+  end
+
+  defp scope_read_operand_paths(_command, _command_class), do: :unclassified
+
+  defp git_scope_read_operands(args) when is_list(args) do
+    case Enum.split_while(args, &(&1 != "--")) do
+      {_options, ["--" | paths]} -> Enum.reject(paths, &(&1 == ""))
+      _ -> :unclassified
+    end
+  end
+
+  defp scope_read_non_option_operands(args) when is_list(args) do
+    {operands, _after_options?} =
+      Enum.reduce(args, {[], false}, fn token, {operands, after_options?} ->
+        cond do
+          token == "--" -> {operands, true}
+          after_options? -> {[token | operands], true}
+          scope_read_option_token?(token) -> {operands, false}
+          Regex.match?(~r/\A\d+\z/, token) -> {operands, false}
+          true -> {[token | operands], false}
+        end
+      end)
+
+    Enum.reverse(operands)
+  end
+
+  defp scope_read_non_option_operands(_args), do: []
+
+  defp scope_read_option_token?(token) when is_binary(token),
+    do: token == "--" or String.starts_with?(token, "-")
+
+  defp scope_read_option_token?(_token), do: true
+
+  defp normalize_scope_operand_path(path) when is_binary(path) do
+    path
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+    |> String.trim_trailing("/")
+  end
+
+  defp normalize_scope_operand_path(_path), do: ""
+
+  defp unwrap_shell_login_command(command) when is_binary(command) do
+    normalized =
+      command
+      |> unescape_shell_argument_quotes()
+      |> String.trim()
+
+    cond do
+      String.starts_with?(normalized, ~s(/bin/zsh -lc ")) and
+          String.ends_with?(normalized, "\"") ->
+        normalized
+        |> String.trim_leading(~s(/bin/zsh -lc "))
+        |> String.trim_trailing("\"")
+
+      String.starts_with?(normalized, "/bin/zsh -lc '") and
+          String.ends_with?(normalized, "'") ->
+        normalized
+        |> String.trim_leading("/bin/zsh -lc '")
+        |> String.trim_trailing("'")
+
+      true ->
+        normalized
+    end
+  end
+
+  defp unwrap_shell_login_command(_command), do: ""
+
+  defp pure_scope_read_command?(command) when is_binary(command) do
+    not command_chain_operator_outside_quotes?(command) and
+      not String.contains?(command, ["$(", "`"]) and
+      not unsafe_scope_read_option?(command) and
+      Regex.match?(
+        ~r/\A(?:sed\s+-n|(?:cat|head|tail|nl|rg|grep|ls)\s|git\s+(?:diff|log|ls-files)(?:\s|$))/,
+        command
+      )
+  end
+
+  defp pure_scope_read_command?(_command), do: false
+
+  defp unsafe_scope_read_option?(command) when is_binary(command) do
+    (String.starts_with?(command, "sed ") and not safe_sed_print_slice?(command)) or
+      (String.starts_with?(command, "rg ") and
+         Regex.match?(
+           ~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|pre(?:-glob)?|ignore-file|hostname-bin)(?:=|\s|$))/,
+           command
+         )) or
+      (String.starts_with?(command, "grep ") and
+         Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, command)) or
+      (Regex.match?(~r/\Agit\s+(?:diff|log)(?:\s|$)/, command) and
+         not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, command) and
+                Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, command))) or
+      (String.starts_with?(command, "git ") and
+         Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, command))
+  end
+
+  defp unsafe_scope_read_option?(_command), do: false
+
+  defp safe_sed_print_slice?(command) when is_binary(command) do
+    Regex.match?(
+      ~r/\Ased\s+-n\s+(?:'\d+(?:,\d+)?p'|"\d+(?:,\d+)?p"|\d+(?:,\d+)?p)\s+(?:--\s+)?(?:'[^']+'|"[^"]+"|[A-Za-z0-9_.\/-]+)\z/,
+      command
+    )
+  end
+
+  defp safe_sed_print_slice?(_command), do: false
 
   defp scope_access_attrs(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do
@@ -2290,15 +2641,15 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp delivery_inbox_command_substitution?(_command), do: false
 
-  defp unsafe_playwright_correction_validation?(command, workspace)
+  defp unsafe_playwright_correction_validation?(command, workspace, worker_host)
        when is_binary(command) and is_binary(workspace) do
     playwright_test_command?(command) and
-      open_playwright_browser_correction?(workspace)
+      open_playwright_browser_correction?(workspace, worker_host)
   rescue
     _error -> false
   end
 
-  defp unsafe_playwright_correction_validation?(_command, _workspace), do: false
+  defp unsafe_playwright_correction_validation?(_command, _workspace, _worker_host), do: false
 
   defp playwright_test_command?(command) when is_binary(command) do
     command
@@ -2309,31 +2660,17 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp playwright_test_command?(_command), do: false
 
-  defp open_playwright_browser_correction?(workspace) when is_binary(workspace) do
-    workspace
-    |> Workspace.open_blocking_corrections_in_workspace()
-    |> Enum.any?(fn correction ->
-      text =
-        correction
-        |> correction_text()
-        |> String.downcase()
+  defp open_playwright_browser_correction?(workspace, worker_host) when is_binary(workspace) do
+    case Workspace.inspect_blocking_corrections_in_workspace(workspace, worker_host) do
+      {:ok, corrections} ->
+        Enum.any?(corrections, &DispatchPreflight.playwright_browser_correction?/1)
 
-      String.contains?(text, ["playwright", "chrome", "chromium"]) and
-        String.contains?(text, ["sandbox", "sigabrt", "local-browsers", "executable missing"])
-    end)
+      {:error, _reason} ->
+        false
+    end
   end
 
-  defp open_playwright_browser_correction?(_workspace), do: false
-
-  defp correction_text(value) when is_map(value) do
-    value
-    |> Map.values()
-    |> Enum.map_join("\n", &correction_text/1)
-  end
-
-  defp correction_text(value) when is_list(value), do: Enum.map_join(value, "\n", &correction_text/1)
-  defp correction_text(value) when is_binary(value), do: value
-  defp correction_text(_value), do: ""
+  defp open_playwright_browser_correction?(_workspace, _worker_host), do: false
 
   defp symlinked_vitest_full_test_command?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
@@ -2885,12 +3222,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp redact_delivery_event_append_metadata(command) when is_binary(command) do
-    ["command", "summary", "message", "details", "detail", "body"]
+    ["command", "summary", "message", "details", "detail", "body", "tool", "step"]
     |> Enum.reduce(command, fn flag, acc ->
       acc
-      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1REDACTED")
     end)
   end
 
@@ -2898,12 +3235,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     ["summary", "finding", "required-correction"]
     |> Enum.reduce(command, fn flag, acc ->
       acc
-      |> String.replace(~r/(--#{flag}=)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}=)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}=)[^\s]+/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1<redacted>")
-      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1<redacted>")
+      |> String.replace(~r/(--#{flag}=)"(?:\\.|[^"\\])*"/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}=)'(?:\\.|[^'\\])*'/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}=)[^\s]+/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)"(?:\\.|[^"\\])*"/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)'(?:\\.|[^'\\])*'/, "\\1REDACTED")
+      |> String.replace(~r/(--#{flag}\s+)[^\s]+/, "\\1REDACTED")
     end)
   end
 
@@ -3302,6 +3639,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp chain_operator_scan([], _quote, _previous), do: false
 
+  defp chain_operator_scan(["\\" | rest], "'", _previous) do
+    chain_operator_scan(rest, "'", "\\")
+  end
+
   defp chain_operator_scan(["\\" | [_escaped | rest]], quote, _previous) do
     chain_operator_scan(rest, quote, "\\")
   end
@@ -3318,6 +3659,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     next = List.first(rest)
 
     cond do
+      char in ["\n", "\r", ">", "<"] ->
+        true
+
       char == ";" ->
         true
 
@@ -3328,6 +3672,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         true
 
       char == "&" and next == "&" ->
+        true
+
+      char == "&" ->
         true
 
       true ->

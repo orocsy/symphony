@@ -202,6 +202,28 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "worker runtime info replaces a preselected remote host with the actual local host" do
+    issue_id = "issue-actual-local-worker"
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          worker_host: "worker-a",
+          workspace_path: "/remote/workspace"
+        }
+      }
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info(
+               {:worker_runtime_info, issue_id, %{worker_host: nil, workspace_path: "/local/workspace"}},
+               state
+             )
+
+    assert updated_state.running[issue_id].worker_host == nil
+    assert updated_state.running[issue_id].workspace_path == "/local/workspace"
+  end
+
   test "dispatch gate treats empty retry fingerprint as legacy retry correction" do
     workspace_root =
       Path.join(
@@ -247,6 +269,209 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(workspace_root)
     end
+  end
+
+  test "dispatch gate parks browser-provider corrections for runtime controller handling" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-browser-controller-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-browser-controller-correction",
+        identifier: "COD-BROWSER-CONTROLLER",
+        title: "Browser controller correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260723000000_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260723000000_browser",
+          "status" => "open",
+          "source" => "codex.review-rework",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Focused Playwright validation could not launch Chrome",
+          "findings" => [
+            "Chrome process did exit: signal=SIGABRT while tests/e2e/desktop-guest-setup.spec.ts was starting."
+          ],
+          "required_corrections" => [
+            "Retry the exact focused Playwright command outside the worker sandbox."
+          ]
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "dispatch gate allows actionable validation-controller browser corrections" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-browser-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-controller-browser-correction",
+        identifier: "COD-CONTROLLER-BROWSER",
+        title: "Controller browser correction",
+        state: "Rework"
+      }
+
+      workspace = Path.join(workspace_root, issue.identifier)
+      inbox = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(inbox)
+
+      File.write!(
+        Path.join(inbox, "correction_20260723000001_controller_browser.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260723000001_controller_browser",
+          "status" => "open",
+          "source" => "symphony.runtime.validation-controller",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "created_at" => "2026-07-23T00:00:01Z",
+          "summary" => "Review-rework authoritative Playwright validation failed",
+          "findings" => [
+            "tests/e2e/desktop-guest-setup.spec.ts failed after Chrome launched."
+          ],
+          "required_corrections" => [
+            "Fix tests/e2e/desktop-guest-setup.spec.ts and request controller certification."
+          ]
+        })
+      )
+
+      File.write!(
+        Path.join(inbox, "correction_20260722000000_stale_provider.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260722000000_stale_provider",
+          "status" => "open",
+          "source" => "codex.review-rework",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "created_at" => "2026-07-22T00:00:00Z",
+          "summary" => "Focused Playwright validation could not launch Chrome",
+          "findings" => ["Chrome exited with SIGABRT before the test executed."],
+          "required_corrections" => ["Retry outside the worker sandbox."]
+        })
+      )
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      File.write!(
+        Path.join(inbox, "correction_20260724000000_current_provider.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260724000000_current_provider",
+          "status" => "open",
+          "source" => "codex.review-rework",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "created_at" => "2026-07-23T00:00:01Z",
+          "summary" => "Focused Playwright validation could not launch Chrome",
+          "findings" => ["Chrome exited with SIGABRT before the test executed."],
+          "required_corrections" => ["Retry outside the worker sandbox."]
+        })
+      )
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "dispatch gate treats a launched Chromium sandbox-behavior failure as actionable product rework" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-browser-product-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_active_states: ["Rework"],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{
+        id: "issue-browser-product-correction",
+        identifier: "COD-BROWSER-PRODUCT",
+        title: "Browser product correction",
+        state: "Rework"
+      }
+
+      inbox = Path.join([workspace_root, issue.identifier, ".orocsy/delivery/inbox"])
+      File.mkdir_p!(inbox)
+
+      correction = %{
+        "correction_id" => "correction_20260723000002_product",
+        "status" => "open",
+        "source" => "codex.review-rework",
+        "next_action" => "retry",
+        "resolved_at" => nil,
+        "summary" => "Playwright Chromium sandbox behavior test failed",
+        "findings" => [
+          "tests/e2e/browser-sandbox.spec.ts failed after Chrome launched and the application assertion failed."
+        ],
+        "required_corrections" => [
+          "Fix tests/e2e/browser-sandbox.spec.ts and rerun the focused test."
+        ]
+      }
+
+      File.write!(
+        Path.join(inbox, "correction_20260723000002_product.json"),
+        Jason.encode!(correction)
+      )
+
+      refute SymphonyElixir.DispatchPreflight.playwright_browser_correction?(correction)
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "browser SIGABRT after test startup remains actionable product rework" do
+    correction = %{
+      "summary" => "Playwright browser process crashed during an application assertion",
+      "findings" => [
+        "Chrome process did exit: signal=SIGABRT after the page entered its ready state."
+      ],
+      "required_corrections" => [
+        "Fix tests/e2e/browser-sandbox.spec.ts and rerun the focused test."
+      ]
+    }
+
+    refute SymphonyElixir.DispatchPreflight.playwright_browser_correction?(correction)
   end
 
   test "open stale scope correction prevents redispatch when head and policy hash are unchanged" do
@@ -2402,6 +2627,268 @@ defmodule SymphonyElixir.CoreTest do
                Map.fetch!(state.retry_attempts, issue_id)
 
       assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "token budget exit after a fresh validated sparse-fetch push does not retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-token-budget-pushed-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      origin = Path.join(test_root, "origin.git")
+      issue_id = "issue-token-budget-pushed-handoff"
+      branch = "orocsy/cod-300-desktop-guest-setup"
+
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace, stderr_to_stdout: true)
+      assert {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "origin", "HEAD:refs/heads/#{branch}"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["fetch", "origin", "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+      File.write!(Path.join(workspace, "guest-setup.tsx"), "export const guestSetup = true;\n")
+      assert {_output, 0} = System.cmd("git", ["add", "guest-setup.tsx"], cd: workspace)
+
+      assert {_output, 0} =
+               System.cmd("git", ["commit", "-m", "Implement guest setup"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {_output, 0} =
+               System.cmd("git", ["push", "-u", "origin", "HEAD"],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
+      assert {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+
+      assert {remote_head, 0} =
+               System.cmd("git", ["rev-parse", "refs/remotes/origin/#{branch}"], cd: workspace)
+
+      refute String.trim(head) == String.trim(remote_head)
+
+      assert {live_remote, 0} =
+               System.cmd("git", ["ls-remote", "--heads", "origin", "refs/heads/#{branch}"], cd: workspace)
+
+      assert String.starts_with?(live_remote, String.trim(head))
+
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{"mode" => "handoff_recovery"}, pretty: true) <> "\n"
+      )
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+        Jason.encode!(%{
+          "event" => "tool.finished",
+          "status" => "passed",
+          "tool" => "vitest",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: issue_id,
+          identifier: "COD-300",
+          state: "Rework",
+          title: "Desktop guest setup handoff",
+          description: "The worker pushed its validated correction.",
+          branch_name: branch,
+          updated_at: DateTime.add(started_at, -60, :second),
+          labels: []
+        })
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        max_failed_worker_retries: 3
+      )
+
+      issue_runtime_handoff_certificate!(workspace, issue)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      ref = make_ref()
+      orchestrator_name = Module.concat(__MODULE__, :TokenBudgetPushedHandoffOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: started_at,
+        workspace_path: workspace
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed: {:turn_token_budget_exceeded, 733_209, 700_000}"}, []}}
+      )
+
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.running, issue_id)
+      refute MapSet.member?(state.claimed, issue_id)
+      assert MapSet.member?(state.completed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      assert Orchestrator.completed_issue_revision_matches_for_test(issue, state)
+
+      reentered_issue = %{issue | updated_at: DateTime.utc_now()}
+      refute Orchestrator.completed_issue_revision_matches_for_test(reentered_issue, state)
+
+      assert [] == Path.wildcard(Path.join(workspace, ".orocsy/delivery/inbox/correction_*.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote token budget handoff verifies the selected worker workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-token-budget-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace = Path.join(test_root, "workspaces/COD-REMOTE-HANDOFF")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+      branch = "orocsy/cod-remote-handoff"
+
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "baseline\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Baseline"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace)
+
+      started_at = DateTime.add(DateTime.utc_now(), -10, :second)
+      File.write!(Path.join(workspace, "README.md"), "remote handoff\n")
+      assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      assert {_output, 0} = System.cmd("git", ["commit", "-m", "Remote handoff"], cd: workspace)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: Path.join(test_root, "workspaces"),
+        review_monitor_enabled: false
+      )
+
+      issue =
+        runtime_handoff_issue(%Issue{
+          id: "issue-remote-token-budget-handoff",
+          identifier: "COD-REMOTE-HANDOFF",
+          state: "Rework",
+          title: "Remote token handoff",
+          description: "The remote worker pushed its validated correction.",
+          branch_name: branch,
+          labels: []
+        })
+
+      issue_runtime_handoff_certificate!(workspace, issue)
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      for argument in "$@"; do
+        command="$argument"
+      done
+      exec /bin/bash -c "$command"
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      assert Orchestrator.fresh_clean_pushed_handoff_stop_for_test(
+               %{
+                 workspace_path: workspace,
+                 worker_host: "worker-a",
+                 started_at: started_at,
+                 issue: issue
+               },
+               "handoff_recovery"
+             )
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        completed: MapSet.new([issue.id]),
+        completed_issue_revisions: %{issue.id => {"rework", nil}},
+        completed_issue_worker_hosts: %{issue.id => "worker-a"}
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
       File.rm_rf(test_root)
     end
@@ -6182,6 +6669,108 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight consumes active turn grants abandoned by a stopped worker" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-preflight-stale-turn-grant-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-stale-turn-grant",
+        identifier: "MT-STALE-TURN-GRANT",
+        title: "Expire abandoned turn grant",
+        state: "Rework",
+        branch_name: "orocsy/mt-stale-turn-grant",
+        description: """
+        ## Ticket Type
+
+        Implementation
+
+        ## Write Scope
+
+        - `src/features/landing/LandingExperience.tsx`
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      patch = %{
+        "schema_version" => 1,
+        "patch_id" => "scope_access_stale_turn",
+        "status" => "active",
+        "decision" => "allow_once",
+        "decision_class" => "allow_once",
+        "reason_class" => "safe_read_context",
+        "source" => "symphony.runtime.scope-access-controller",
+        "target" => "read_context",
+        "operation" => "add",
+        "policy_hash_before" => "sha256:stale-turn-policy",
+        "request" => %{
+          "operation" => "read",
+          "paths" => ["tests/unit/desktop-guest-setup.test.tsx"],
+          "policy_hash" => "sha256:stale-turn-policy"
+        },
+        "entries" => [
+          %{
+            "path" => "tests/unit/desktop-guest-setup.test.tsx",
+            "source" => "scope_access.auto.direct_import",
+            "operation" => "read",
+            "expires" => "turn"
+          }
+        ]
+      }
+
+      assert {:ok, written_patch} =
+               SymphonyElixir.ScopeAccess.Controller.write_policy_patch(workspace, patch)
+
+      assert written_patch["status"] == "active"
+
+      unsigned_path =
+        Path.join([
+          workspace,
+          SymphonyElixir.ScopeAccess.Controller.policy_patch_dir(),
+          "unsigned-active.json"
+        ])
+
+      unsigned_patch =
+        written_patch
+        |> Map.drop(["controller_signature"])
+        |> Map.put("patch_id", "scope_access_unsigned_turn")
+        |> Map.put("path", Path.relative_to(unsigned_path, workspace))
+
+      File.write!(unsigned_path, Jason.encode!(unsigned_patch, pretty: true) <> "\n")
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      persisted_patch =
+        workspace
+        |> Path.join(written_patch["path"])
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert persisted_patch["status"] == "consumed"
+      assert SymphonyElixir.ControllerEvidence.valid?(persisted_patch)
+
+      assert unsigned_path |> File.read!() |> Jason.decode!() |> Map.fetch!("status") == "active"
+
+      refute Enum.any?(
+               get_in(preflight, ["requirements", "scope_bundle", "read_context"]) || [],
+               &(&1["path"] == "tests/unit/desktop-guest-setup.test.tsx")
+             )
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight falls back when issue requirements are partial" do
     test_root =
       Path.join(
@@ -7956,6 +8545,89 @@ defmodule SymphonyElixir.CoreTest do
                "Record an Orocsy correction and stop only when validation lacks an actionable in-scope target"
 
       refute prompt =~ "Mode: fresh implementation"
+
+      event_dir = Path.join(workspace, ".orocsy/delivery/events")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(event_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(event_dir, "events.jsonl"),
+        Jason.encode!(%{
+          "event" => "validation.finished",
+          "status" => "passed",
+          "tool" => "vitest",
+          "command" => "pnpm exec vitest run tests/unit/analytics.test.ts",
+          "ts" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }) <> "\n"
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_dirty_validated_review.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_dirty_validated_review",
+          "status" => "open",
+          "next_action" => "retry",
+          "source" => "codex.review-rework",
+          "summary" => "Fix README.md analytics review feedback",
+          "findings" => ["README.md:2 - keep the analytics handoff bounded"]
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        cond do
+          String.starts_with?(endpoint, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 56,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56",
+                 "head" => %{"sha" => "abc123", "ref" => issue.branch_name}
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/56/comments" ->
+            {:ok,
+             [
+               %{
+                 "body" => "Keep the analytics handoff bounded.",
+                 "commit_id" => "abc123",
+                 "path" => "README.md",
+                 "line" => 2,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/56#discussion"
+               }
+             ]}
+
+          endpoint == "repos/acme/nutribuddy/pulls/56/reviews" ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = reviewed_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert reviewed_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert reviewed_preflight["first_task"] =~ "existing focused dirty delta first"
+      assert reviewed_preflight["first_task"] =~ "without manufacturing another edit"
+
+      reviewed_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert reviewed_prompt =~ "Dirty validated handoff checkpoint"
+      assert reviewed_prompt =~ "without another edit or duplicate validation"
+      assert reviewed_prompt =~ "Current-head review feedback"
+      assert reviewed_prompt =~ "Keep the analytics handoff bounded."
+      assert reviewed_prompt =~ "do not commit or request review until"
+      refute reviewed_prompt =~ "Mode: review rework"
     after
       File.rm_rf(test_root)
     end
@@ -15045,6 +15717,37 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-206"
   end
 
+  test "policy violation recovery finalizes a dirty validated handoff without rereading" do
+    workflow_prompt = "Ticket {{ issue.identifier }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "MT-207",
+      title: "Finalize validated handoff",
+      description: "Recovery flow",
+      state: "Rework",
+      url: "https://example.org/issues/MT-207",
+      labels: []
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        policy_violation: %{
+          command: "sed -n '48,102p' src/components/ui/bottom-sheet.tsx",
+          pattern: "dirty_validated_handoff_recheck_before_commit",
+          attempt: 1,
+          max_attempts: 2
+        }
+      )
+
+    assert prompt =~ "The dirty diff already has current validation evidence"
+    assert prompt =~ "do not read source/test files or rerun validation"
+    assert prompt =~ "then stage the runtime-listed dirty files, commit, push"
+
+    refute prompt =~
+             "Continue directly with the smallest in-scope fix for the open correction or current task"
+  end
+
   test "agent runner allows one denied command recovery for strict implementation review rework" do
     workspace =
       Path.join(
@@ -15081,6 +15784,37 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(workspace)
     end
+  end
+
+  test "agent runner does not retry worker commands reserved for the runtime controller" do
+    issue = %Issue{
+      id: "issue-controller-handoff",
+      identifier: "MT-CONTROLLER-HANDOFF",
+      title: "Controller handoff",
+      state: "Rework",
+      labels: []
+    }
+
+    assert {:parked, nil} =
+             AgentRunner.policy_violation_recovery_action_for_test(
+               System.tmp_dir!(),
+               issue,
+               "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1",
+               "playwright_browser_correction_requires_runtime_controller_handoff",
+               0,
+               2
+             )
+
+    assert {:parked, nil} =
+             AgentRunner.policy_violation_recovery_action_for_test(
+               System.tmp_dir!(),
+               issue,
+               "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1",
+               "playwright_browser_correction_requires_runtime_controller_handoff",
+               2,
+               2,
+               "worker-a"
+             )
   end
 
   test "safe direct import read writes read-context policy patch and retries once" do
@@ -15207,13 +15941,48 @@ defmodule SymphonyElixir.CoreTest do
       assert get_in(patch, ["entries", Access.at(0), "path"]) == "src/features/landing/GuestStartScreen.tsx"
       assert get_in(patch, ["entries", Access.at(0), "source"]) == "scope_access.auto.direct_import"
 
+      tampered_patch =
+        put_in(
+          patch,
+          ["entries"],
+          [
+            %{
+              "path" => "src/server/private-secrets.ts",
+              "source" => "scope_access.auto.direct_import",
+              "operation" => "read",
+              "expires" => "turn"
+            }
+          ]
+        )
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/policy-patches/tampered.json"),
+        Jason.encode!(tampered_patch)
+      )
+
       assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
       active_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
       assert active_patch["status"] == "active"
 
+      duplicate_request = SymphonyElixir.ScopeAccess.classify_command(command, preflight)
+
+      assert {:allow_once, duplicate_patch} =
+               SymphonyElixir.ScopeAccess.Controller.decide(
+                 duplicate_request,
+                 preflight,
+                 workspace
+               )
+
+      assert duplicate_patch["patch_id"] == active_patch["patch_id"]
+      assert duplicate_patch["status"] == "active"
+
       assert Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
                entry["path"] == "src/features/landing/GuestStartScreen.tsx" and
                  entry["source"] == "scope_access.auto.direct_import"
+             end)
+
+      refute Enum.any?(get_in(preflight, ["requirements", "scope_bundle", "read_context"]), fn entry ->
+               entry["path"] == "src/server/private-secrets.ts"
              end)
 
       File.write!(Path.join(state_dir, "dispatch-preflight.json"), Jason.encode!(preflight))
@@ -15227,6 +15996,7 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = SymphonyElixir.DispatchPreflight.consume_turn_policy_patches(workspace)
       consumed_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
       assert consumed_patch["status"] == "consumed"
+      assert SymphonyElixir.ControllerEvidence.valid?(consumed_patch)
 
       assert {:ok, expired_preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
 
@@ -15237,6 +16007,22 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^command, ^pattern} =
                AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:retry, 1, renewed_scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 command,
+                 pattern,
+                 0,
+                 1
+               )
+
+      assert renewed_scope_access["decision"] == "allow_once"
+      assert renewed_scope_access["reason_class"] == "safe_read_context"
+
+      renewed_patch = patch_files |> hd() |> File.read!() |> Jason.decode!()
+      assert renewed_patch["status"] == "active"
     after
       File.rm_rf(test_root)
     end
@@ -16306,6 +17092,12 @@ defmodule SymphonyElixir.CoreTest do
                AppServer.command_policy_violation_for_test(
                  workspace,
                  "git commit -m 'COD-266: send guest safety draft to cards request'"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 ~s(PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "pnpm typecheck")
                )
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, "git push")
@@ -20656,6 +21448,51 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "controller-owned browser handoff reconciles its pending request before parking" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-parked-transition-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/events"))
+
+    File.write!(
+      Path.join(workspace, ".orocsy/delivery/events/events.jsonl"),
+      Jason.encode!(%{
+        "event" => "handoff.requested",
+        "event_id" => "request-before-browser-park",
+        "status" => "requested"
+      }) <> "\n"
+    )
+
+    issue = %Issue{
+      id: "issue-controller-parked-transition",
+      identifier: "MT-CONTROLLER-PARK",
+      title: "Controller parked transition",
+      state: "Rework"
+    }
+
+    test_pid = self()
+
+    try do
+      assert :ok =
+               AgentRunner.reconcile_controller_handoff_after_park_for_test(
+                 "playwright_browser_correction_requires_runtime_controller_handoff",
+                 workspace,
+                 issue,
+                 runtime_transition_processor: fn _, _, _ ->
+                   send(test_pid, :controller_park_transition_processed)
+                   {:none, {:ok, %{"event" => "handoff.ready"}}}
+                 end
+               )
+
+      assert_receive :controller_park_transition_processed
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "agent runner stops when startup transition controllers error or block" do
     workspace =
       Path.join(
@@ -22009,6 +22846,50 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "pending review source is not made actionable by incidental fix path prose" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-review-incidental-path-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(
+          test_root,
+          "issue-pending-review-incidental-path",
+          %{
+            source: "github-codex-review",
+            summary: "Wait for Codex review of the pushed fix in src/features/swipe/SwipeExperience.tsx",
+            findings: [
+              "The fix in src/features/swipe/SwipeExperience.tsx is pushed and the current-head review is pending."
+            ],
+            required_corrections: [
+              "Wait for the Codex review result for the fix in src/features/swipe/SwipeExperience.tsx."
+            ]
+          }
+        )
+
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      request_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      parked = correction_path |> File.read!() |> Jason.decode!()
+      assert parked["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "continuation review-rework correction stays parked while external review is pending" do
     test_root =
       Path.join(
@@ -22277,6 +23158,117 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "actionable GitHub Codex review correction remains open and dispatchable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-actionable-github-review-correction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      {issue, workspace, correction} =
+        pending_review_correction_fixture(
+          test_root,
+          "issue-actionable-github-review-correction",
+          %{
+            source: "github-codex-review",
+            summary: "Preserve focus when the mobile sheet becomes desktop inline setup",
+            findings: [
+              "src/components/ui/bottom-sheet.tsx:50 restores focus to a hidden close button."
+            ],
+            required_corrections: [
+              "Add a null guard in src/components/ui/bottom-sheet.tsx."
+            ]
+          }
+        )
+
+      head_sha = "748a56f4221ed839a23b626c1681a9d02f718ac7"
+      request_at = iso_seconds(-300)
+      feedback_at = iso_seconds(-30)
+
+      install_pending_review_github_fixture(head_sha,
+        pull_comments: [review_thread_payload(head_sha, feedback_at)],
+        issue_comments: [codex_review_request_payload(request_at)]
+      )
+
+      state = empty_orchestrator_state()
+      assert Orchestrator.rescue_open_corrections_for_test([issue], state) == state
+
+      correction_path = Path.join(workspace, correction["artifacts"]["json"])
+      actionable = correction_path |> File.read!() |> Jason.decode!()
+      assert actionable["status"] == "open"
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      refute_receive {:memory_tracker_state_update, "issue-actionable-github-review-correction", _state},
+                     50
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "all standard standalone code-change verbs are explicit structured requests" do
+    for verb <- ["Add", "Delete", "Edit", "Fix", "Change", "Modify", "Remove", "Rename", "Replace", "Update", "Implement"] do
+      assert SymphonyElixir.RescueSupervisor.explicit_structured_code_change_request_for_test(%{
+               "required_corrections" => [
+                 "#{verb} the guard in src/components/ui/bottom-sheet.tsx."
+               ]
+             })
+    end
+  end
+
+  test "structured file corrections are actionable without an imperative verb whitelist" do
+    for instruction <- [
+          "Use a null guard in src/components/ui/bottom-sheet.tsx.",
+          "Ensure src/components/ui/bottom-sheet.tsx handles nil.",
+          "Guard the access in src/components/ui/bottom-sheet.tsx.",
+          "Use the authenticated path in elixir/lib/symphony_elixir/dispatch_preflight.ex."
+        ] do
+      assert SymphonyElixir.RescueSupervisor.explicit_structured_code_change_request_for_test(%{
+               "required_corrections" => [instruction]
+             })
+    end
+
+    refute SymphonyElixir.RescueSupervisor.explicit_structured_code_change_request_for_test(%{
+             "required_corrections" => [
+               "Wait for the Codex review response for src/components/ui/bottom-sheet.tsx."
+             ]
+           })
+  end
+
+  test "dirty handoff recovery filters review feedback through implementation scope" do
+    in_scope = %{
+      type: :thread,
+      payload: %{
+        "path" => "src/features/swipe/SwipeExperience.tsx",
+        "body" => "Fix active card identity."
+      }
+    }
+
+    protected_out_of_scope = %{
+      type: :thread,
+      payload: %{
+        "path" => "src/features/profile/ProfileScreen.tsx",
+        "body" => "Change unrelated profile layout."
+      }
+    }
+
+    requirements = %{
+      "ticket_type" => "implementation",
+      "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+      "shared_files" => [
+        "src/features/profile/ProfileScreen.tsx (read-only; owned by the Profile lane)"
+      ],
+      "out_of_scope" => ["src/features/profile/ProfileScreen.tsx"]
+    }
+
+    assert [^in_scope] =
+             SymphonyElixir.DispatchPreflight.handoff_recovery_feedback_for_test(
+               %{feedback: [in_scope, protected_out_of_scope]},
+               requirements
+             )
   end
 
   defp pending_review_correction_fixture(test_root, issue_id, correction_attrs \\ %{}) do
