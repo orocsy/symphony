@@ -2595,7 +2595,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp parse_finite_counted_read_operands([option, count | rest], operands, false)
        when option in ["-n", "--lines", "-c", "--bytes"] do
-    if Regex.match?(~r/\A[+-]?\d+\z/, count),
+    if finite_count_token?(count),
       do: parse_finite_counted_read_operands(rest, operands, false),
       else: :unclassified
   end
@@ -2606,8 +2606,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       after_options? ->
         parse_finite_counted_read_operands(rest, [token | operands], true)
 
-      Regex.match?(~r/\A-(?:n|c)?[+-]?\d+\z/, token) or
-          Regex.match?(~r/\A--(?:lines|bytes)=[+-]?\d+\z/, token) ->
+      finite_inline_count_option?(token) ->
         parse_finite_counted_read_operands(rest, operands, false)
 
       scope_read_option_token?(token) ->
@@ -2619,6 +2618,18 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp parse_finite_counted_read_operands(_args, _operands, _after_options?), do: :unclassified
+
+  defp finite_count_token?(count) when is_binary(count),
+    do: Regex.match?(~r/\A[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, count)
+
+  defp finite_count_token?(_count), do: false
+
+  defp finite_inline_count_option?(option) when is_binary(option) do
+    Regex.match?(~r/\A-(?:n|c)?[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option) or
+      Regex.match?(~r/\A--(?:lines|bytes)=[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option)
+  end
+
+  defp finite_inline_count_option?(_option), do: false
 
   defp search_scope_read_operand_paths(tool, args)
        when tool in ["rg", "grep"] and is_list(args) do
@@ -2788,6 +2799,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       (git_diff_or_log_command?(command) and
          not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, command) and
                 Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, command))) or
+      unsafe_git_file_input_option?(command) or
       (String.starts_with?(command, "git ") and
          Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, command))
   end
@@ -2815,6 +2827,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp git_diff_or_log_command?(_command), do: false
+
+  defp unsafe_git_file_input_option?(command) when is_binary(command) do
+    String.starts_with?(command, "git ") and
+      Regex.match?(
+        ~r/(?:^|\s)(?:-O(?:\S+)?|-X(?:\S+)?|--(?:order-file|exclude-from|pathspec-from-file|stdin))(?:=|\s|$)/,
+        command
+      )
+  end
+
+  defp unsafe_git_file_input_option?(_command), do: false
 
   defp safe_sed_print_slice?(command) when is_binary(command) do
     Regex.match?(
@@ -3199,8 +3221,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp shell_command_wrapper_candidate?(command) when is_binary(command) do
     case OptionParser.split(String.trim(command)) do
       [shell | args] ->
-        Path.basename(shell) in ["zsh", "bash", "sh"] and
-          Enum.any?(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1))
+        shell_command_tokens?(shell, args) or wrapped_shell_command_tokens?(shell, args)
 
       _ ->
         false
@@ -3210,6 +3231,20 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp shell_command_wrapper_candidate?(_command), do: false
+
+  defp shell_command_tokens?(shell, args) when is_binary(shell) and is_list(args),
+    do:
+      Path.basename(shell) in ["zsh", "bash", "sh"] and
+        Enum.any?(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1))
+
+  defp shell_command_tokens?(_shell, _args), do: false
+
+  defp wrapped_shell_command_tokens?(_wrapper, args) when is_list(args) do
+    Enum.with_index(args)
+    |> Enum.any?(fn {shell, index} -> shell_command_tokens?(shell, Enum.drop(args, index + 1)) end)
+  end
+
+  defp wrapped_shell_command_tokens?(_wrapper, _args), do: false
 
   defp ansi_c_shell_payload?(command) when is_binary(command) do
     case shell_command_payload(command) do
