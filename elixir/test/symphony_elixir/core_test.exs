@@ -16217,6 +16217,7 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, "config/config.exs"), "import Config\n")
       File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
       File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
+      File.write!(Path.join(workspace, "123"), "undeclared\n")
       File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
 
       scope_bundle =
@@ -16376,6 +16377,15 @@ defmodule SymphonyElixir.CoreTest do
 
       refute cross_root_request["broad"]
 
+      sed_write_chain =
+        "sed -n '1w /tmp/leak' config/config.exs && cat config/config.exs"
+
+      sed_write_request = SymphonyElixir.ScopeAccess.classify_command(sed_write_chain, preflight)
+
+      assert sed_write_request["operation"] == "unknown"
+      assert sed_write_request["command_class"] == "shell_chain"
+      assert sed_write_request["broad"]
+
       mixed_chain = grep_command <> " && rm -f #{test_path}"
       mixed_request = SymphonyElixir.ScopeAccess.classify_command(mixed_chain, preflight)
 
@@ -16467,17 +16477,61 @@ defmodule SymphonyElixir.CoreTest do
                AppServer.command_policy_violation_for_test(workspace, "cat config/config.exs", [])
 
       undeclared_cat = "cat /etc/passwd"
+      numeric_cat = "cat config/config.exs 123"
+      numeric_nl = "nl config/config.exs 123"
       directory_rg = "rg -n test tests/e2e/declared-dir"
       mutating_chain = sed_command <> " && rm -f #{test_path}"
+      ansi_c_chain = "/bin/bash -lc $'cat config/config.exs\\nrm -f config/config.exs'"
+      ansi_c_non_login_chain = "/bin/bash -c $'cat config/config.exs\\nrm -f config/config.exs'"
+      tail_follow = "tail -f config/config.exs"
+      tail_retry_follow = "tail -F config/config.exs"
+      finite_tail = "tail -n 5 config/config.exs"
+      directory_ls = "ls tests/e2e"
+      git_diff_read = "git diff -- config/config.exs"
+      git_log_read = "git log -- config/config.exs"
+      sed_write = "sed -n '1w /tmp/leak' config/config.exs"
 
       assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, undeclared_cat, [])
+
+      assert {:error, ^numeric_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, numeric_cat, [])
+
+      assert {:error, ^numeric_nl, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, numeric_nl, [])
 
       assert {:error, ^directory_rg, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, directory_rg, [])
 
       assert {:error, ^mutating_chain, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, mutating_chain, [])
+
+      assert {:error, ^ansi_c_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_chain, [])
+
+      assert {:error, ^ansi_c_non_login_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_non_login_chain, [])
+
+      assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_follow, [])
+
+      assert {:error, ^tail_retry_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_retry_follow, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_tail, [])
+
+      assert {:error, ^directory_ls, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, directory_ls, [])
+
+      assert {:error, ^git_diff_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_diff_read, [])
+
+      assert {:error, ^git_log_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_log_read, [])
+
+      assert {:error, ^sed_write, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, sed_write, [])
 
       preflight_path = Path.join(state_dir, "dispatch-preflight.json")
       review_preflight = preflight_path |> File.read!() |> Jason.decode!() |> Map.put("mode", "review_rework")

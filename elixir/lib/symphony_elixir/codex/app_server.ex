@@ -2219,6 +2219,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       dirty_validated_handoff_recheck_before_commit?(command_for_patterns, workspace) ->
         {:error, command, @review_rework_dirty_validated_handoff_recheck_pattern}
 
+      structured_handoff_recovery?(workspace) and ansi_c_shell_payload?(command_for_patterns) ->
+        {:error, command, @handoff_recovery_exact_read_pattern}
+
       structured_handoff_read? and is_binary(configured_pattern) ->
         {:error, command, configured_pattern}
 
@@ -2497,8 +2500,11 @@ defmodule SymphonyElixir.Codex.AppServer do
       {"bounded_file_read", ["sed" | args]} ->
         args |> Enum.reject(&scope_read_option_token?/1) |> List.last() |> List.wrap()
 
-      {"bounded_file_read", [tool | args]} when tool in ["cat", "head", "tail", "nl"] ->
+      {"bounded_file_read", [tool | args]} when tool in ["cat", "nl"] ->
         scope_read_non_option_operands(args)
+
+      {"bounded_file_read", [tool | args]} when tool in ["head", "tail"] ->
+        finite_head_tail_scope_operands(tool, args)
 
       {"bounded_file_search", [tool | args]} when tool in ["rg", "grep"] ->
         search_scope_read_operand_paths(tool, args)
@@ -2531,7 +2537,6 @@ defmodule SymphonyElixir.Codex.AppServer do
           token == "--" -> {operands, true}
           after_options? -> {[token | operands], true}
           scope_read_option_token?(token) -> {operands, false}
-          Regex.match?(~r/\A\d+\z/, token) -> {operands, false}
           true -> {[token | operands], false}
         end
       end)
@@ -2540,6 +2545,32 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scope_read_non_option_operands(_args), do: []
+
+  defp finite_head_tail_scope_operands("tail", args) when is_list(args) do
+    if Enum.any?(args, &(&1 in ["-f", "-F", "--follow", "--retry"] or String.starts_with?(&1, "--follow="))) do
+      :unclassified
+    else
+      finite_counted_read_operands(args)
+    end
+  end
+
+  defp finite_head_tail_scope_operands("head", args) when is_list(args),
+    do: finite_counted_read_operands(args)
+
+  defp finite_head_tail_scope_operands(_tool, _args), do: :unclassified
+
+  defp finite_counted_read_operands([option, count | paths])
+       when option in ["-n", "--lines", "-c", "--bytes"] do
+    if Regex.match?(~r/\A[+-]?\d+\z/, count), do: scope_read_non_option_operands(paths), else: :unclassified
+  end
+
+  defp finite_counted_read_operands([option | paths]) when is_binary(option) do
+    if Regex.match?(~r/\A-(?:n|c)?[+-]?\d+\z/, option),
+      do: scope_read_non_option_operands(paths),
+      else: scope_read_non_option_operands([option | paths])
+  end
+
+  defp finite_counted_read_operands(args), do: scope_read_non_option_operands(args)
 
   defp search_scope_read_operand_paths(tool, args)
        when tool in ["rg", "grep"] and is_list(args) do
@@ -2631,7 +2662,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp unwrap_shell_login_command(command) when is_binary(command) do
     command = String.trim(command)
 
-    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(.*)\z/s, command, capture: :all_but_first) do
+    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-(?:l)?c\s+(.*)\z/s, command, capture: :all_but_first) do
       [wrapped] -> unwrap_shell_command_argument(wrapped)
       _ -> command |> unescape_shell_argument_quotes() |> String.trim()
     end
@@ -2684,6 +2715,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          )) or
       (String.starts_with?(command, "grep ") and
          Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, command)) or
+      (String.starts_with?(command, "tail ") and
+         Regex.match?(~r/(?:^|\s)(?:-f|-F|--follow|--retry)(?:=|\s|$)/, command)) or
       (Regex.match?(~r/\Agit\s+(?:diff|log)(?:\s|$)/, command) and
          not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, command) and
                 Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, command))) or
@@ -3032,6 +3065,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     case OptionParser.split(command) do
       [tool | _args] when tool in ["sed", "cat", "head", "tail", "nl"] -> "bounded_file_read"
       [tool | _args] when tool in ["rg", "grep"] -> "bounded_file_search"
+      ["ls" | _args] -> "directory_listing"
+      ["git", "diff" | _args] -> "git_diff"
+      ["git", subcommand | _args] when subcommand in ["log", "ls-files"] -> "git_discovery"
       _ -> nil
     end
   rescue
@@ -3039,6 +3075,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp exact_read_command_class(_command), do: nil
+
+  defp ansi_c_shell_payload?(command) when is_binary(command) do
+    Regex.match?(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-(?:l)?c\s+\$['\"]/, String.trim(command))
+  end
+
+  defp ansi_c_shell_payload?(_command), do: false
 
   defp exact_handoff_path_allowed?(workspace, path, allowed_paths)
        when is_binary(workspace) and is_binary(path) do

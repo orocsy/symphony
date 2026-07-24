@@ -85,8 +85,10 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp exact_read_segment(command) when is_binary(command) do
     case OptionParser.split(command) do
-      ["sed", "-n", _slice, path] ->
-        exact_segment_paths("read", "bounded_file_read", [path])
+      ["sed", "-n", slice, path] ->
+        if Regex.match?(~r/\A\d+(?:,\d+)?p\z/, slice),
+          do: exact_segment_paths("read", "bounded_file_read", [path]),
+          else: :error
 
       [tool | args] when tool in ["cat", "head", "tail", "nl"] ->
         case simple_read_segment_paths(tool, args) do
@@ -606,7 +608,7 @@ defmodule SymphonyElixir.ScopeAccess do
   defp chain_segment(chars), do: chars |> Enum.reverse() |> Enum.join() |> String.trim()
 
   defp unwrap_shell_payload(command) when is_binary(command) do
-    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(.+)\z/, String.trim(command), capture: :all_but_first) do
+    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-(?:l)?c\s+(.+)\z/, String.trim(command), capture: :all_but_first) do
       [payload] -> unquote_shell_payload(String.trim(payload))
       _ -> command
     end
