@@ -123,21 +123,61 @@ defmodule SymphonyElixir.ScopeAccess do
   defp simple_read_segment_paths("nl", args), do: optionless_segment_paths(args)
 
   defp simple_read_segment_paths(tool, args) when tool in ["head", "tail"] do
-    case args do
-      [option, count | paths] when option in ["-n", "--lines", "-c", "--bytes"] ->
-        if Regex.match?(~r/\A[+-]?\d+\z/, count), do: optionless_segment_paths(paths), else: :error
-
-      [option | paths] ->
-        if Regex.match?(~r/\A-(?:n|c)?[+-]?\d+\z/, option),
-          do: optionless_segment_paths(paths),
-          else: optionless_segment_paths(args)
-
-      _ ->
-        :error
+    if tool == "tail" and Enum.any?(args, &tail_follow_option?/1) do
+      :error
+    else
+      parse_finite_segment_operands(args, [], false)
     end
   end
 
   defp simple_read_segment_paths(_tool, _args), do: :error
+
+  defp parse_finite_segment_operands([], operands, _after_options?) do
+    operands |> Enum.reverse() |> optionless_segment_paths()
+  end
+
+  defp parse_finite_segment_operands(["--" | rest], operands, false),
+    do: parse_finite_segment_operands(rest, operands, true)
+
+  defp parse_finite_segment_operands([option, count | rest], operands, false)
+       when option in ["-n", "--lines", "-c", "--bytes"] do
+    if finite_count_token?(count),
+      do: parse_finite_segment_operands(rest, operands, false),
+      else: :error
+  end
+
+  defp parse_finite_segment_operands([token | rest], operands, after_options?)
+       when is_binary(token) do
+    cond do
+      token == "-" -> :error
+      after_options? -> parse_finite_segment_operands(rest, [token | operands], true)
+      finite_inline_count_option?(token) -> parse_finite_segment_operands(rest, operands, false)
+      String.starts_with?(token, "-") -> parse_finite_segment_operands(rest, operands, false)
+      true -> parse_finite_segment_operands(rest, [token | operands], false)
+    end
+  end
+
+  defp parse_finite_segment_operands(_args, _operands, _after_options?), do: :error
+
+  defp finite_count_token?(count) when is_binary(count),
+    do: Regex.match?(~r/\A[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, count)
+
+  defp finite_count_token?(_count), do: false
+
+  defp finite_inline_count_option?(option) when is_binary(option) do
+    Regex.match?(~r/\A-(?:n|c)?[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option) or
+      Regex.match?(~r/\A--(?:lines|bytes)=[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option)
+  end
+
+  defp finite_inline_count_option?(_option), do: false
+
+  defp tail_follow_option?(option) when is_binary(option) do
+    option in ["--follow", "--retry"] or
+      String.starts_with?(option, "--follow=") or
+      Regex.match?(~r/\A-[^-]*[fF]/, option)
+  end
+
+  defp tail_follow_option?(_option), do: false
 
   defp optionless_segment_paths(args) when is_list(args) do
     if args != [] and Enum.all?(args, &(is_binary(&1) and not String.starts_with?(&1, "-"))),

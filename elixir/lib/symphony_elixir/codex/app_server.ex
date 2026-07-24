@@ -2548,17 +2548,24 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp parse_git_read_subcommand_and_args(_args), do: :unclassified
 
   defp scope_read_non_option_operands(args) when is_list(args) do
-    {operands, _after_options?} =
-      Enum.reduce(args, {[], false}, fn token, {operands, after_options?} ->
-        cond do
-          token == "--" -> {operands, true}
-          after_options? -> {[token | operands], true}
-          scope_read_option_token?(token) -> {operands, false}
-          true -> {[token | operands], false}
-        end
-      end)
+    case Enum.reduce_while(args, {[], false}, fn token, {operands, after_options?} ->
+           if token == "-" do
+             {:halt, :unclassified}
+           else
+             result =
+               cond do
+                 token == "--" -> {operands, true}
+                 after_options? -> {[token | operands], true}
+                 scope_read_option_token?(token) -> {operands, false}
+                 true -> {[token | operands], false}
+               end
 
-    Enum.reverse(operands)
+             {:cont, result}
+           end
+         end) do
+      {operands, _after_options?} -> Enum.reverse(operands)
+      :unclassified -> :unclassified
+    end
   end
 
   defp scope_read_non_option_operands(_args), do: []
@@ -2603,6 +2610,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp parse_finite_counted_read_operands([token | rest], operands, after_options?)
        when is_binary(token) do
     cond do
+      token == "-" ->
+        :unclassified
+
       after_options? ->
         parse_finite_counted_read_operands(rest, [token | operands], true)
 
@@ -2829,14 +2839,23 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp git_diff_or_log_command?(_command), do: false
 
   defp unsafe_git_file_input_option?(command) when is_binary(command) do
-    String.starts_with?(command, "git ") and
-      Regex.match?(
-        ~r/(?:^|\s)(?:-O(?:\S+)?|-X(?:\S+)?|--(?:order-file|exclude-from|pathspec-from-file|stdin))(?:=|\s|$)/,
-        command
-      )
+    case OptionParser.split(command) do
+      ["git" | args] -> Enum.any?(args, &unsafe_git_file_input_token?/1)
+      _ -> false
+    end
+  rescue
+    _error -> false
   end
 
   defp unsafe_git_file_input_option?(_command), do: false
+
+  defp unsafe_git_file_input_token?(token) when is_binary(token) do
+    token in ["-O", "-X", "--order-file", "--exclude-from", "--pathspec-from-file", "--stdin"] or
+      Regex.match?(~r/\A(?:-O|-X).+\z/, token) or
+      Regex.match?(~r/\A--(?:order-file|exclude-from|pathspec-from-file)=.+\z/, token)
+  end
+
+  defp unsafe_git_file_input_token?(_token), do: false
 
   defp safe_sed_print_slice?(command) when is_binary(command) do
     Regex.match?(
@@ -3219,32 +3238,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp git_read_like_candidate?(_command), do: false
 
   defp shell_command_wrapper_candidate?(command) when is_binary(command) do
-    case OptionParser.split(String.trim(command)) do
-      [shell | args] ->
-        shell_command_tokens?(shell, args) or wrapped_shell_command_tokens?(shell, args)
-
-      _ ->
-        false
-    end
+    command
+    |> String.trim()
+    |> OptionParser.split()
+    |> Enum.any?(&Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1))
   rescue
     _error -> false
   end
 
   defp shell_command_wrapper_candidate?(_command), do: false
-
-  defp shell_command_tokens?(shell, args) when is_binary(shell) and is_list(args),
-    do:
-      Path.basename(shell) in ["zsh", "bash", "sh"] and
-        Enum.any?(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1))
-
-  defp shell_command_tokens?(_shell, _args), do: false
-
-  defp wrapped_shell_command_tokens?(_wrapper, args) when is_list(args) do
-    Enum.with_index(args)
-    |> Enum.any?(fn {shell, index} -> shell_command_tokens?(shell, Enum.drop(args, index + 1)) end)
-  end
-
-  defp wrapped_shell_command_tokens?(_wrapper, _args), do: false
 
   defp ansi_c_shell_payload?(command) when is_binary(command) do
     case shell_command_payload(command) do
