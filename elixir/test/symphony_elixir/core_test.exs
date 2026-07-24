@@ -16517,6 +16517,8 @@ defmodule SymphonyElixir.CoreTest do
       path_qualified_scoped_cat = "/bin/cat config/config.exs"
       env_wrapped_scoped_cat = "env cat config/config.exs"
       env_path_wrapped_rg = "env PATH=. rg -n test config/config.exs"
+      env_chdir_wrapped_cat = "env -C /tmp cat /etc/passwd"
+      env_split_wrapped_cat = "env -S 'cat /etc/passwd'"
       numeric_cat = "cat config/config.exs 123"
       numeric_nl = "nl config/config.exs 123"
       stdin_cat = "cat - config/config.exs"
@@ -16545,6 +16547,9 @@ defmodule SymphonyElixir.CoreTest do
       wrapped_git_status = "/bin/bash -lc 'git status --short --branch'"
       wrapped_git_add = "/bin/bash -lc 'git add diff'"
       wrapped_git_commit = "/bin/bash -lc 'git commit -m log'"
+      wrapped_git_commit_reuse = "/bin/bash -lc 'git commit -c cat'"
+      shell_exec_cat = "/bin/bash -lc 'exec cat /etc/passwd'"
+      shell_newline_cat = "/bin/bash -lc 'echo ok\ncat /etc/passwd'"
 
       tail_follow = "tail -f config/config.exs"
       tail_retry_follow = "tail -F config/config.exs"
@@ -16585,6 +16590,11 @@ defmodule SymphonyElixir.CoreTest do
       abbreviated_git_exclude_file =
         "git ls-files --exclude-f=/etc/passwd -- config/config.exs"
 
+      git_no_replace_commit = "git --no-replace-objects commit -m log"
+
+      safe_abbreviated_git_diff =
+        "git diff --no-in --no-ext-diff --no-textconv -- config/config.exs"
+
       sed_write = "sed -n '1w /tmp/leak' config/config.exs"
 
       assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
@@ -16604,6 +16614,12 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^env_path_wrapped_rg, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, env_path_wrapped_rg, [])
+
+      assert {:error, ^env_chdir_wrapped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_chdir_wrapped_cat, [])
+
+      assert {:error, ^env_split_wrapped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_split_wrapped_cat, [])
 
       assert {:error, ^numeric_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, numeric_cat, [])
@@ -16667,6 +16683,15 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, wrapped_git_commit, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_commit_reuse, [])
+
+      assert {:error, ^shell_exec_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, shell_exec_cat, [])
+
+      assert {:error, ^shell_newline_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, shell_newline_cat, [])
 
       assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_follow, [])
@@ -16744,6 +16769,12 @@ defmodule SymphonyElixir.CoreTest do
                  abbreviated_git_exclude_file,
                  []
                )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, git_no_replace_commit, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, safe_abbreviated_git_diff, [])
 
       assert {:error, ^sed_write, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, sed_write, [])

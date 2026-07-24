@@ -2225,6 +2225,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       structured_handoff_read? and is_binary(configured_pattern) ->
         {:error, command, configured_pattern}
 
+      structured_handoff_read? and safe_wrapped_handoff_delivery_command?(command_for_patterns) ->
+        :ok
+
       structured_handoff_read? and
           structured_handoff_exact_read_allowed?(command_for_patterns, workspace) ->
         :ok
@@ -2862,11 +2865,18 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp abbreviated_git_file_input_token?("--" <> _rest = token) do
     option_name = token |> String.split("=", parts: 2) |> List.first()
 
-    byte_size(option_name) >= 4 and
-      Enum.any?(
-        ["--order-file", "--exclude-from", "--pathspec-from-file", "--no-index"],
-        &String.starts_with?(&1, option_name)
-      )
+    Enum.any?(
+      [
+        {"--order-file", "--order-f"},
+        {"--exclude-from", "--exclude-f"},
+        {"--pathspec-from-file", "--pathspec-f"},
+        {"--no-index", "--no-inde"}
+      ],
+      fn {full_name, shortest_sensitive_prefix} ->
+        String.starts_with?(option_name, shortest_sensitive_prefix) and
+          String.starts_with?(full_name, option_name)
+      end
+    )
   end
 
   defp abbreviated_git_file_input_token?(_token), do: false
@@ -3264,7 +3274,19 @@ defmodule SymphonyElixir.Codex.AppServer do
        do: true
 
   defp git_candidate_read_subcommand?([option | rest])
-       when option in ["-p", "-P", "--paginate", "--no-pager"],
+       when option in [
+              "-p",
+              "-P",
+              "--paginate",
+              "--no-pager",
+              "--no-replace-objects",
+              "--bare",
+              "--literal-pathspecs",
+              "--glob-pathspecs",
+              "--noglob-pathspecs",
+              "--icase-pathspecs",
+              "--no-optional-locks"
+            ],
        do: git_candidate_read_subcommand?(rest)
 
   defp git_candidate_read_subcommand?([option, _value | rest])
@@ -3281,7 +3303,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         git_candidate_read_subcommand?(rest)
 
       true ->
-        Enum.any?(rest, &(&1 in ["diff", "log", "ls-files"]))
+        List.first(rest) in ["diff", "log", "ls-files"]
     end
   end
 
@@ -3289,15 +3311,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp shell_wrapper_read_candidate?(command) when is_binary(command) do
     case shell_command_string_argument(command) do
-      {:ok, payload} ->
-        is_binary(exact_read_command_class(payload)) or
-          git_read_like_candidate?(payload) or
-          read_tool_invocation_candidate?(payload) or
-          command_parse_failed?(payload) or
-          command_chain_operator_outside_quotes?(payload)
-
-      :error ->
-        false
+      {:ok, _payload} -> true
+      :error -> false
     end
   rescue
     _error -> false
@@ -3308,19 +3323,54 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp shell_command_string_argument(command) when is_binary(command) do
     command
     |> OptionParser.split()
+    |> shell_invocation_argv()
     |> shell_command_string_argument_tokens()
   end
 
   defp shell_command_string_argument(_command), do: :error
 
-  defp shell_command_string_argument_tokens([_executable | args]) do
-    case Enum.find_index(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1)) do
-      nil -> :error
-      index -> args |> Enum.at(index + 1) |> then(&if(is_binary(&1), do: {:ok, &1}, else: :error))
+  defp shell_command_string_argument_tokens([shell | args]) do
+    if Path.basename(shell) in shell_executable_names() do
+      case Enum.find_index(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1)) do
+        nil -> :error
+        index -> args |> Enum.at(index + 1) |> then(&if(is_binary(&1), do: {:ok, &1}, else: :error))
+      end
+    else
+      :error
     end
   end
 
   defp shell_command_string_argument_tokens(_tokens), do: :error
+
+  defp shell_invocation_argv([executable | args]) do
+    case Path.basename(executable) do
+      "env" -> candidate_env_utility_argv(args)
+      "command" -> candidate_command_utility_argv(args)
+      "nice" -> candidate_nice_utility_argv(args)
+      wrapper when wrapper in ["nohup", "exec"] -> drop_optional_delimiter(args)
+      _ -> [executable | args]
+    end
+  end
+
+  defp shell_invocation_argv(_tokens), do: :unclassified
+
+  defp shell_executable_names,
+    do: ["sh", "bash", "zsh", "dash", "ash", "ksh", "mksh", "fish", "csh", "tcsh"]
+
+  defp safe_wrapped_handoff_delivery_command?(command) when is_binary(command) do
+    with {:ok, payload} <- shell_command_string_argument(command),
+         false <- command_chain_operator_outside_quotes?(payload),
+         false <- String.contains?(payload, ["$(", "`", "\n", "\r"]),
+         ["git", subcommand | _args] <- OptionParser.split(payload) do
+      subcommand in ["status", "add", "commit", "push"]
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp safe_wrapped_handoff_delivery_command?(_command), do: false
 
   defp read_tool_invocation_candidate?(command) when is_binary(command) do
     case candidate_read_argv(command) do
@@ -3396,6 +3446,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp candidate_env_utility_argv([option, _value | rest]) when option in ["-u", "--unset"],
     do: candidate_env_utility_argv(rest)
 
+  defp candidate_env_utility_argv([option, _value | rest]) when option in ["-C", "--chdir"],
+    do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv([option, split_string | rest])
+       when option in ["-S", "--split-string"] and is_binary(split_string) do
+    OptionParser.split(split_string) ++ rest
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_env_utility_argv(["--chdir=" <> _directory | rest]),
+    do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv(["--split-string=" <> split_string | rest]) do
+    OptionParser.split(split_string) ++ rest
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_env_utility_argv(["-S" <> split_string | rest]) when split_string != "" do
+    OptionParser.split(split_string) ++ rest
+  rescue
+    _error -> :unclassified
+  end
+
   defp candidate_env_utility_argv([option | rest])
        when option in ["-i", "--ignore-environment"],
        do: candidate_env_utility_argv(rest)
@@ -3416,6 +3491,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     do: candidate_command_utility_argv(rest)
 
   defp candidate_command_utility_argv(args), do: args
+
+  defp candidate_nice_utility_argv([option, _priority | rest]) when option in ["-n", "--adjustment"],
+    do: candidate_nice_utility_argv(rest)
+
+  defp candidate_nice_utility_argv(["--adjustment=" <> _priority | rest]),
+    do: candidate_nice_utility_argv(rest)
+
+  defp candidate_nice_utility_argv(["--" | rest]), do: rest
+  defp candidate_nice_utility_argv(args), do: args
 
   defp normalize_env_read_argv(args) when is_list(args) do
     case drop_optional_delimiter(args) do
@@ -4462,7 +4546,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp normalize_command(command) when is_binary(command) do
     command
-    |> String.replace(~r/\s+/, " ")
+    |> String.replace(~r/[^\S\r\n]+/, " ")
     |> String.trim()
     |> case do
       "" -> nil
