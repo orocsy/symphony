@@ -5342,7 +5342,7 @@ defmodule SymphonyElixir.Orchestrator do
       is_nil(correction["resolved_at"]) and
       not worker_browser_provider_correction?(correction) and
       retry_fingerprint_changed?(correction, workspace_path) and
-      actionable_code_or_test_correction?(correction)
+      RescueSupervisor.actionable_code_or_test_correction?(correction)
   end
 
   defp dispatchable_retry_correction?(_correction, _workspace_path), do: false
@@ -5496,30 +5496,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp reject_blank_fingerprint_values(_fingerprint), do: %{}
 
   defp retry_fingerprint_blank?(value), do: value in [nil, "", []]
-
-  defp actionable_code_or_test_correction?(%{} = correction) do
-    text =
-      [
-        correction["summary"],
-        correction["findings"],
-        correction["required_corrections"]
-      ]
-      |> correction_string_values()
-      |> Enum.join(" ")
-      |> String.downcase()
-
-    Regex.match?(
-      ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:package\.json|tsconfig\.json|opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|vitest\.config\.[a-z0-9]+)\b|\b(?:src|app|apps|packages|lib|tests|docs|design|skills)/[a-z0-9_\-./ ()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)},
-      text
-    ) and
-      Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)
-  end
-
-  defp actionable_code_or_test_correction?(_correction), do: false
-
-  defp correction_string_values(values) when is_list(values), do: Enum.flat_map(values, &correction_string_values/1)
-  defp correction_string_values(value) when is_binary(value), do: [value]
-  defp correction_string_values(_value), do: []
 
   defp normalize_correction_value(value) when is_binary(value) do
     value

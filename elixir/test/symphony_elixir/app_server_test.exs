@@ -4801,56 +4801,81 @@ defmodule SymphonyElixir.AppServerTest do
                  "(^|\\s|[\"'])(rm|sudo|chmod|chown)(\\s|$)"
                )
 
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "rg token tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])rg(\\s|$)",
+                 ["(^|\\s|[\"'])rg(\\s|$)"]
+               )
+
       multiline_command = "rg token tests/unit/named.test.ts\nrm -rf ."
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  multiline_command,
                  "(^|\\s|[\"'])rg(\\s|$)"
                )
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  "sed -n -i '1p' tests/unit/named.test.ts",
                  "(^|\\s|[\"'])sed(\\s|$)"
                )
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  "git diff --output=/tmp/diff.txt -- tests/unit/named.test.ts",
                  "(^|\\s|[\"'])git(\\s|$)"
                )
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  "sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
                  "(^|\\s|[\"'])sed(\\s|$)"
                )
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  "sed -n '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
                  "(^|\\s|[\"'])sed(\\s|$)"
                )
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  "sed -n '1p' -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
                  "(^|\\s|[\"'])sed(\\s|$)"
                )
 
-      assert {:deny, _correction} =
+      assert :defer =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  "rg --pre=rm token tests/unit/named.test.ts",
                  "(^|\\s|[\"'])rg(\\s|$)"
                )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "git diff --ext-diff -- tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])git(\\s|$)"
+               )
+
+      refute AppServer.pure_scope_read_command_for_test("git diff --ext-diff -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git diff --textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --pre=rm token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("sed -n '1,120p' tests/unit/named.test.ts")
     after
       File.rm_rf(test_root)
     end

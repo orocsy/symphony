@@ -1771,6 +1771,18 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     browser_command? = String.contains?(text, ["playwright", "chrome", "chromium"])
 
+    launch_context? =
+      String.contains?(text, [
+        "before test",
+        "before the test",
+        "did not execute",
+        "launch",
+        "startup",
+        "starting"
+      ])
+
+    sigabrt_launch_failure? = String.contains?(text, "sigabrt") and launch_context?
+
     launch_failure? =
       String.contains?(text, [
         "could not launch",
@@ -1778,12 +1790,9 @@ defmodule SymphonyElixir.DispatchPreflight do
         "failed to launch",
         "launch failed",
         "did not execute because",
-        "exited with sigabrt",
-        "exited sigabrt",
-        "signal=sigabrt",
         "executable missing",
         "local-browsers"
-      ])
+      ]) or sigabrt_launch_failure?
 
     environment_failure? =
       String.contains?(text, ["sandbox", "sigabrt", "executable missing", "local-browsers"])

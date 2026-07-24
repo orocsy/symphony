@@ -419,6 +419,20 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "browser SIGABRT after test startup remains actionable product rework" do
+    correction = %{
+      "summary" => "Playwright browser process crashed during an application assertion",
+      "findings" => [
+        "Chrome process did exit: signal=SIGABRT after the page entered its ready state."
+      ],
+      "required_corrections" => [
+        "Fix tests/e2e/browser-sandbox.spec.ts and rerun the focused test."
+      ]
+    }
+
+    refute SymphonyElixir.DispatchPreflight.playwright_browser_correction?(correction)
+  end
+
   test "open stale scope correction prevents redispatch when head and policy hash are unchanged" do
     workspace_root =
       Path.join(
@@ -23079,7 +23093,7 @@ defmodule SymphonyElixir.CoreTest do
               "src/components/ui/bottom-sheet.tsx:50 restores focus to a hidden close button."
             ],
             required_corrections: [
-              "Add a null guard in src/components/ui/bottom-sheet.tsx, update tests/unit/bottom-sheet.test.ts, and run focused validation."
+              "Add a null guard in src/components/ui/bottom-sheet.tsx."
             ]
           }
         )
@@ -23106,6 +23120,16 @@ defmodule SymphonyElixir.CoreTest do
                      50
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "all standard standalone code-change verbs are explicit structured requests" do
+    for verb <- ["Add", "Delete", "Edit", "Fix", "Change", "Modify", "Remove", "Rename", "Replace", "Update", "Implement"] do
+      assert SymphonyElixir.RescueSupervisor.explicit_structured_code_change_request_for_test(%{
+               "required_corrections" => [
+                 "#{verb} the guard in src/components/ui/bottom-sheet.tsx."
+               ]
+             })
     end
   end
 

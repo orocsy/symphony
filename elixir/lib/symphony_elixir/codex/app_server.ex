@@ -752,13 +752,20 @@ defmodule SymphonyElixir.Codex.AppServer do
       bounded_git_log_exception_available?(workspace, configured_patterns)
     end
 
+    def pure_scope_read_command_for_test(command) when is_binary(command),
+      do: pure_scope_read_command?(command)
+
     def worker_thread_overrides_for_test(params, workspace),
       do: maybe_put_worker_thread_overrides(params, workspace)
 
-    def scope_access_resolution_for_test(workspace, command, pattern)
+    def scope_access_resolution_for_test(workspace, command, pattern, configured_patterns \\ [])
         when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
       resolve_scope_access_violation(
-        %{workspace: workspace, worker_host: nil},
+        %{
+          workspace: workspace,
+          worker_host: nil,
+          configured_patterns: configured_patterns
+        },
         command,
         pattern
       )
@@ -2348,42 +2355,51 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scope_access_policy(_workspace), do: %{}
 
   defp resolve_scope_access_violation(
-         %{workspace: workspace, worker_host: nil},
+         %{workspace: workspace, worker_host: nil} = command_guard,
          command,
          pattern
        )
        when is_binary(workspace) and is_binary(command) and
               pattern != @review_rework_dirty_validated_handoff_recheck_pattern do
-    policy = scope_access_policy(workspace)
+    if configured_forbidden_command_match?(command, command_guard) or
+         not scope_generated_violation?(pattern, workspace) do
+      :defer
+    else
+      policy = scope_access_policy(workspace)
 
-    case ScopeAccess.classify_command(command, policy) do
-      %{} = request ->
-        case ScopeAccessController.decide(request, policy, workspace) do
-          {:allow_once, patch} ->
-            if scope_access_command_eligible?(command, request) do
-              case ScopeAccessController.write_policy_patch(workspace, patch) do
-                {:ok, written_patch} ->
-                  {:allow, {:scope_access_decision, written_patch, policy}}
+      case ScopeAccess.classify_command(command, policy) do
+        %{} = request ->
+          if request["broad"] == true or scope_access_command_eligible?(command, request) do
+            case ScopeAccessController.decide(request, policy, workspace) do
+              {:allow_once, patch} ->
+                if scope_access_command_eligible?(command, request) do
+                  case ScopeAccessController.write_policy_patch(workspace, patch) do
+                    {:ok, written_patch} ->
+                      {:allow, {:scope_access_decision, written_patch, policy}}
 
-                {:error, reason} ->
-                  decision =
-                    request
-                    |> ScopeAccess.decision_for()
-                    |> Map.put("reason_class", "policy_patch_write_failed")
-                    |> Map.put("error", inspect(reason))
+                    {:error, reason} ->
+                      decision =
+                        request
+                        |> ScopeAccess.decision_for()
+                        |> Map.put("reason_class", "policy_patch_write_failed")
+                        |> Map.put("error", inspect(reason))
 
-                  {:deny, decision}
-              end
-            else
-              :defer
+                      {:deny, decision}
+                  end
+                else
+                  :defer
+                end
+
+              {decision, correction_attrs} when decision in [:block, :escalate] ->
+                {:deny, correction_attrs}
             end
+          else
+            :defer
+          end
 
-          {decision, correction_attrs} when decision in [:block, :escalate] ->
-            {:deny, correction_attrs}
-        end
-
-      _ ->
-        :defer
+        _ ->
+          :defer
+      end
     end
   rescue
     error ->
@@ -2392,6 +2408,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp resolve_scope_access_violation(_command_guard, _command, _pattern), do: :defer
+
+  defp scope_generated_violation?(pattern, workspace)
+       when is_binary(pattern) and is_binary(workspace) do
+    pattern in @review_rework_forbidden_command_patterns or
+      pattern in @fresh_implementation_forbidden_command_patterns or
+      pattern in review_rework_path_guard_patterns(workspace)
+  end
+
+  defp scope_generated_violation?(_pattern, _workspace), do: false
 
   defp scope_access_command_eligible?(
          command,
@@ -2459,7 +2484,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       (String.starts_with?(command, "rg ") and
          Regex.match?(~r/(?:^|\s)--pre(?:-glob)?(?:=|\s|$)/, command)) or
       (String.starts_with?(command, "git ") and
-         Regex.match?(~r/(?:^|\s)--output(?:=|\s|$)/, command))
+         Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, command))
   end
 
   defp unsafe_scope_read_option?(_command), do: false
