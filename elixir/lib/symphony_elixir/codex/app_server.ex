@@ -2244,7 +2244,9 @@ defmodule SymphonyElixir.Codex.AppServer do
               scoped_file_grep_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          rg_pattern?(match) and scoped_file_rg_allowed?(command_for_patterns, workspace) ->
+          rg_pattern?(match) and
+            not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+              scoped_file_rg_allowed?(command_for_patterns, workspace) ->
             :ok
 
           not configured_forbidden_command_match?(command_for_patterns, command_guard) and
@@ -2539,22 +2541,16 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> unescape_shell_argument_quotes()
       |> String.trim()
 
-    cond do
-      String.starts_with?(normalized, ~s(/bin/zsh -lc ")) and
-          String.ends_with?(normalized, "\"") ->
-        normalized
-        |> String.trim_leading(~s(/bin/zsh -lc "))
-        |> String.trim_trailing("\"")
+    case OptionParser.split(normalized) do
+      [shell, "-lc", inner]
+      when shell in ["zsh", "bash", "sh", "/bin/zsh", "/bin/bash", "/bin/sh"] ->
+        inner
 
-      String.starts_with?(normalized, "/bin/zsh -lc '") and
-          String.ends_with?(normalized, "'") ->
-        normalized
-        |> String.trim_leading("/bin/zsh -lc '")
-        |> String.trim_trailing("'")
-
-      true ->
+      _ ->
         normalized
     end
+  rescue
+    _error -> String.trim(command)
   end
 
   defp unwrap_shell_login_command(_command), do: ""
@@ -2845,19 +2841,11 @@ defmodule SymphonyElixir.Codex.AppServer do
            dispatch_preflight_mode(workspace),
          true <- file_scoped_grep_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
-      allowed_paths =
-        preflight
-        |> review_rework_allowed_read_paths(workspace)
-        |> MapSet.new()
-
-      command_paths =
-        command
-        |> search_path_tokens()
-        |> Enum.uniq()
-
       if mode == "handoff_recovery" do
-        command_paths != [] and Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+        handoff_recovery_grep_paths_allowed?(command, preflight)
       else
+        allowed_paths = preflight |> review_rework_allowed_read_paths(workspace) |> MapSet.new()
+        command_paths = command |> search_path_tokens() |> Enum.uniq()
         scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
       end
     else
@@ -2868,6 +2856,25 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scoped_file_grep_allowed?(_command, _workspace), do: false
+
+  defp handoff_recovery_grep_paths_allowed?(command, preflight)
+       when is_binary(command) and is_map(preflight) do
+    allowed_paths = preflight |> review_rework_scope_bundle_read_paths() |> MapSet.new()
+
+    command_paths =
+      command
+      |> unwrap_shell_login_command()
+      |> scope_read_operand_paths("bounded_file_search")
+
+    is_list(command_paths) and command_paths != [] and
+      Enum.all?(command_paths, fn path ->
+        MapSet.member?(allowed_paths, normalize_scope_operand_path(path))
+      end)
+  rescue
+    _error -> false
+  end
+
+  defp handoff_recovery_grep_paths_allowed?(_command, _preflight), do: false
 
   defp scoped_file_rg_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
     with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],

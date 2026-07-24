@@ -16201,7 +16201,13 @@ defmodule SymphonyElixir.CoreTest do
 
       File.mkdir_p!(Path.join(workspace, "tests/e2e"))
       File.mkdir_p!(state_dir)
-      File.write!(Path.join(workspace, test_path), "test('discover', () => {});\n")
+
+      File.write!(
+        Path.join(workspace, test_path),
+        "import './derived-helper';\ntest('discover', () => {});\n"
+      )
+
+      File.write!(Path.join(workspace, "tests/e2e/derived-helper.ts"), "export {};\n")
 
       scope_bundle =
         SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
@@ -16247,6 +16253,8 @@ defmodule SymphonyElixir.CoreTest do
       wrapped_grep_command = ~s(/bin/zsh -lc "#{grep_command}")
       wrapped_sed_command = ~s(/bin/zsh -lc "#{sed_command}")
       wrapped_compound_command = ~s(/bin/zsh -lc "#{compound_command}")
+      bash_wrapped_compound = ~s(/bin/bash -lc "#{compound_command}")
+      sh_wrapped_compound = ~s(sh -lc "#{compound_command}")
 
       forbidden_patterns = [
         "(^|\\s|[\"'])grep(\\s|$)",
@@ -16264,13 +16272,37 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, ^wrapped_compound_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, wrapped_compound_command, [])
 
+      assert {:error, ^bash_wrapped_compound, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, bash_wrapped_compound, [])
+
+      assert {:error, ^sh_wrapped_compound, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, sh_wrapped_compound, [])
+
       unscoped_test_search = "grep -n test tests/e2e/unrelated.spec.ts"
+      unclassified_operand_search = grep_command <> " /etc/passwd"
+      derived_context_search = "grep -n test tests/e2e/derived-helper.ts"
 
       assert {:error, ^unscoped_test_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, unscoped_test_search, [])
 
+      assert {:error, ^unclassified_operand_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unclassified_operand_search, [])
+
+      assert {:error, ^derived_context_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, derived_context_search, [])
+
       assert {:error, ^grep_command, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
+
+      preflight_path = Path.join(state_dir, "dispatch-preflight.json")
+      review_preflight = preflight_path |> File.read!() |> Jason.decode!() |> Map.put("mode", "review_rework")
+      File.write!(preflight_path, Jason.encode!(review_preflight))
+
+      rg_command = "rg -n test #{test_path}"
+      configured_rg_pattern = "(^|\\s|[\"'])rg(\\s|$)"
+
+      assert {:error, ^rg_command, ^configured_rg_pattern} =
+               AppServer.command_policy_violation_for_test(workspace, rg_command, [configured_rg_pattern])
 
       piped_read = sed_command <> "|tee tests/e2e/unscoped-output.spec.ts"
       unspaced_chain = sed_command <> ";rm -rf target"
