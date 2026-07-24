@@ -892,6 +892,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     base_paths =
       (review_rework_feedback_paths(preflight) ++
          review_rework_requirement_paths(preflight) ++
+         review_rework_scope_bundle_read_paths(preflight) ++
          review_rework_issue_brief_paths(preflight, workspace) ++
          review_rework_referenced_api_route_paths(preflight, workspace) ++
          review_rework_correction_paths(workspace) ++
@@ -2837,7 +2838,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scoped_conflict_marker_scan_allowed?(_command, _workspace), do: false
 
   defp scoped_file_grep_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
-    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
+    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check", "handoff_recovery"],
          true <- file_scoped_grep_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
       allowed_paths =
@@ -2916,7 +2917,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp review_rework_missing_referenced_read_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
-    with true <- dispatch_preflight_mode(workspace) == "review_rework",
+    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "handoff_recovery"],
          true <- simple_file_read_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
       allowed_paths =

@@ -844,7 +844,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp policy_violation_command_guidance(%{} = scope_access, pattern) do
     if scope_access_decision(scope_access) == "allow_once" do
-      "- The runtime added this as read-only context for this retry. You may rerun that exact bounded read/search once if still needed; do not broaden it or edit that path."
+      "- The runtime added the named path(s) as read-only context for this retry. Do not repeat the denied command verbatim. If the read/search is still needed, run each operation as a separate single-purpose command against only the granted exact path(s); do not use `&&`, `||`, `;`, or pipes, broaden the search, or edit those paths."
     else
       default_policy_violation_command_guidance(pattern)
     end

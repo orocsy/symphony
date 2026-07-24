@@ -15748,6 +15748,42 @@ defmodule SymphonyElixir.CoreTest do
              "Continue directly with the smallest in-scope fix for the open correction or current task"
   end
 
+  test "allow-once recovery tells workers to split a denied compound read" do
+    issue = %Issue{
+      identifier: "MT-208",
+      title: "Split bounded read recovery",
+      description: "Recovery flow",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-208",
+      labels: []
+    }
+
+    denied_command =
+      "grep -nE 'test|describe' tests/e2e/ui-state-matrix.spec.ts && " <>
+        "sed -n '1,160p' tests/e2e/ui-state-matrix.spec.ts"
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        policy_violation: %{
+          command: denied_command,
+          pattern: "(^|\\s|[\"'])grep(\\s|$)",
+          attempt: 1,
+          max_attempts: 2,
+          scope_access: %{
+            "operation" => "search",
+            "paths" => ["tests/e2e/ui-state-matrix.spec.ts"],
+            "decision" => "allow_once",
+            "reason_class" => "safe_read_context"
+          }
+        }
+      )
+
+    assert prompt =~ "Do not repeat the denied command verbatim"
+    assert prompt =~ "run each operation as a separate single-purpose command"
+    assert prompt =~ "do not use `&&`, `||`, `;`, or pipes"
+    refute prompt =~ "rerun that exact bounded read/search once"
+  end
+
   test "agent runner allows one denied command recovery for strict implementation review rework" do
     workspace =
       Path.join(
@@ -16138,6 +16174,86 @@ defmodule SymphonyElixir.CoreTest do
              end)
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, command)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "handoff recovery accepts split reads for exact contract context but rejects the compound form" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-handoff-recovery-split-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-HANDOFF-SPLIT-READ")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      test_path = "tests/e2e/ui-state-matrix.spec.ts"
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        codex_forbidden_command_patterns: [
+          "(^|\\s|[\"'])grep(\\s|$)",
+          "(^|\\s|[\"'])sed\\s+-n(\\s|$)"
+        ]
+      )
+
+      File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      File.mkdir_p!(state_dir)
+      File.write!(Path.join(workspace, test_path), "test('discover', () => {});\n")
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-HANDOFF-SPLIT-READ",
+          "write_scope" => [
+            %{
+              "path" => "tests/e2e/desktop-discover.spec.ts",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [
+            %{
+              "path" => test_path,
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            }
+          ],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "issue" => "MT-HANDOFF-SPLIT-READ",
+          "branch" => "orocsy/mt-handoff-split-read",
+          "requirements" => %{
+            "ticket_type" => "test-spec",
+            "write_scope" => ["tests/e2e/desktop-discover.spec.ts"],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      grep_command = ~s(grep -nE "test|describe" #{test_path})
+      sed_command = ~s(sed -n '1,160p' #{test_path})
+      compound_command = grep_command <> " && " <> sed_command
+
+      forbidden_patterns = [
+        "(^|\\s|[\"'])grep(\\s|$)",
+        "(^|\\s|[\"'])sed\\s+-n(\\s|$)"
+      ]
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, sed_command, forbidden_patterns)
+
+      assert {:error, ^compound_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, compound_command, forbidden_patterns)
     after
       File.rm_rf(test_root)
     end
