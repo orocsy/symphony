@@ -202,6 +202,28 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "worker runtime info replaces a preselected remote host with the actual local host" do
+    issue_id = "issue-actual-local-worker"
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          worker_host: "worker-a",
+          workspace_path: "/remote/workspace"
+        }
+      }
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info(
+               {:worker_runtime_info, issue_id, %{worker_host: nil, workspace_path: "/local/workspace"}},
+               state
+             )
+
+    assert updated_state.running[issue_id].worker_host == nil
+    assert updated_state.running[issue_id].workspace_path == "/local/workspace"
+  end
+
   test "dispatch gate treats empty retry fingerprint as legacy retry correction" do
     workspace_root =
       Path.join(
@@ -360,6 +382,22 @@ defmodule SymphonyElixir.CoreTest do
       state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
       assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+      File.write!(
+        Path.join(inbox, "correction_20260724000000_current_provider.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260724000000_current_provider",
+          "status" => "open",
+          "source" => "codex.review-rework",
+          "next_action" => "retry",
+          "resolved_at" => nil,
+          "summary" => "Focused Playwright validation could not launch Chrome",
+          "findings" => ["Chrome exited with SIGABRT before the test executed."],
+          "required_corrections" => ["Retry outside the worker sandbox."]
+        })
+      )
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
     after
       File.rm_rf(workspace_root)
     end

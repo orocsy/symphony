@@ -2570,7 +2570,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp unsafe_scope_read_option?(command) when is_binary(command) do
     (String.starts_with?(command, "sed ") and not safe_sed_print_slice?(command)) or
       (String.starts_with?(command, "rg ") and
-         Regex.match?(~r/(?:^|\s)--pre(?:-glob)?(?:=|\s|$)/, command)) or
+         Regex.match?(~r/(?:^|\s)--(?:pre(?:-glob)?|ignore-file)(?:=|\s|$)/, command)) or
+      (String.starts_with?(command, "grep ") and
+         Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, command)) or
       (String.starts_with?(command, "git ") and
          Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, command))
   end
@@ -2658,7 +2660,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         Enum.any?(corrections, &DispatchPreflight.playwright_browser_correction?/1)
 
       {:error, _reason} ->
-        is_binary(worker_host)
+        false
     end
   end
 

@@ -4732,7 +4732,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "remote command guard fails closed when correction inspection fails" do
+  test "remote command guard does not invent a browser correction when inspection fails" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -4764,7 +4764,7 @@ defmodule SymphonyElixir.AppServerTest do
       command =
         "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
 
-      assert {:error, ^command, "playwright_browser_correction_requires_runtime_controller_handoff"} =
+      assert :ok =
                AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
     after
       File.rm_rf(test_root)
@@ -4914,6 +4914,12 @@ defmodule SymphonyElixir.AppServerTest do
       refute AppServer.pure_scope_read_command_for_test("git diff --textconv -- tests/unit/named.test.ts")
 
       refute AppServer.pure_scope_read_command_for_test("rg --pre=rm token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --ignore-file=apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("grep --file=apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("grep --exclude-from apps/private.ts token tests/unit/named.test.ts")
 
       refute AppServer.pure_scope_read_command_for_test("sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts")
 

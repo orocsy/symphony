@@ -265,7 +265,7 @@ defmodule SymphonyElixir.Orchestrator do
       running_entry ->
         updated_running_entry =
           running_entry
-          |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
+          |> Map.put(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
         notify_dashboard()
@@ -5362,9 +5362,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp correction_block_check_target_dispatchable_retry?(_target), do: false
 
   defp dispatchable_retry_corrections?(corrections, workspace_path) when is_list(corrections) do
+    controller_corrections =
+      Enum.filter(corrections, &controller_validation_retry_correction?/1)
+
     actionable =
-      if Enum.any?(corrections, &controller_validation_retry_correction?/1) do
-        Enum.reject(corrections, &worker_browser_provider_correction?/1)
+      if controller_corrections != [] do
+        Enum.reject(corrections, fn correction ->
+          worker_browser_provider_correction?(correction) and
+            Enum.any?(controller_corrections, &correction_supersedes?(&1, correction))
+        end)
       else
         corrections
       end
@@ -5400,6 +5406,29 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp controller_validation_retry_correction?(_correction), do: false
+
+  defp correction_supersedes?(%{} = candidate, %{} = correction) do
+    case {normalized_correction_order(candidate), normalized_correction_order(correction)} do
+      {{kind, candidate_value}, {kind, correction_value}}
+      when candidate_value != "" and correction_value != "" ->
+        candidate_value >= correction_value
+
+      _ ->
+        false
+    end
+  end
+
+  defp correction_supersedes?(_candidate, _correction), do: false
+
+  defp normalized_correction_order(%{"created_at" => created_at})
+       when is_binary(created_at) and created_at != "",
+       do: {:created_at, created_at}
+
+  defp normalized_correction_order(%{"correction_id" => correction_id})
+       when is_binary(correction_id) and correction_id != "",
+       do: {:correction_id, correction_id}
+
+  defp normalized_correction_order(_correction), do: {:unknown, ""}
 
   defp retry_fingerprint_changed?(%{"guard" => %{"retry_fingerprint" => %{} = stored}} = correction, workspace_path)
        when is_binary(workspace_path) do

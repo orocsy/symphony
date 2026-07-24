@@ -1364,6 +1364,7 @@ defmodule SymphonyElixir.RescueSupervisor do
     Enum.filter(corrections, &pending_codex_review_correction?/1)
   end
 
+  @spec actionable_code_or_test_correction?(map()) :: boolean()
   def actionable_code_or_test_correction?(%{} = correction) do
     text =
       [
