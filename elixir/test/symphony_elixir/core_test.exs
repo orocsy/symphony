@@ -16483,12 +16483,35 @@ defmodule SymphonyElixir.CoreTest do
       mutating_chain = sed_command <> " && rm -f #{test_path}"
       ansi_c_chain = "/bin/bash -lc $'cat config/config.exs\\nrm -f config/config.exs'"
       ansi_c_non_login_chain = "/bin/bash -c $'cat config/config.exs\\nrm -f config/config.exs'"
+
+      ansi_c_long_login_chain =
+        "/bin/bash --login -c $'cat config/config.exs\\nrm -f config/config.exs'"
+
+      ansi_c_clustered_login_chain =
+        "/bin/bash -cl $'cat config/config.exs\\nrm -f config/config.exs'"
+
+      quoted_shell_chain_with_argv =
+        "/bin/bash -c 'cat config/config.exs; rm -f config/config.exs' worker-zero"
+
       tail_follow = "tail -f config/config.exs"
       tail_retry_follow = "tail -F config/config.exs"
+      tail_clustered_follow = "tail -fq config/config.exs"
+      tail_clustered_retry_follow = "tail -Fq config/config.exs"
       finite_tail = "tail -n 5 config/config.exs"
+      finite_flagged_head = "head -q -n 5 config/config.exs"
+      finite_flagged_tail = "tail -v --lines 5 config/config.exs"
       directory_ls = "ls tests/e2e"
       git_diff_read = "git diff -- config/config.exs"
       git_log_read = "git log -- config/config.exs"
+      git_global_diff_read = "git --no-pager diff -- /etc/passwd"
+      git_global_log_read = "git -P log -p -- /etc/passwd"
+
+      git_global_scoped_diff =
+        "git --no-pager diff --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_global_scoped_log =
+        "git -P log --no-ext-diff --no-textconv -- config/config.exs"
+
       sed_write = "sed -n '1w /tmp/leak' config/config.exs"
 
       assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
@@ -16512,14 +16535,35 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, ^ansi_c_non_login_chain, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, ansi_c_non_login_chain, [])
 
+      assert {:error, ^ansi_c_long_login_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_long_login_chain, [])
+
+      assert {:error, ^ansi_c_clustered_login_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_clustered_login_chain, [])
+
+      assert {:error, ^quoted_shell_chain_with_argv, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, quoted_shell_chain_with_argv, [])
+
       assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_follow, [])
 
       assert {:error, ^tail_retry_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_retry_follow, [])
 
+      assert {:error, ^tail_clustered_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_clustered_follow, [])
+
+      assert {:error, ^tail_clustered_retry_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_clustered_retry_follow, [])
+
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, finite_tail, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_flagged_head, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_flagged_tail, [])
 
       assert {:error, ^directory_ls, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, directory_ls, [])
@@ -16529,6 +16573,18 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^git_log_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, git_log_read, [])
+
+      assert {:error, ^git_global_diff_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_global_diff_read, [])
+
+      assert {:error, ^git_global_log_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_global_log_read, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, git_global_scoped_diff, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, git_global_scoped_log, [])
 
       assert {:error, ^sed_write, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, sed_write, [])
