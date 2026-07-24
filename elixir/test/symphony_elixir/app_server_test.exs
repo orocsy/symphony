@@ -4823,6 +4823,34 @@ defmodule SymphonyElixir.AppServerTest do
                  "git diff --output=/tmp/diff.txt -- tests/unit/named.test.ts",
                  "(^|\\s|[\"'])git(\\s|$)"
                )
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n '1p' -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert {:deny, _correction} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "rg --pre=rm token tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])rg(\\s|$)"
+               )
     after
       File.rm_rf(test_root)
     end

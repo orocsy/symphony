@@ -2445,7 +2445,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp pure_scope_read_command?(command) when is_binary(command) do
     not command_chain_operator_outside_quotes?(command) and
       not String.contains?(command, ["$(", "`"]) and
-      not mutating_scope_read_option?(command) and
+      not unsafe_scope_read_option?(command) and
       Regex.match?(
         ~r/\A(?:sed\s+-n|(?:cat|head|tail|nl|rg|grep|ls)\s|git\s+(?:diff|log|ls-files)(?:\s|$))/,
         command
@@ -2454,14 +2454,24 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp pure_scope_read_command?(_command), do: false
 
-  defp mutating_scope_read_option?(command) when is_binary(command) do
-    (String.starts_with?(command, "sed ") and
-       Regex.match?(~r/(?:^|\s)(?:-i(?:[^\s]*)?|--in-place(?:=|\s|$))/, command)) or
+  defp unsafe_scope_read_option?(command) when is_binary(command) do
+    (String.starts_with?(command, "sed ") and not safe_sed_print_slice?(command)) or
+      (String.starts_with?(command, "rg ") and
+         Regex.match?(~r/(?:^|\s)--pre(?:-glob)?(?:=|\s|$)/, command)) or
       (String.starts_with?(command, "git ") and
          Regex.match?(~r/(?:^|\s)--output(?:=|\s|$)/, command))
   end
 
-  defp mutating_scope_read_option?(_command), do: false
+  defp unsafe_scope_read_option?(_command), do: false
+
+  defp safe_sed_print_slice?(command) when is_binary(command) do
+    Regex.match?(
+      ~r/\Ased\s+-n\s+(?:'\d+(?:,\d+)?p'|"\d+(?:,\d+)?p"|\d+(?:,\d+)?p)\s+(?:--\s+)?(?:'[^']+'|"[^"]+"|[A-Za-z0-9_.\/-]+)\z/,
+      command
+    )
+  end
+
+  defp safe_sed_print_slice?(_command), do: false
 
   defp scope_access_attrs(workspace) when is_binary(workspace) do
     case DispatchPreflight.read(workspace) do

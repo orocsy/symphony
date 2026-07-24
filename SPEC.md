@@ -1013,7 +1013,13 @@ Mode-specific startup policy:
   commands against both command event payloads and function-call command payloads accepted by the
   targeted app-server protocol.
 - Mode-specific restrictions MUST fail the worker attempt with an observable error instead of
-  silently allowing a disallowed command.
+  silently allowing a disallowed command, except when all of the following hold:
+  - the violation is an exact-path read denied only by the active scope policy;
+  - a controller-owned scope resolver authenticates an auditable, request-bound, policy-bound
+    allow-once decision; and
+  - semantic, destructive, executable-option, command-chain, substitution, and redirection guards
+    still reject the command before any scope decision can run.
+- A scope resolver MUST NOT override any non-scope command guard.
 
 ### 10.3 Streaming Turn Processing
 

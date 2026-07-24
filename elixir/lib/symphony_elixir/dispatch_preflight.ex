@@ -1780,6 +1780,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         "did not execute because",
         "exited with sigabrt",
         "exited sigabrt",
+        "signal=sigabrt",
         "executable missing",
         "local-browsers"
       ])

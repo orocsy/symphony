@@ -284,7 +284,7 @@ defmodule SymphonyElixir.CoreTest do
           "resolved_at" => nil,
           "summary" => "Focused Playwright validation could not launch Chrome",
           "findings" => [
-            "tests/e2e/desktop-guest-setup.spec.ts did not execute because Chrome exited with SIGABRT."
+            "Chrome process did exit: signal=SIGABRT while tests/e2e/desktop-guest-setup.spec.ts was starting."
           ],
           "required_corrections" => [
             "Retry the exact focused Playwright command outside the worker sandbox."
@@ -23079,7 +23079,7 @@ defmodule SymphonyElixir.CoreTest do
               "src/components/ui/bottom-sheet.tsx:50 restores focus to a hidden close button."
             ],
             required_corrections: [
-              "Fix src/components/ui/bottom-sheet.tsx, update tests/unit/bottom-sheet.test.ts, and run focused validation."
+              "Add a null guard in src/components/ui/bottom-sheet.tsx, update tests/unit/bottom-sheet.test.ts, and run focused validation."
             ]
           }
         )

@@ -1389,7 +1389,10 @@ defmodule SymphonyElixir.RescueSupervisor do
       normalized = String.downcase(instruction)
 
       actionable_code_or_test_correction?(%{"required_corrections" => [instruction]}) and
-        Regex.match?(~r/\b(edit|fix|change|modify|update|implement)\b/, normalized) and
+        Regex.match?(
+          ~r/\b(add|delete|edit|fix|change|modify|remove|rename|replace|update|implement)\b/,
+          normalized
+        ) and
         not Regex.match?(~r/\b(wait|monitor|pending|review result|review response)\b/, normalized)
     end)
   end
