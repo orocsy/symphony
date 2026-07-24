@@ -2239,13 +2239,16 @@ defmodule SymphonyElixir.Codex.AppServer do
           grep_pattern?(match) and scoped_conflict_marker_scan_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          grep_pattern?(match) and scoped_file_grep_allowed?(command_for_patterns, workspace) ->
+          grep_pattern?(match) and
+            not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+              scoped_file_grep_allowed?(command_for_patterns, workspace) ->
             :ok
 
           rg_pattern?(match) and scoped_file_rg_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
+          not configured_forbidden_command_match?(command_for_patterns, command_guard) and
+              review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
             :ok
 
           true ->
@@ -2838,7 +2841,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scoped_conflict_marker_scan_allowed?(_command, _workspace), do: false
 
   defp scoped_file_grep_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
-    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check", "handoff_recovery"],
+    with mode when mode in ["review_rework", "integration_check", "handoff_recovery"] <-
+           dispatch_preflight_mode(workspace),
          true <- file_scoped_grep_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
       allowed_paths =
@@ -2851,7 +2855,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> search_path_tokens()
         |> Enum.uniq()
 
-      scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
+      if mode == "handoff_recovery" do
+        command_paths != [] and Enum.all?(command_paths, &MapSet.member?(allowed_paths, &1))
+      else
+        scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
+      end
     else
       _ -> false
     end
@@ -2952,7 +2960,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         Regex.match?(~r/(^|\s|["'])(cat|head|tail|nl)\s+/, command)
 
     read_command and
-      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+      not command_chain_operator_outside_quotes?(command) and
+      not Regex.match?(~r/\$\(|`/, command)
   end
 
   defp simple_file_read_command?(_command), do: false

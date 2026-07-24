@@ -16234,6 +16234,7 @@ defmodule SymphonyElixir.CoreTest do
           "branch" => "orocsy/mt-handoff-split-read",
           "requirements" => %{
             "ticket_type" => "test-spec",
+            "runtime_contract_status" => "structured",
             "write_scope" => ["tests/e2e/desktop-discover.spec.ts"],
             "scope_bundle" => scope_bundle
           }
@@ -16252,16 +16253,33 @@ defmodule SymphonyElixir.CoreTest do
         "(^|\\s|[\"'])sed\\s+-n(\\s|$)"
       ]
 
-      assert :ok = AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
-      assert :ok = AppServer.command_policy_violation_for_test(workspace, sed_command, forbidden_patterns)
-      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_grep_command, forbidden_patterns)
-      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, forbidden_patterns)
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, grep_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, sed_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_grep_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, [])
 
       assert {:error, ^compound_command, _pattern} =
-               AppServer.command_policy_violation_for_test(workspace, compound_command, forbidden_patterns)
+               AppServer.command_policy_violation_for_test(workspace, compound_command, [])
 
       assert {:error, ^wrapped_compound_command, _pattern} =
-               AppServer.command_policy_violation_for_test(workspace, wrapped_compound_command, forbidden_patterns)
+               AppServer.command_policy_violation_for_test(workspace, wrapped_compound_command, [])
+
+      unscoped_test_search = "grep -n test tests/e2e/unrelated.spec.ts"
+
+      assert {:error, ^unscoped_test_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unscoped_test_search, [])
+
+      assert {:error, ^grep_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
+
+      piped_read = sed_command <> "|tee tests/e2e/unscoped-output.spec.ts"
+      unspaced_chain = sed_command <> ";rm -rf target"
+
+      assert {:error, ^piped_read, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, piped_read, forbidden_patterns)
+
+      assert {:error, ^unspaced_chain, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unspaced_chain, forbidden_patterns)
     after
       File.rm_rf(test_root)
     end
