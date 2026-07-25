@@ -16384,6 +16384,19 @@ defmodule SymphonyElixir.CoreTest do
       assert compound_scope_access["decision"] == "allow_once"
       assert compound_scope_access["reason_class"] == "safe_read_context"
 
+      handoff_checkpoint_chain =
+        "git status --short --branch && " <>
+          "printf '\\n--- focused diff ---\\n' && " <>
+          "git diff -- #{test_path}"
+
+      handoff_checkpoint_request =
+        SymphonyElixir.ScopeAccess.classify_command(handoff_checkpoint_chain, preflight)
+
+      assert handoff_checkpoint_request["operation"] == "read"
+      assert handoff_checkpoint_request["command_class"] == "bounded_read_chain"
+      assert handoff_checkpoint_request["paths"] == [test_path]
+      refute handoff_checkpoint_request["broad"]
+
       cross_root_chain =
         "cat config/config.exs && sed -n '1,20p' priv/data.json && cat .github/workflows/ci.yml"
 
