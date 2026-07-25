@@ -3290,7 +3290,18 @@ defmodule SymphonyElixir.Codex.AppServer do
        do: git_candidate_read_subcommand?(rest)
 
   defp git_candidate_read_subcommand?([option, _value | rest])
-       when option in ["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"],
+       when option in [
+              "-c",
+              "-C",
+              "--git-dir",
+              "--work-tree",
+              "--namespace",
+              "--config-env",
+              "--attr-source",
+              "--exec-path",
+              "--super-prefix",
+              "--list-cmds"
+            ],
        do: git_candidate_read_subcommand?(rest)
 
   defp git_candidate_read_subcommand?([option | rest]) when is_binary(option) do
@@ -3299,11 +3310,14 @@ defmodule SymphonyElixir.Codex.AppServer do
         false
 
       Regex.match?(~r/\A(?:-c|-C).+\z/, option) or
-          Regex.match?(~r/\A--(?:git-dir|work-tree|namespace|config-env)=.+\z/, option) ->
+          Regex.match?(
+            ~r/\A--(?:git-dir|work-tree|namespace|config-env|attr-source|exec-path|super-prefix|list-cmds)=.+\z/,
+            option
+          ) ->
         git_candidate_read_subcommand?(rest)
 
       true ->
-        List.first(rest) in ["diff", "log", "ls-files"]
+        Enum.any?(rest, &(&1 in ["diff", "log", "ls-files"]))
     end
   end
 
@@ -3344,10 +3358,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp shell_invocation_argv([executable | args]) do
     case Path.basename(executable) do
-      "env" -> candidate_env_utility_argv(args)
-      "command" -> candidate_command_utility_argv(args)
-      "nice" -> candidate_nice_utility_argv(args)
-      wrapper when wrapper in ["nohup", "exec"] -> drop_optional_delimiter(args)
+      "env" -> args |> candidate_env_utility_argv() |> shell_invocation_argv()
+      "command" -> args |> candidate_command_utility_argv() |> shell_invocation_argv()
+      "nice" -> args |> candidate_nice_utility_argv() |> shell_invocation_argv()
+      wrapper when wrapper in ["nohup", "exec"] -> args |> drop_optional_delimiter() |> shell_invocation_argv()
       _ -> [executable | args]
     end
   end
@@ -3433,8 +3447,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp candidate_read_argv_tokens([executable | args]) do
     case Path.basename(executable) do
-      "env" -> args |> candidate_env_utility_argv() |> normalize_direct_read_argv()
-      "command" -> args |> candidate_command_utility_argv() |> normalize_direct_read_argv()
+      "env" -> args |> candidate_env_utility_argv() |> candidate_read_argv_tokens()
+      "command" -> args |> candidate_command_utility_argv() |> candidate_read_argv_tokens()
+      "nice" -> args |> candidate_nice_utility_argv() |> candidate_read_argv_tokens()
+      wrapper when wrapper in ["nohup", "exec"] -> args |> drop_optional_delimiter() |> candidate_read_argv_tokens()
       _ -> normalize_direct_read_argv([executable | args])
     end
   end

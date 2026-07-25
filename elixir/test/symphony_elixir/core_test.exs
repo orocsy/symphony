@@ -16542,6 +16542,7 @@ defmodule SymphonyElixir.CoreTest do
       env_wrapped_shell_read = "env bash -c 'cat /etc/passwd'"
       command_wrapped_shell_read = "command bash -c 'cat /etc/passwd'"
       generic_wrapped_shell_read = "nice -n 5 bash -c 'cat /etc/passwd'"
+      composed_wrapped_shell_read = "env nice bash -c 'cat /etc/passwd'"
       alternate_shell_read = "/usr/bin/dash -c 'cat /etc/passwd'"
       single_quote_escape_chain = "cat 'config/config.exs\\' ; rm -f target"
       wrapped_git_status = "/bin/bash -lc 'git status --short --branch'"
@@ -16591,6 +16592,7 @@ defmodule SymphonyElixir.CoreTest do
         "git ls-files --exclude-f=/etc/passwd -- config/config.exs"
 
       git_no_replace_commit = "git --no-replace-objects commit -m log"
+      git_attr_source_log = "git --attr-source HEAD log -- /etc/passwd"
 
       safe_abbreviated_git_diff =
         "git diff --no-in --no-ext-diff --no-textconv -- config/config.exs"
@@ -16668,6 +16670,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^generic_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, generic_wrapped_shell_read, [])
+
+      assert {:error, ^composed_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, composed_wrapped_shell_read, [])
 
       assert {:error, ^alternate_shell_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, alternate_shell_read, [])
@@ -16772,6 +16777,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, git_no_replace_commit, [])
+
+      assert {:error, ^git_attr_source_log, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_attr_source_log, [])
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, safe_abbreviated_git_diff, [])
