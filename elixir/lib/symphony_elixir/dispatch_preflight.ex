@@ -1202,10 +1202,10 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_first_task(_open_corrections, requirements) when is_map(requirements) do
     cond do
       test_spec_issue?(requirements) and requirements["runtime_contract_status"] == "structured" ->
-        "Recover the existing dirty test-spec checkpoint: inspect git status and the focused dirty diff only, finish the named expected-failure marker, create one clean local micro commit, append the exact miu.completion_requested event from the Runtime Contract execution gate, and stop. Do not run contract-declared validation inside the Codex worker; Symphony's validation controller runs it authoritatively outside the worker sandbox. Do not edit production source or broaden scope."
+        "Recover the existing dirty test-spec checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Finish the named expected-failure marker, create one clean local micro commit, append the exact miu.completion_requested event from the Runtime Contract execution gate, and stop. Do not run contract-declared validation inside the Codex worker; Symphony's validation controller runs it authoritatively outside the worker sandbox. Do not edit production source or broaden scope."
 
       test_spec_issue?(requirements) ->
-        "Recover the existing dirty test-spec checkpoint: inspect git status and focused dirty diffs only. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
+        "Recover the existing dirty test-spec checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
 
       true ->
         handoff_recovery_first_task([], nil)
@@ -1213,7 +1213,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_first_task(_open_corrections, _requirements) do
-    "Recover the existing dirty/local handoff checkpoint: inspect git status and focused dirty diffs. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
+    "Recover the existing dirty/local handoff checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
   end
 
   defp handoff_recovery_correction_summaries(all_open_corrections) do
@@ -1562,7 +1562,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       Structured recovery limits:
       - The Runtime Contract execution/final handoff gate prepended above is authoritative. Do not substitute `gate.post-miu`, `technical-miu-trace`, or a worker-created validation event.
-      - For an execution gate, inspect only the focused dirty diff and files named by the remaining MIU, complete that MIU, create its micro commit, append `miu.completion_requested`, and stop without pushing.
+      - For an execution gate, run `git status --short --branch` and each `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as separate commands; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Inspect only that focused dirty diff and files named by the remaining MIU, complete that MIU, create its micro commit, append `miu.completion_requested`, and stop without pushing.
       - For a final handoff gate, do not create another MIU commit. Push the canonical branch, verify upstream equality, ensure the PR exists, append `handoff.requested`, and stop.
       - Do not run contract-declared validation inside the Codex worker. The validation controller runs it after the runtime request and writes exact failure evidence into an Orocsy correction when a fix is needed.
       - When a matching MIU validation correction is open, use its supplied command output to make the smallest in-scope fix. Do not manually resolve it; successful controller certification resolves it.
@@ -1584,7 +1584,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - First task: #{preflight["first_task"]}
       - Open Orocsy corrections: #{format_corrections(open_corrections)}
       - Target current-head feedback file(s): #{format_inline_items(feedback_paths(feedback))}
-      - Dirty workspace recovery is the only task. Use `git status --short --branch` and focused `git diff -- <dirty-file>` reads before any edit; do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
+      - Dirty workspace recovery is the only task. Run `git status --short --branch` and each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as separate single-purpose commands before any edit; never join them with `&&`, `||`, `;`, or pipes. Do not run `git log` or `git diff --stat` — the runtime denies them and provides commit/diffstat context in the checkpoint above.
       - First validation command: #{first_item(get_in(requirements, ["validation", "commands"]))}
       - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
       - Validation command guidance: #{preflight["validation_command_guidance"] || validation_guidance(preflight["toolchain"], open_corrections)}
