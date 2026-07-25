@@ -16217,6 +16217,7 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, "config/config.exs"), "import Config\n")
       File.write!(Path.join(workspace, "config\\config.exs"), "undeclared backslash path\n")
       File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
+      File.write!(Path.join(workspace, "priv/denied.json"), "{}\n")
       File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
       File.write!(Path.join(workspace, "123"), "undeclared\n")
       File.write!(Path.join(workspace, "1K"), "declared ls operand\n")
@@ -16277,6 +16278,12 @@ defmodule SymphonyElixir.CoreTest do
               "expires" => "turn"
             },
             %{
+              "path" => "priv/denied.json",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
               "path" => ".github/workflows/ci.yml",
               "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
               "operation" => "read",
@@ -16290,7 +16297,14 @@ defmodule SymphonyElixir.CoreTest do
             }
           ],
           "conflict_scope" => [],
-          "denied_scope" => []
+          "denied_scope" => [
+            %{
+              "path" => "priv/denied*",
+              "source" => "runtime_contract.denied_scope",
+              "operation" => "read",
+              "expires" => "contract"
+            }
+          ]
         })
 
       File.write!(
@@ -16453,6 +16467,8 @@ defmodule SymphonyElixir.CoreTest do
       unscoped_test_search = "grep -n test tests/e2e/unrelated.spec.ts"
       unclassified_operand_search = grep_command <> " /etc/passwd"
       derived_context_search = "grep -n test tests/e2e/derived-helper.ts"
+      command_substitution_read = "echo $(/bin/cat /etc/passwd)"
+      denied_contract_read = "cat priv/denied.json"
       unsafe_option_search = "grep -n -f /etc/passwd #{test_path}"
       option_pattern_unclassified_search = "grep -n -eSECRET /etc/passwd #{test_path}"
       option_pattern_scoped_search = "grep -n -eSECRET #{test_path}"
@@ -16469,6 +16485,19 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^derived_context_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, derived_context_search, [])
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 derived_context_search,
+                 "handoff_recovery_exact_read_scope"
+               )
+
+      assert {:error, ^command_substitution_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, command_substitution_read, [])
+
+      assert {:error, ^denied_contract_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, denied_contract_read, [])
 
       assert {:error, ^unsafe_option_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, unsafe_option_search, [])

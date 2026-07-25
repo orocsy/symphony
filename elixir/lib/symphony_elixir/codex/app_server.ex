@@ -2450,7 +2450,6 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_binary(pattern) and is_binary(workspace) do
     pattern in @review_rework_forbidden_command_patterns or
       pattern in @fresh_implementation_forbidden_command_patterns or
-      pattern == @handoff_recovery_exact_read_pattern or
       pattern in review_rework_path_guard_patterns(workspace)
   end
 
@@ -3216,11 +3215,12 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_binary(command) and is_map(preflight) and is_binary(workspace) do
     command = unwrap_shell_login_command(command)
     allowed_paths = preflight |> runtime_contract_scope_bundle_read_paths() |> MapSet.new()
+    denied_scopes = runtime_contract_scope_bundle_denied_paths(preflight)
 
     with true <- pure_scope_read_command?(command),
          command_class when is_binary(command_class) <- exact_read_command_class(command),
          paths when is_list(paths) and paths != [] <- scope_read_operand_paths(command, command_class) do
-      Enum.all?(paths, &exact_handoff_path_allowed?(workspace, &1, allowed_paths))
+      Enum.all?(paths, &exact_handoff_path_allowed?(workspace, &1, allowed_paths, denied_scopes))
     else
       _ -> false
     end
@@ -3237,6 +3237,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          git_read_like_candidate?(unwrap_shell_login_command(command)) or
          read_tool_invocation_candidate?(unwrap_shell_login_command(command)) or
          shell_wrapper_read_candidate?(command) or
+         shell_substitution_present?(command) or
          command_parse_failed?(command) or
          command_chain_operator_outside_quotes?(command))
   end
@@ -3278,6 +3279,28 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp runtime_contract_scope_bundle_read_paths(_preflight), do: []
+
+  defp runtime_contract_scope_bundle_denied_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+       when is_map(bundle) do
+    bundle
+    |> Map.get("denied_scope", [])
+    |> List.wrap()
+    |> Enum.flat_map(fn
+      %{"path" => path, "source" => "runtime_contract." <> _} when is_binary(path) ->
+        [normalize_requirement_path(path)]
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp runtime_contract_scope_bundle_denied_paths(_preflight), do: []
+
+  defp shell_substitution_present?(command) when is_binary(command),
+    do: String.contains?(command, ["$(", "`"])
+
+  defp shell_substitution_present?(_command), do: false
 
   defp exact_read_command_class(command) when is_binary(command) do
     case normalized_read_argv(command) do
@@ -3772,11 +3795,12 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp ansi_c_shell_payload?(_command), do: false
 
-  defp exact_handoff_path_allowed?(workspace, path, allowed_paths)
-       when is_binary(workspace) and is_binary(path) do
+  defp exact_handoff_path_allowed?(workspace, path, allowed_paths, denied_scopes)
+       when is_binary(workspace) and is_binary(path) and is_list(denied_scopes) do
     normalized_path = normalize_scope_operand_path(path)
 
     with false <- wildcard_path?(normalized_path),
+         false <- Enum.any?(denied_scopes, &scope_pattern_matches?(normalized_path, &1)),
          true <- MapSet.member?(allowed_paths, normalized_path),
          false <- Path.type(normalized_path) == :absolute,
          {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
@@ -3791,7 +3815,36 @@ defmodule SymphonyElixir.Codex.AppServer do
     _error -> false
   end
 
-  defp exact_handoff_path_allowed?(_workspace, _path, _allowed_paths), do: false
+  defp exact_handoff_path_allowed?(_workspace, _path, _allowed_paths, _denied_scopes), do: false
+
+  defp scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+    cond do
+      scope == "" ->
+        false
+
+      String.ends_with?(scope, "/**") ->
+        prefix = String.trim_trailing(scope, "/**")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.ends_with?(scope, "/*") ->
+        prefix = String.trim_trailing(scope, "/*")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.contains?(scope, "*") ->
+        scope
+        |> Regex.escape()
+        |> String.replace("\\*", ".*")
+        |> then(&Regex.compile!("^#{&1}$"))
+        |> Regex.match?(path)
+
+      true ->
+        path == scope or String.starts_with?(path, scope <> "/")
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scope_pattern_matches?(_path, _scope), do: false
 
   defp wildcard_path?(path) when is_binary(path),
     do: String.contains?(path, ["*", "?", "[", "]", "{", "}"])
