@@ -15748,6 +15748,42 @@ defmodule SymphonyElixir.CoreTest do
              "Continue directly with the smallest in-scope fix for the open correction or current task"
   end
 
+  test "allow-once recovery tells workers to split a denied compound read" do
+    issue = %Issue{
+      identifier: "MT-208",
+      title: "Split bounded read recovery",
+      description: "Recovery flow",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-208",
+      labels: []
+    }
+
+    denied_command =
+      "grep -nE 'test|describe' tests/e2e/ui-state-matrix.spec.ts && " <>
+        "sed -n '1,160p' tests/e2e/ui-state-matrix.spec.ts"
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        policy_violation: %{
+          command: denied_command,
+          pattern: "(^|\\s|[\"'])grep(\\s|$)",
+          attempt: 1,
+          max_attempts: 2,
+          scope_access: %{
+            "operation" => "search",
+            "paths" => ["tests/e2e/ui-state-matrix.spec.ts"],
+            "decision" => "allow_once",
+            "reason_class" => "safe_read_context"
+          }
+        }
+      )
+
+    assert prompt =~ "Do not repeat the denied command verbatim"
+    assert prompt =~ "run each operation as a separate single-purpose command"
+    assert prompt =~ "do not use `&&`, `||`, `;`, or pipes"
+    refute prompt =~ "rerun that exact bounded read/search once"
+  end
+
   test "agent runner allows one denied command recovery for strict implementation review rework" do
     workspace =
       Path.join(
@@ -16138,6 +16174,805 @@ defmodule SymphonyElixir.CoreTest do
              end)
 
       assert :ok = AppServer.command_policy_violation_for_test(workspace, command)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "handoff recovery accepts split reads for exact contract context but rejects the compound form" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-handoff-recovery-split-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-HANDOFF-SPLIT-READ")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      test_path = "tests/e2e/ui-state-matrix.spec.ts"
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        codex_forbidden_command_patterns: [
+          "(^|\\s|[\"'])grep(\\s|$)",
+          "(^|\\s|[\"'])sed\\s+-n(\\s|$)"
+        ]
+      )
+
+      File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      File.mkdir_p!(Path.join(workspace, "tests/e2e/declared-dir"))
+      File.mkdir_p!(Path.join(workspace, "config"))
+      File.mkdir_p!(Path.join(workspace, "priv"))
+      File.mkdir_p!(Path.join(workspace, ".github/workflows"))
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(workspace, test_path),
+        "import './derived-helper';\ntest('discover', () => {});\n"
+      )
+
+      File.write!(Path.join(workspace, "tests/e2e/derived-helper.ts"), "export {};\n")
+      File.write!(Path.join(workspace, "tests/e2e/knowledge-helper.ts"), "export {};\n")
+      File.write!(Path.join(workspace, "tests/e2e/declared-dir/child.ts"), "export {};\n")
+      File.write!(Path.join(workspace, "config/config.exs"), "import Config\n")
+      File.write!(Path.join(workspace, "config\\config.exs"), "undeclared backslash path\n")
+      File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
+      File.write!(Path.join(workspace, "priv/denied.json"), "{}\n")
+      File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
+      File.write!(Path.join(workspace, "123"), "undeclared\n")
+      File.write!(Path.join(workspace, "1K"), "declared ls operand\n")
+      File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-HANDOFF-SPLIT-READ",
+          "write_scope" => [
+            %{
+              "path" => "tests/e2e/desktop-discover.spec.ts",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [
+            %{
+              "path" => test_path,
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/declared-symlink.spec.ts",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/*.spec.ts",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/knowledge-helper.ts",
+              "source" => "knowledge_ledger.shared_context",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "tests/e2e/declared-dir",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "config/config.exs",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "priv/data.json",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "priv/denied.json",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => ".github/workflows/ci.yml",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "1K",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            }
+          ],
+          "conflict_scope" => [],
+          "denied_scope" => [
+            %{
+              "path" => "priv/denied*",
+              "source" => "runtime_contract.denied_scope",
+              "operation" => "read",
+              "expires" => "contract"
+            }
+          ]
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "issue" => "MT-HANDOFF-SPLIT-READ",
+          "branch" => "orocsy/mt-handoff-split-read",
+          "requirements" => %{
+            "ticket_type" => "test-spec",
+            "runtime_contract_status" => "structured",
+            "write_scope" => ["tests/e2e/desktop-discover.spec.ts"],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      issue = %Issue{
+        id: "issue-handoff-split-read",
+        identifier: "MT-HANDOFF-SPLIT-READ",
+        title: "Recover a bounded compound read",
+        description: "Split an exact read chain after the command guard denies its compound form.",
+        state: "Rework",
+        branch_name: "orocsy/mt-handoff-split-read",
+        labels: []
+      }
+
+      grep_command = ~s(grep -nE 'test|describe' #{test_path})
+      sed_command = ~s(sed -n '1,160p' #{test_path})
+      compound_command = grep_command <> " && " <> sed_command
+      wrapped_grep_command = ~s(/bin/zsh -lc "#{grep_command}")
+      wrapped_sed_command = ~s(/bin/zsh -lc "#{sed_command}")
+      wrapped_compound_command = ~s(/bin/zsh -lc "#{compound_command}")
+      bash_wrapped_compound = ~s(/bin/bash -lc "#{compound_command}")
+      sh_wrapped_compound = ~s(sh -lc "#{compound_command}")
+      quoted_bash_grep = ~s(/bin/bash -lc "grep -n \\"test|describe\\" #{test_path}")
+
+      forbidden_patterns = [
+        "(^|\\s|[\"'])grep(\\s|$)",
+        "(^|\\s|[\"'])sed\\s+-n(\\s|$)"
+      ]
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, grep_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, sed_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_grep_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, [])
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, quoted_bash_grep, [])
+
+      assert {:error, ^compound_command, compound_pattern} =
+               AppServer.command_policy_violation_for_test(workspace, compound_command, [])
+
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+      compound_request = SymphonyElixir.ScopeAccess.classify_command(compound_command, preflight)
+
+      assert compound_request["operation"] == "read"
+      assert compound_request["command_class"] == "bounded_read_chain"
+      assert compound_request["paths"] == [test_path]
+      refute compound_request["broad"]
+
+      wrapped_request =
+        SymphonyElixir.ScopeAccess.classify_command(wrapped_compound_command, preflight)
+
+      assert wrapped_request["command_class"] == "bounded_read_chain"
+      assert wrapped_request["paths"] == [test_path]
+      refute wrapped_request["broad"]
+
+      assert {:retry, 1, compound_scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 compound_command,
+                 compound_pattern,
+                 0,
+                 1
+               )
+
+      assert compound_scope_access["decision"] == "allow_once"
+      assert compound_scope_access["reason_class"] == "safe_read_context"
+
+      cross_root_chain =
+        "cat config/config.exs && sed -n '1,20p' priv/data.json && cat .github/workflows/ci.yml"
+
+      cross_root_request = SymphonyElixir.ScopeAccess.classify_command(cross_root_chain, preflight)
+
+      assert cross_root_request["command_class"] == "bounded_read_chain"
+
+      assert cross_root_request["paths"] == [
+               "config/config.exs",
+               "priv/data.json",
+               ".github/workflows/ci.yml"
+             ]
+
+      refute cross_root_request["broad"]
+
+      suffixed_count_chain =
+        "head -q -c 1K config/config.exs && tail -v --bytes=1MiB config/config.exs"
+
+      suffixed_count_request =
+        SymphonyElixir.ScopeAccess.classify_command(suffixed_count_chain, preflight)
+
+      assert suffixed_count_request["command_class"] == "bounded_read_chain"
+      assert suffixed_count_request["paths"] == ["config/config.exs"]
+      refute suffixed_count_request["broad"]
+
+      stdin_read_chain = "head - config/config.exs && cat config/config.exs"
+      stdin_read_request = SymphonyElixir.ScopeAccess.classify_command(stdin_read_chain, preflight)
+
+      assert stdin_read_request["command_class"] == "shell_chain"
+      assert stdin_read_request["broad"]
+
+      abbreviated_follow_chain =
+        "tail --fol config/config.exs && cat config/config.exs"
+
+      abbreviated_follow_request =
+        SymphonyElixir.ScopeAccess.classify_command(abbreviated_follow_chain, preflight)
+
+      assert abbreviated_follow_request["command_class"] == "shell_chain"
+      assert abbreviated_follow_request["broad"]
+
+      normalized_reader_chain =
+        "/bin/cat config/config.exs && env head -n 5 config/config.exs"
+
+      normalized_reader_request =
+        SymphonyElixir.ScopeAccess.classify_command(normalized_reader_chain, preflight)
+
+      assert normalized_reader_request["command_class"] == "bounded_read_chain"
+      assert normalized_reader_request["paths"] == ["config/config.exs"]
+      refute normalized_reader_request["broad"]
+
+      sed_write_chain =
+        "sed -n '1w /tmp/leak' config/config.exs && cat config/config.exs"
+
+      sed_write_request = SymphonyElixir.ScopeAccess.classify_command(sed_write_chain, preflight)
+
+      assert sed_write_request["operation"] == "unknown"
+      assert sed_write_request["command_class"] == "shell_chain"
+      assert sed_write_request["broad"]
+
+      mixed_chain = grep_command <> " && rm -f #{test_path}"
+      mixed_request = SymphonyElixir.ScopeAccess.classify_command(mixed_chain, preflight)
+
+      assert mixed_request["operation"] == "unknown"
+      assert mixed_request["command_class"] == "shell_chain"
+      assert mixed_request["broad"]
+
+      assert {:block, mixed_correction} =
+               SymphonyElixir.ScopeAccess.Controller.decide(mixed_request, preflight, workspace)
+
+      assert get_in(mixed_correction, [:guard, "reason_class"]) == "unclassified_scope_request"
+
+      assert {:error, ^wrapped_compound_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_compound_command, [])
+
+      assert {:error, ^bash_wrapped_compound, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, bash_wrapped_compound, [])
+
+      assert {:error, ^sh_wrapped_compound, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, sh_wrapped_compound, [])
+
+      unscoped_test_search = "grep -n test tests/e2e/unrelated.spec.ts"
+      unclassified_operand_search = grep_command <> " /etc/passwd"
+      derived_context_search = "grep -n test tests/e2e/derived-helper.ts"
+      command_substitution_read = "echo $(/bin/cat /etc/passwd)"
+      denied_contract_read = "cat priv/denied.json"
+      unsafe_option_search = "grep -n -f /etc/passwd #{test_path}"
+      option_pattern_unclassified_search = "grep -n -eSECRET /etc/passwd #{test_path}"
+      option_pattern_scoped_search = "grep -n -eSECRET #{test_path}"
+      symlink_search = "grep -n test tests/e2e/declared-symlink.spec.ts"
+      glob_search = "grep -n test tests/e2e/*.spec.ts"
+      disguised_mutation = "rm -f grep cat #{test_path} /tmp/sentinel"
+      knowledge_context_search = "grep -n test tests/e2e/knowledge-helper.ts"
+
+      assert {:error, ^unscoped_test_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unscoped_test_search, [])
+
+      assert {:error, ^unclassified_operand_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unclassified_operand_search, [])
+
+      assert {:error, ^derived_context_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, derived_context_search, [])
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 derived_context_search,
+                 "handoff_recovery_exact_read_scope"
+               )
+
+      assert {:error, ^command_substitution_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, command_substitution_read, [])
+
+      assert {:error, ^denied_contract_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, denied_contract_read, [])
+
+      assert {:error, ^unsafe_option_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unsafe_option_search, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, option_pattern_scoped_search, [])
+
+      assert {:error, ^option_pattern_unclassified_search, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 option_pattern_unclassified_search,
+                 []
+               )
+
+      assert {:error, ^symlink_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, symlink_search, [])
+
+      assert {:error, ^glob_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, glob_search, [])
+
+      assert {:error, ^disguised_mutation, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, disguised_mutation, [])
+
+      assert {:error, ^knowledge_context_search, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, knowledge_context_search, [])
+
+      assert {:error, ^grep_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, grep_command, forbidden_patterns)
+
+      rg_encoding_command = "rg -n -E utf-8 test #{test_path}"
+      rg_follow_command = "rg -nL test #{test_path}"
+      rg_command = "rg -n test #{test_path}"
+      configured_rg_pattern = "(^|\\s|[\"'])rg(\\s|$)"
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, rg_encoding_command, [])
+
+      assert {:error, ^rg_follow_command, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, rg_follow_command, [])
+
+      assert {:error, ^rg_command, ^configured_rg_pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 rg_command,
+                 [configured_rg_pattern]
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, "cat config/config.exs", [])
+
+      undeclared_cat = "cat /etc/passwd"
+      path_qualified_cat = "/bin/cat /etc/passwd"
+      workspace_named_cat = "./cat config/config.exs"
+      temporary_named_cat = "/tmp/cat config/config.exs"
+      env_wrapped_cat = "env cat /etc/passwd"
+      untrusted_env_wrapped_scoped_cat = "/tmp/env cat config/config.exs"
+      untrusted_command_wrapped_scoped_cat = "./command cat config/config.exs"
+      path_qualified_scoped_cat = "/bin/cat config/config.exs"
+      env_wrapped_scoped_cat = "env cat config/config.exs"
+      env_path_wrapped_rg = "env PATH=. rg -n test config/config.exs"
+      env_chdir_wrapped_cat = "env -C /tmp cat /etc/passwd"
+      env_split_wrapped_cat = "env -S 'cat /etc/passwd'"
+      numeric_cat = "cat config/config.exs 123"
+      numeric_nl = "nl config/config.exs 123"
+      stdin_cat = "cat - config/config.exs"
+      stdin_nl = "nl - config/config.exs"
+      stdin_head = "head - config/config.exs"
+      stdin_tail = "tail - config/config.exs"
+      directory_rg = "rg -n test tests/e2e/declared-dir"
+      mutating_chain = sed_command <> " && rm -f #{test_path}"
+      ansi_c_chain = "/bin/bash -lc $'cat config/config.exs\\nrm -f config/config.exs'"
+      ansi_c_non_login_chain = "/bin/bash -c $'cat config/config.exs\\nrm -f config/config.exs'"
+
+      ansi_c_long_login_chain =
+        "/bin/bash --login -c $'cat config/config.exs\\nrm -f config/config.exs'"
+
+      ansi_c_clustered_login_chain =
+        "/bin/bash -cl $'cat config/config.exs\\nrm -f config/config.exs'"
+
+      quoted_shell_chain_with_argv =
+        "/bin/bash -c 'cat config/config.exs; rm -f config/config.exs' worker-zero"
+
+      env_wrapped_shell_read = "env bash -c 'cat /etc/passwd'"
+      command_wrapped_shell_read = "command bash -c 'cat /etc/passwd'"
+      generic_wrapped_shell_read = "nice -n 5 bash -c 'cat /etc/passwd'"
+      delimited_wrapped_shell_read = "nice -- bash -c 'cat /etc/passwd'"
+      composed_wrapped_shell_read = "env nice bash -c 'cat /etc/passwd'"
+      alternate_shell_read = "/usr/bin/dash -c 'cat /etc/passwd'"
+
+      fish_init_wrapped_git_status =
+        "/usr/bin/fish --init-command='rm -rf target' -c 'git status --short --branch'"
+
+      single_quote_escape_chain = "cat 'config/config.exs\\' ; rm -f target"
+      wrapped_git_status = "/bin/bash -lc 'git status --short --branch'"
+      wrapped_git_add = "/bin/bash -lc 'git add diff'"
+      wrapped_git_commit = "/bin/bash -lc 'git commit -m log'"
+      wrapped_git_commit_reuse = "/bin/bash -lc 'git commit -c cat'"
+      wrapped_git_commit_file = "/bin/bash -lc 'git commit -F /etc/passwd'"
+      untrusted_wrapped_git_status = "/tmp/bash -lc 'git status --short --branch'"
+
+      wrapped_git_status_with_shell_option =
+        "/bin/bash -o pipefail -lc 'git status --short --branch'"
+
+      env_startup_wrapped_git_status =
+        "env BASH_ENV=evil /bin/bash -lc 'git status --short --branch'"
+
+      init_file_wrapped_git_status =
+        "/bin/bash --init-file evil -i -c 'git status --short --branch'"
+
+      shell_exec_cat = "/bin/bash -lc 'exec cat /etc/passwd'"
+      shell_newline_cat = "/bin/bash -lc 'echo ok\ncat /etc/passwd'"
+      zsh_process_substitution = "/bin/zsh -lc 'git status =(rm -rf target)'"
+      shell_delimiter_script = "/bin/bash -- -c 'git status'"
+      assigned_cat = "FOO=1 cat /etc/passwd"
+      exec_named_cat = "exec -a harmless cat /etc/passwd"
+      legacy_nice_cat = "nice -5 cat /etc/passwd"
+      backslash_named_cat = "cat 'config\\config.exs'"
+
+      tail_follow = "tail -f config/config.exs"
+      tail_retry_follow = "tail -F config/config.exs"
+      tail_clustered_follow = "tail -fq config/config.exs"
+      tail_clustered_retry_follow = "tail -Fq config/config.exs"
+      tail_abbreviated_follow = "tail --fol config/config.exs"
+      finite_tail = "tail -n 5 config/config.exs"
+      finite_flagged_head = "head -q -n 5 config/config.exs"
+      finite_flagged_tail = "tail -v --lines 5 config/config.exs"
+      finite_suffixed_head = "head -c 1K config/config.exs"
+      finite_suffixed_tail = "tail -v --bytes=1MiB config/config.exs"
+      directory_ls = "ls tests/e2e"
+      value_option_ls = "ls --block-size 1K"
+      git_diff_read = "git diff -- config/config.exs"
+      git_log_read = "git log -- config/config.exs"
+      git_global_diff_read = "git --no-pager diff -- /etc/passwd"
+      git_global_log_read = "git -P log -p -- /etc/passwd"
+
+      git_global_scoped_diff =
+        "git --no-pager diff --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_global_scoped_log =
+        "git -P log --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_paginated_scoped_diff =
+        "git -p diff --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_paginated_scoped_log =
+        "git --paginate log --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_signed_scoped_log =
+        "git log --show-signature --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_diff_order_file =
+        "git diff -O /etc/passwd --no-ext-diff --no-textconv -- config/config.exs"
+
+      git_no_index_read =
+        "git diff --no-ext-diff --no-textconv --no-index /etc/passwd -- config/config.exs"
+
+      git_ls_files_exclude_file = "git ls-files -X /etc/passwd -- config/config.exs"
+
+      git_ls_files_per_directory =
+        "git ls-files --exclude-per-directory=/etc/passwd -- config/config.exs"
+
+      quoted_git_diff_order_file =
+        "git diff '-O/etc/passwd' --no-ext-diff --no-textconv -- config/config.exs"
+
+      quoted_git_ls_files_exclude_file =
+        "git ls-files '-X/etc/passwd' -- config/config.exs"
+
+      abbreviated_git_exclude_file =
+        "git ls-files --exclude-f=/etc/passwd -- config/config.exs"
+
+      git_no_replace_commit = "git --no-replace-objects commit -m log"
+      git_attr_source_log = "git --attr-source HEAD log -- /etc/passwd"
+
+      safe_abbreviated_git_diff =
+        "git diff --no-in --no-ext-diff --no-textconv -- config/config.exs"
+
+      sed_write = "sed -n '1w /tmp/leak' config/config.exs"
+
+      assert {:error, ^undeclared_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, undeclared_cat, [])
+
+      assert {:error, ^path_qualified_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, path_qualified_cat, [])
+
+      assert {:error, ^workspace_named_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, workspace_named_cat, [])
+
+      assert {:error, ^temporary_named_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, temporary_named_cat, [])
+
+      assert {:error, ^env_wrapped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_wrapped_cat, [])
+
+      assert {:error, ^untrusted_env_wrapped_scoped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 untrusted_env_wrapped_scoped_cat,
+                 []
+               )
+
+      assert {:error, ^untrusted_command_wrapped_scoped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 untrusted_command_wrapped_scoped_cat,
+                 []
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, path_qualified_scoped_cat, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, env_wrapped_scoped_cat, [])
+
+      assert {:error, ^env_path_wrapped_rg, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_path_wrapped_rg, [])
+
+      assert {:error, ^env_chdir_wrapped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_chdir_wrapped_cat, [])
+
+      assert {:error, ^env_split_wrapped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_split_wrapped_cat, [])
+
+      assert {:error, ^numeric_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, numeric_cat, [])
+
+      assert {:error, ^numeric_nl, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, numeric_nl, [])
+
+      assert {:error, ^stdin_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, stdin_cat, [])
+
+      assert {:error, ^stdin_nl, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, stdin_nl, [])
+
+      assert {:error, ^stdin_head, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, stdin_head, [])
+
+      assert {:error, ^stdin_tail, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, stdin_tail, [])
+
+      assert {:error, ^directory_rg, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, directory_rg, [])
+
+      assert {:error, ^mutating_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, mutating_chain, [])
+
+      assert {:error, ^ansi_c_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_chain, [])
+
+      assert {:error, ^ansi_c_non_login_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_non_login_chain, [])
+
+      assert {:error, ^ansi_c_long_login_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_long_login_chain, [])
+
+      assert {:error, ^ansi_c_clustered_login_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, ansi_c_clustered_login_chain, [])
+
+      assert {:error, ^quoted_shell_chain_with_argv, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, quoted_shell_chain_with_argv, [])
+
+      assert {:error, ^env_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, env_wrapped_shell_read, [])
+
+      assert {:error, ^command_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, command_wrapped_shell_read, [])
+
+      assert {:error, ^generic_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, generic_wrapped_shell_read, [])
+
+      assert {:error, ^delimited_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, delimited_wrapped_shell_read, [])
+
+      assert {:error, ^composed_wrapped_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, composed_wrapped_shell_read, [])
+
+      assert {:error, ^alternate_shell_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, alternate_shell_read, [])
+
+      assert {:error, ^fish_init_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 fish_init_wrapped_git_status,
+                 []
+               )
+
+      assert {:error, ^single_quote_escape_chain, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, single_quote_escape_chain, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_status, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_add, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_commit, [])
+
+      assert {:error, ^wrapped_git_commit_reuse, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_commit_reuse, [])
+
+      assert {:error, ^wrapped_git_commit_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, wrapped_git_commit_file, [])
+
+      assert {:error, ^untrusted_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, untrusted_wrapped_git_status, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 wrapped_git_status_with_shell_option,
+                 []
+               )
+
+      assert {:error, ^env_startup_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 env_startup_wrapped_git_status,
+                 []
+               )
+
+      assert {:error, ^init_file_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 init_file_wrapped_git_status,
+                 []
+               )
+
+      assert {:error, ^shell_exec_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, shell_exec_cat, [])
+
+      assert {:error, ^shell_newline_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, shell_newline_cat, [])
+
+      assert {:error, ^zsh_process_substitution, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, zsh_process_substitution, [])
+
+      assert {:error, ^shell_delimiter_script, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, shell_delimiter_script, [])
+
+      assert {:error, ^assigned_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, assigned_cat, [])
+
+      assert {:error, ^exec_named_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, exec_named_cat, [])
+
+      assert {:error, ^legacy_nice_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, legacy_nice_cat, [])
+
+      assert {:error, ^backslash_named_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, backslash_named_cat, [])
+
+      assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_follow, [])
+
+      assert {:error, ^tail_retry_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_retry_follow, [])
+
+      assert {:error, ^tail_clustered_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_clustered_follow, [])
+
+      assert {:error, ^tail_clustered_retry_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_clustered_retry_follow, [])
+
+      assert {:error, ^tail_abbreviated_follow, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, tail_abbreviated_follow, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_tail, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_flagged_head, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_flagged_tail, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_suffixed_head, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, finite_suffixed_tail, [])
+
+      assert {:error, ^directory_ls, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, directory_ls, [])
+
+      assert {:error, ^value_option_ls, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, value_option_ls, [])
+
+      assert {:error, ^git_diff_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_diff_read, [])
+
+      assert {:error, ^git_log_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_log_read, [])
+
+      assert {:error, ^git_global_diff_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_global_diff_read, [])
+
+      assert {:error, ^git_global_log_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_global_log_read, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, git_global_scoped_diff, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, git_global_scoped_log, [])
+
+      assert {:error, ^git_paginated_scoped_diff, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_paginated_scoped_diff, [])
+
+      assert {:error, ^git_paginated_scoped_log, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_paginated_scoped_log, [])
+
+      assert {:error, ^git_signed_scoped_log, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_signed_scoped_log, [])
+
+      assert {:error, ^git_diff_order_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_diff_order_file, [])
+
+      assert {:error, ^git_no_index_read, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_no_index_read, [])
+
+      assert {:error, ^git_ls_files_exclude_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_ls_files_exclude_file, [])
+
+      assert {:error, ^git_ls_files_per_directory, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_ls_files_per_directory, [])
+
+      assert {:error, ^quoted_git_diff_order_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, quoted_git_diff_order_file, [])
+
+      assert {:error, ^quoted_git_ls_files_exclude_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 quoted_git_ls_files_exclude_file,
+                 []
+               )
+
+      assert {:error, ^abbreviated_git_exclude_file, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 abbreviated_git_exclude_file,
+                 []
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, git_no_replace_commit, [])
+
+      assert {:error, ^git_attr_source_log, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, git_attr_source_log, [])
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, safe_abbreviated_git_diff, [])
+
+      assert {:error, ^sed_write, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, sed_write, [])
+
+      preflight_path = Path.join(state_dir, "dispatch-preflight.json")
+      review_preflight = preflight_path |> File.read!() |> Jason.decode!() |> Map.put("mode", "review_rework")
+      File.write!(preflight_path, Jason.encode!(review_preflight))
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 rg_command,
+                 [configured_rg_pattern]
+               )
+
+      piped_read = sed_command <> "|tee tests/e2e/unscoped-output.spec.ts"
+      unspaced_chain = sed_command <> ";rm -rf target"
+
+      assert {:error, ^piped_read, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, piped_read, forbidden_patterns)
+
+      assert {:error, ^unspaced_chain, _pattern} =
+               AppServer.command_policy_violation_for_test(workspace, unspaced_chain, forbidden_patterns)
     after
       File.rm_rf(test_root)
     end

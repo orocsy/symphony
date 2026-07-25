@@ -32,6 +32,13 @@ feedback. Review rework permits one bounded local checkpoint command,
 `git log -N --oneline [--decorate|--no-decorate]` for `N` from 1 through 20. Other `git log`
 forms, including revision/path selection and content-producing output, remain denied.
 
+During structured handoff recovery, the command guard may admit a single pure read only when every
+parsed file operand is named directly by the active Runtime Contract's `write_scope` or
+`read_context`. The runtime rejects derived/imported context, absolute paths, wildcard operands,
+workspace symlink escapes, unsafe file-fed search options, shell composition, and substitutions.
+Configured operator bans always take precedence. A recoverable compound read is split into separate
+commands by the worker; the compound command itself is never authorized.
+
 ### Structured Runtime Contracts
 
 Issues may include a fenced YAML `## Runtime Contract`. For these issues, the

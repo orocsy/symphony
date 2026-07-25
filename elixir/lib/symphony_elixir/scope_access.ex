@@ -45,6 +45,7 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp command_request(command, policy_bundle) do
     [
+      &bounded_read_chain_request/2,
       &shell_chain_request/2,
       &sed_read_request/2,
       &simple_read_request/2,
@@ -59,6 +60,249 @@ defmodule SymphonyElixir.ScopeAccess do
     ]
     |> Enum.find_value(fn classifier -> classifier.(command, policy_bundle) end)
   end
+
+  defp bounded_read_chain_request(command, policy_bundle) do
+    with {:ok, segments} when length(segments) > 1 <- split_read_chain(command),
+         requests when length(requests) == length(segments) <-
+           Enum.map(segments, &bounded_read_segment_request(&1, policy_bundle)),
+         true <- Enum.all?(requests, &bounded_exact_read_request?/1) do
+      paths = requests |> Enum.flat_map(& &1["paths"]) |> Enum.uniq()
+      request(command, "read", "bounded_read_chain", paths, false, policy_bundle)
+    else
+      _ -> nil
+    end
+  end
+
+  defp bounded_read_segment_request(command, policy_bundle) do
+    case exact_read_segment(command) do
+      {:ok, operation, command_class, paths} ->
+        request(command, operation, command_class, paths, broad_paths?(paths), policy_bundle)
+
+      :error ->
+        nil
+    end
+  end
+
+  defp exact_read_segment(command) when is_binary(command) do
+    case normalized_segment_argv(command) do
+      ["sed", "-n", slice, path] ->
+        if Regex.match?(~r/\A\d+(?:,\d+)?p\z/, slice),
+          do: exact_segment_paths("read", "bounded_file_read", [path]),
+          else: :error
+
+      [tool | args] when tool in ["cat", "head", "tail", "nl"] ->
+        case simple_read_segment_paths(tool, args) do
+          [_ | _] = paths -> exact_segment_paths("read", "bounded_file_read", paths)
+          _ -> :error
+        end
+
+      [tool | args] when tool in ["rg", "grep"] ->
+        case search_segment_paths(tool, args) do
+          [_ | _] = paths -> exact_segment_paths("search", "bounded_file_search", paths)
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
+  rescue
+    _error -> :error
+  end
+
+  defp exact_read_segment(_command), do: :error
+
+  defp normalized_segment_argv(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> normalize_segment_tokens()
+  rescue
+    _error -> :unclassified
+  end
+
+  defp normalized_segment_argv(_command), do: :unclassified
+
+  defp normalize_segment_tokens([executable | args]) do
+    case Path.basename(executable) do
+      "env" -> args |> drop_optional_segment_delimiter() |> normalize_direct_segment()
+      "command" -> args |> drop_optional_segment_delimiter() |> normalize_direct_segment()
+      _ -> normalize_direct_segment([executable | args])
+    end
+  end
+
+  defp normalize_segment_tokens(_tokens), do: :unclassified
+
+  defp drop_optional_segment_delimiter(["--" | rest]), do: rest
+  defp drop_optional_segment_delimiter(args), do: args
+
+  defp normalize_direct_segment([executable | args]) do
+    tool = Path.basename(executable)
+
+    if tool in ["sed", "cat", "head", "tail", "nl", "rg", "grep"] and
+         (executable == tool or Path.dirname(executable) in ["/bin", "/usr/bin"]),
+       do: [tool | args],
+       else: :unclassified
+  end
+
+  defp normalize_direct_segment(_args), do: :unclassified
+
+  defp exact_segment_paths(operation, command_class, paths) do
+    if Enum.all?(paths, &exact_relative_operand?/1) do
+      {:ok, operation, command_class, paths}
+    else
+      :error
+    end
+  end
+
+  defp simple_read_segment_paths("cat", args), do: optionless_segment_paths(args)
+  defp simple_read_segment_paths("nl", args), do: optionless_segment_paths(args)
+
+  defp simple_read_segment_paths(tool, args) when tool in ["head", "tail"] do
+    parse_finite_segment_operands(args, [], false, tool)
+  end
+
+  defp simple_read_segment_paths(_tool, _args), do: :error
+
+  defp parse_finite_segment_operands([], operands, _after_options?, _tool) do
+    operands |> Enum.reverse() |> optionless_segment_paths()
+  end
+
+  defp parse_finite_segment_operands(["--" | rest], operands, false, tool),
+    do: parse_finite_segment_operands(rest, operands, true, tool)
+
+  defp parse_finite_segment_operands([option, count | rest], operands, false, tool)
+       when option in ["-n", "--lines", "-c", "--bytes"] do
+    if finite_count_token?(count),
+      do: parse_finite_segment_operands(rest, operands, false, tool),
+      else: :error
+  end
+
+  defp parse_finite_segment_operands([token | rest], operands, after_options?, tool)
+       when is_binary(token) do
+    cond do
+      token == "-" -> :error
+      after_options? -> parse_finite_segment_operands(rest, [token | operands], true, tool)
+      finite_inline_count_option?(token) -> parse_finite_segment_operands(rest, operands, false, tool)
+      finite_head_tail_flag?(tool, token) -> parse_finite_segment_operands(rest, operands, false, tool)
+      String.starts_with?(token, "-") -> :error
+      true -> parse_finite_segment_operands(rest, [token | operands], false, tool)
+    end
+  end
+
+  defp parse_finite_segment_operands(_args, _operands, _after_options?, _tool), do: :error
+
+  defp finite_count_token?(count) when is_binary(count),
+    do: Regex.match?(~r/\A[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, count)
+
+  defp finite_count_token?(_count), do: false
+
+  defp finite_inline_count_option?(option) when is_binary(option) do
+    Regex.match?(~r/\A-(?:n|c)?[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option) or
+      Regex.match?(~r/\A--(?:lines|bytes)=[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option)
+  end
+
+  defp finite_inline_count_option?(_option), do: false
+
+  defp finite_head_tail_flag?(tool, option) when tool in ["head", "tail"] and is_binary(option) do
+    option in ["-q", "-v", "-z", "--quiet", "--silent", "--verbose", "--zero-terminated"] or
+      Regex.match?(~r/\A-[qvz]+\z/, option)
+  end
+
+  defp finite_head_tail_flag?(_tool, _option), do: false
+
+  defp optionless_segment_paths(args) when is_list(args) do
+    if args != [] and Enum.all?(args, &(is_binary(&1) and not String.starts_with?(&1, "-"))),
+      do: args,
+      else: :error
+  end
+
+  defp optionless_segment_paths(_args), do: :error
+
+  defp search_segment_paths(tool, args) when tool in ["rg", "grep"] and is_list(args) do
+    case parse_search_segment_args(tool, args, false, []) do
+      {:ok, true, paths} -> Enum.reverse(paths)
+      {:ok, false, paths} -> paths |> Enum.reverse() |> Enum.drop(1)
+      _ -> :error
+    end
+  end
+
+  defp search_segment_paths(_tool, _args), do: :error
+
+  defp parse_search_segment_args(_tool, [], pattern_from_option?, paths),
+    do: {:ok, pattern_from_option?, paths}
+
+  defp parse_search_segment_args(_tool, ["--" | rest], pattern_from_option?, paths),
+    do: {:ok, pattern_from_option?, Enum.reverse(rest) ++ paths}
+
+  defp parse_search_segment_args(tool, [option, pattern | rest], _pattern_from_option?, paths)
+       when option in ["-e", "--regexp"] and is_binary(pattern),
+       do: parse_search_segment_args(tool, rest, true, paths)
+
+  defp parse_search_segment_args("rg", [option, encoding | rest], pattern_from_option?, paths)
+       when option in ["-E", "--encoding"] and is_binary(encoding),
+       do: parse_search_segment_args("rg", rest, pattern_from_option?, paths)
+
+  defp parse_search_segment_args(tool, [option | rest], pattern_from_option?, paths)
+       when is_binary(option) do
+    cond do
+      Regex.match?(~r/\A-e.+\z/, option) or String.starts_with?(option, "--regexp=") ->
+        parse_search_segment_args(tool, rest, true, paths)
+
+      tool == "rg" and
+          (Regex.match?(~r/\A-E.+\z/, option) or String.starts_with?(option, "--encoding=")) ->
+        parse_search_segment_args(tool, rest, pattern_from_option?, paths)
+
+      safe_search_segment_flag?(tool, option) ->
+        parse_search_segment_args(tool, rest, pattern_from_option?, paths)
+
+      String.starts_with?(option, "-") ->
+        :error
+
+      true ->
+        parse_search_segment_args(tool, rest, pattern_from_option?, [option | paths])
+    end
+  end
+
+  defp parse_search_segment_args(_tool, _args, _pattern_from_option?, _paths), do: :error
+
+  defp safe_search_segment_flag?(tool, option) when tool in ["rg", "grep"] do
+    short_flags = if tool == "grep", do: ~r/\A-[nEHhIiJLlOoPqsvwxyz]+\z/, else: ~r/\A-[nHhIiJlOoPqsvwxyz]+\z/
+
+    Regex.match?(short_flags, option) or
+      option in [
+        "--line-number",
+        "--extended-regexp",
+        "--fixed-strings",
+        "--ignore-case",
+        "--word-regexp",
+        "--invert-match",
+        "--count",
+        "--files-with-matches",
+        "--files-without-match",
+        "--no-messages",
+        "--text",
+        "--binary",
+        "--null",
+        "--only-matching",
+        "--quiet"
+      ]
+  end
+
+  defp safe_search_segment_flag?(_tool, _option), do: false
+
+  defp exact_relative_operand?(path) when is_binary(path) do
+    path = normalize_path(path)
+
+    path != "" and Path.type(path) != :absolute and
+      not String.contains?(path, ["*", "?", "[", "]", "{", "}"])
+  end
+
+  defp exact_relative_operand?(_path), do: false
+
+  defp bounded_exact_read_request?(%{"operation" => operation, "paths" => [_ | _], "broad" => false})
+       when operation in ["read", "search"],
+       do: true
+
+  defp bounded_exact_read_request?(_request), do: false
 
   defp shell_chain_request(command, policy_bundle) do
     if command_chain_operator?(command) do
@@ -364,6 +608,7 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp command_chain_operator?(command) when is_binary(command) do
     command
+    |> unwrap_shell_payload()
     |> strip_quoted_text()
     |> String.contains?(["&&", "||", ";", "|"])
   end
@@ -375,6 +620,83 @@ defmodule SymphonyElixir.ScopeAccess do
     |> String.replace(~r/"(?:\\.|[^"\\])*"/, ~s(""))
     |> String.replace(~r/'(?:\\.|[^'\\])*'/, "''")
   end
+
+  defp split_read_chain(command) when is_binary(command) do
+    command
+    |> unwrap_shell_payload()
+    |> String.graphemes()
+    |> split_read_chain_chars(nil, false, [], [], false)
+  end
+
+  defp split_read_chain(_command), do: :error
+
+  defp split_read_chain_chars([], nil, false, current, parts, true) do
+    case chain_segment(current) do
+      "" -> :error
+      segment -> {:ok, Enum.reverse([segment | parts])}
+    end
+  end
+
+  defp split_read_chain_chars([], _quote, _escaped?, _current, _parts, _found?), do: :error
+
+  defp split_read_chain_chars([char | rest], quote, true, current, parts, found?) do
+    split_read_chain_chars(rest, quote, false, [char, "\\" | current], parts, found?)
+  end
+
+  defp split_read_chain_chars(["\\" | rest], quote, false, current, parts, found?)
+       when quote in ["'", "\""] do
+    split_read_chain_chars(rest, quote, true, current, parts, found?)
+  end
+
+  defp split_read_chain_chars([char | rest], nil, false, current, parts, found?)
+       when char in ["'", "\""] do
+    split_read_chain_chars(rest, char, false, [char | current], parts, found?)
+  end
+
+  defp split_read_chain_chars([char | rest], char, false, current, parts, found?) do
+    split_read_chain_chars(rest, nil, false, [char | current], parts, found?)
+  end
+
+  defp split_read_chain_chars(["&", "&" | rest], nil, false, current, parts, _found?) do
+    case chain_segment(current) do
+      "" -> :error
+      segment -> split_read_chain_chars(rest, nil, false, [], [segment | parts], true)
+    end
+  end
+
+  defp split_read_chain_chars([char | _rest], nil, false, _current, _parts, _found?)
+       when char in ["&", "|", ";", "<", ">", "`"],
+       do: :error
+
+  defp split_read_chain_chars(["$", "(" | _rest], nil, false, _current, _parts, _found?),
+    do: :error
+
+  defp split_read_chain_chars([char | rest], quote, false, current, parts, found?) do
+    split_read_chain_chars(rest, quote, false, [char | current], parts, found?)
+  end
+
+  defp chain_segment(chars), do: chars |> Enum.reverse() |> Enum.join() |> String.trim()
+
+  defp unwrap_shell_payload(command) when is_binary(command) do
+    case Regex.run(~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+-(?:l)?c\s+(.+)\z/, String.trim(command), capture: :all_but_first) do
+      [payload] -> unquote_shell_payload(String.trim(payload))
+      _ -> command
+    end
+  end
+
+  defp unwrap_shell_payload(command), do: command
+
+  defp unquote_shell_payload(<<quote::binary-size(1), rest::binary>>) when quote in ["'", "\""] do
+    if String.ends_with?(rest, quote) do
+      rest
+      |> binary_part(0, byte_size(rest) - 1)
+      |> String.replace("\\#{quote}", quote)
+    else
+      quote <> rest
+    end
+  end
+
+  defp unquote_shell_payload(payload), do: payload
 
   defp normalize_paths(paths) when is_list(paths) do
     paths

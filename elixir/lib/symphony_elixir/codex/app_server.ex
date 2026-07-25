@@ -66,6 +66,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @review_rework_git_diff_base_pattern "git_diff_base_branch_without_path_scope"
   @review_rework_dirty_validated_handoff_recheck_pattern "dirty_validated_handoff_recheck_before_commit"
   @review_rework_git_log_pattern "(^|\\s|[\"'])git\\s+log(\\s|$)"
+  @handoff_recovery_exact_read_pattern "handoff_recovery_exact_read_scope"
   @review_rework_forbidden_command_patterns [
     @review_rework_command_chain_pattern,
     @review_rework_dirty_validated_handoff_recheck_pattern,
@@ -892,6 +893,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     base_paths =
       (review_rework_feedback_paths(preflight) ++
          review_rework_requirement_paths(preflight) ++
+         review_rework_scope_bundle_read_paths(preflight) ++
          review_rework_issue_brief_paths(preflight, workspace) ++
          review_rework_referenced_api_route_paths(preflight, workspace) ++
          review_rework_correction_paths(workspace) ++
@@ -2195,6 +2197,8 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_list(patterns) do
     command = command_text(payload)
     command_for_patterns = command_for_forbidden_patterns(command)
+    configured_pattern = configured_forbidden_command_pattern(command_for_patterns, command_guard)
+    structured_handoff_read? = structured_handoff_read_candidate?(command_for_patterns, workspace)
 
     cond do
       is_nil(command) ->
@@ -2214,6 +2218,22 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       dirty_validated_handoff_recheck_before_commit?(command_for_patterns, workspace) ->
         {:error, command, @review_rework_dirty_validated_handoff_recheck_pattern}
+
+      structured_handoff_recovery?(workspace) and ansi_c_shell_payload?(command_for_patterns) ->
+        {:error, command, @handoff_recovery_exact_read_pattern}
+
+      structured_handoff_read? and is_binary(configured_pattern) ->
+        {:error, command, configured_pattern}
+
+      structured_handoff_read? and safe_wrapped_handoff_delivery_command?(command_for_patterns) ->
+        :ok
+
+      structured_handoff_read? and
+          structured_handoff_exact_read_allowed?(command_for_patterns, workspace) ->
+        :ok
+
+      structured_handoff_read? ->
+        {:error, command, @handoff_recovery_exact_read_pattern}
 
       match = first_matching_command_pattern(command_for_patterns, patterns) ->
         cond do
@@ -2238,13 +2258,18 @@ defmodule SymphonyElixir.Codex.AppServer do
           grep_pattern?(match) and scoped_conflict_marker_scan_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          grep_pattern?(match) and scoped_file_grep_allowed?(command_for_patterns, workspace) ->
+          grep_pattern?(match) and
+            configured_scope_exception_allowed?(command_for_patterns, command_guard, workspace) and
+              scoped_file_grep_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          rg_pattern?(match) and scoped_file_rg_allowed?(command_for_patterns, workspace) ->
+          rg_pattern?(match) and
+            configured_scope_exception_allowed?(command_for_patterns, command_guard, workspace) and
+              scoped_file_rg_allowed?(command_for_patterns, workspace) ->
             :ok
 
-          review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
+          configured_scope_exception_allowed?(command_for_patterns, command_guard, workspace) and
+              review_rework_missing_referenced_read_allowed?(command_for_patterns, workspace) ->
             :ok
 
           true ->
@@ -2276,10 +2301,21 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp configured_forbidden_command_match?(command, %{configured_patterns: patterns})
        when is_binary(command) and is_list(patterns) do
-    not is_nil(first_matching_command_pattern(command, patterns))
+    not is_nil(configured_forbidden_command_pattern(command, %{configured_patterns: patterns}))
   end
 
   defp configured_forbidden_command_match?(_command, _command_guard), do: false
+
+  defp configured_forbidden_command_pattern(command, %{configured_patterns: patterns})
+       when is_binary(command) and is_list(patterns),
+       do: first_matching_command_pattern(command, patterns)
+
+  defp configured_forbidden_command_pattern(_command, _command_guard), do: nil
+
+  defp configured_scope_exception_allowed?(command, command_guard, workspace) do
+    dispatch_preflight_mode(workspace) != "handoff_recovery" or
+      not configured_forbidden_command_match?(command, command_guard)
+  end
 
   defp record_scope_access_events(%{workspace: workspace}, command, pattern)
        when is_binary(workspace) and is_binary(command) and is_binary(pattern) do
@@ -2462,27 +2498,29 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp all_scope_read_operands_classified?(_command, _request), do: false
 
   defp scope_read_operand_paths(command, command_class) when is_binary(command) do
-    case {command_class, OptionParser.split(command)} do
+    case {command_class, normalized_read_argv(command)} do
       {"bounded_file_read", ["sed" | args]} ->
         args |> Enum.reject(&scope_read_option_token?/1) |> List.last() |> List.wrap()
 
-      {"bounded_file_read", [tool | args]} when tool in ["cat", "head", "tail", "nl"] ->
+      {"bounded_file_read", [tool | args]} when tool in ["cat", "nl"] ->
         scope_read_non_option_operands(args)
+
+      {"bounded_file_read", [tool | args]} when tool in ["head", "tail"] ->
+        finite_head_tail_scope_operands(tool, args)
 
       {"bounded_file_search", [tool | args]} when tool in ["rg", "grep"] ->
-        args
-        |> scope_read_non_option_operands()
-        |> case do
-          [_pattern | paths] -> paths
-          _ -> []
-        end
+        search_scope_read_operand_paths(tool, args)
 
       {"directory_listing", ["ls" | args]} ->
-        scope_read_non_option_operands(args)
+        ls_scope_read_operands(args)
 
-      {command_class, ["git", _subcommand | args]}
+      {command_class, ["git" | args]}
       when command_class in ["git_diff", "git_discovery"] ->
-        git_scope_read_operands(args)
+        with {:ok, _subcommand, read_args} <- git_read_subcommand_and_args(args) do
+          git_scope_read_operands(read_args)
+        else
+          _ -> :unclassified
+        end
 
       _ ->
         :unclassified
@@ -2498,22 +2536,208 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp scope_read_non_option_operands(args) when is_list(args) do
-    {operands, _after_options?} =
-      Enum.reduce(args, {[], false}, fn token, {operands, after_options?} ->
-        cond do
-          token == "--" -> {operands, true}
-          after_options? -> {[token | operands], true}
-          scope_read_option_token?(token) -> {operands, false}
-          Regex.match?(~r/\A\d+\z/, token) -> {operands, false}
-          true -> {[token | operands], false}
-        end
-      end)
+  defp git_read_subcommand_and_args(args) when is_list(args),
+    do: parse_git_read_subcommand_and_args(args)
 
-    Enum.reverse(operands)
+  defp parse_git_read_subcommand_and_args([subcommand | args])
+       when subcommand in ["diff", "log", "ls-files"],
+       do: {:ok, subcommand, args}
+
+  defp parse_git_read_subcommand_and_args([option | rest])
+       when option in ["-P", "--no-pager"],
+       do: parse_git_read_subcommand_and_args(rest)
+
+  defp parse_git_read_subcommand_and_args(_args), do: :unclassified
+
+  defp scope_read_non_option_operands(args) when is_list(args) do
+    case Enum.reduce_while(args, {[], false}, fn token, {operands, after_options?} ->
+           if token == "-" do
+             {:halt, :unclassified}
+           else
+             result =
+               cond do
+                 token == "--" -> {operands, true}
+                 after_options? -> {[token | operands], true}
+                 scope_read_option_token?(token) -> {operands, false}
+                 true -> {[token | operands], false}
+               end
+
+             {:cont, result}
+           end
+         end) do
+      {operands, _after_options?} -> Enum.reverse(operands)
+      :unclassified -> :unclassified
+    end
   end
 
   defp scope_read_non_option_operands(_args), do: []
+
+  defp ls_scope_read_operands(args) when is_list(args), do: parse_ls_scope_read_operands(args, [])
+
+  defp ls_scope_read_operands(_args), do: :unclassified
+
+  defp parse_ls_scope_read_operands(["--" | paths], []) do
+    if Enum.all?(paths, &(is_binary(&1) and &1 not in ["", "-"])), do: paths, else: :unclassified
+  end
+
+  defp parse_ls_scope_read_operands([option | rest], []) when is_binary(option) do
+    if Regex.match?(~r/\A-(?:1|[aAl]+)\z/, option),
+      do: parse_ls_scope_read_operands(rest, []),
+      else: parse_ls_scope_read_operands([option | rest], :paths)
+  end
+
+  defp parse_ls_scope_read_operands(paths, :paths) when is_list(paths) do
+    if paths != [] and
+         Enum.all?(paths, &(is_binary(&1) and &1 not in ["", "-"] and not String.starts_with?(&1, "-"))),
+       do: paths,
+       else: :unclassified
+  end
+
+  defp parse_ls_scope_read_operands([], []), do: :unclassified
+  defp parse_ls_scope_read_operands(_args, _state), do: :unclassified
+
+  defp finite_head_tail_scope_operands("tail", args) when is_list(args) do
+    finite_counted_read_operands(args, "tail")
+  end
+
+  defp finite_head_tail_scope_operands("head", args) when is_list(args),
+    do: finite_counted_read_operands(args, "head")
+
+  defp finite_head_tail_scope_operands(_tool, _args), do: :unclassified
+
+  defp finite_counted_read_operands(args, tool) when is_list(args) and tool in ["head", "tail"],
+    do: parse_finite_counted_read_operands(args, [], false, tool)
+
+  defp parse_finite_counted_read_operands([], operands, _after_options?, _tool),
+    do: Enum.reverse(operands)
+
+  defp parse_finite_counted_read_operands(["--" | rest], operands, false, tool),
+    do: parse_finite_counted_read_operands(rest, operands, true, tool)
+
+  defp parse_finite_counted_read_operands([option, count | rest], operands, false, tool)
+       when option in ["-n", "--lines", "-c", "--bytes"] do
+    if finite_count_token?(count),
+      do: parse_finite_counted_read_operands(rest, operands, false, tool),
+      else: :unclassified
+  end
+
+  defp parse_finite_counted_read_operands([token | rest], operands, after_options?, tool)
+       when is_binary(token) do
+    cond do
+      token == "-" ->
+        :unclassified
+
+      after_options? ->
+        parse_finite_counted_read_operands(rest, [token | operands], true, tool)
+
+      finite_inline_count_option?(token) ->
+        parse_finite_counted_read_operands(rest, operands, false, tool)
+
+      finite_head_tail_flag?(tool, token) ->
+        parse_finite_counted_read_operands(rest, operands, false, tool)
+
+      String.starts_with?(token, "-") ->
+        :unclassified
+
+      true ->
+        parse_finite_counted_read_operands(rest, [token | operands], false, tool)
+    end
+  end
+
+  defp parse_finite_counted_read_operands(_args, _operands, _after_options?, _tool),
+    do: :unclassified
+
+  defp finite_head_tail_flag?(tool, option) when tool in ["head", "tail"] and is_binary(option) do
+    option in ["-q", "-v", "-z", "--quiet", "--silent", "--verbose", "--zero-terminated"] or
+      Regex.match?(~r/\A-[qvz]+\z/, option)
+  end
+
+  defp finite_head_tail_flag?(_tool, _option), do: false
+
+  defp finite_count_token?(count) when is_binary(count),
+    do: Regex.match?(~r/\A[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, count)
+
+  defp finite_count_token?(_count), do: false
+
+  defp finite_inline_count_option?(option) when is_binary(option) do
+    Regex.match?(~r/\A-(?:n|c)?[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option) or
+      Regex.match?(~r/\A--(?:lines|bytes)=[+-]?\d+(?:b|[kKMGTPEZY](?:i?B)?)?\z/, option)
+  end
+
+  defp finite_inline_count_option?(_option), do: false
+
+  defp search_scope_read_operand_paths(tool, args)
+       when tool in ["rg", "grep"] and is_list(args) do
+    case parse_search_scope_args(tool, args, false, []) do
+      {:ok, true, paths} -> Enum.reverse(paths)
+      {:ok, false, paths} -> paths |> Enum.reverse() |> Enum.drop(1)
+      _ -> :unclassified
+    end
+  end
+
+  defp search_scope_read_operand_paths(_tool, _args), do: :unclassified
+
+  defp parse_search_scope_args(_tool, [], pattern_from_option?, paths),
+    do: {:ok, pattern_from_option?, paths}
+
+  defp parse_search_scope_args(_tool, ["--" | rest], pattern_from_option?, paths),
+    do: {:ok, pattern_from_option?, Enum.reverse(rest) ++ paths}
+
+  defp parse_search_scope_args(tool, [option, pattern | rest], _pattern_from_option?, paths)
+       when option in ["-e", "--regexp"] and is_binary(pattern),
+       do: parse_search_scope_args(tool, rest, true, paths)
+
+  defp parse_search_scope_args("rg", [option, encoding | rest], pattern_from_option?, paths)
+       when option in ["-E", "--encoding"] and is_binary(encoding),
+       do: parse_search_scope_args("rg", rest, pattern_from_option?, paths)
+
+  defp parse_search_scope_args(tool, [option | rest], pattern_from_option?, paths)
+       when is_binary(option) do
+    cond do
+      Regex.match?(~r/\A-e.+\z/, option) or String.starts_with?(option, "--regexp=") ->
+        parse_search_scope_args(tool, rest, true, paths)
+
+      tool == "rg" and
+          (Regex.match?(~r/\A-E.+\z/, option) or String.starts_with?(option, "--encoding=")) ->
+        parse_search_scope_args(tool, rest, pattern_from_option?, paths)
+
+      safe_search_flag?(tool, option) ->
+        parse_search_scope_args(tool, rest, pattern_from_option?, paths)
+
+      String.starts_with?(option, "-") ->
+        :unclassified
+
+      true ->
+        parse_search_scope_args(tool, rest, pattern_from_option?, [option | paths])
+    end
+  end
+
+  defp parse_search_scope_args(_tool, _args, _pattern_from_option?, _paths), do: :unclassified
+
+  defp safe_search_flag?(tool, option) when tool in ["rg", "grep"] and is_binary(option) do
+    safe_short_flags = if tool == "grep", do: ~r/\A-[nEHhIiJLlOoPqsvwxyz]+\z/, else: ~r/\A-[nHhIiJlOoPqsvwxyz]+\z/
+
+    Regex.match?(safe_short_flags, option) or
+      option in [
+        "--line-number",
+        "--extended-regexp",
+        "--fixed-strings",
+        "--ignore-case",
+        "--word-regexp",
+        "--invert-match",
+        "--count",
+        "--files-with-matches",
+        "--files-without-match",
+        "--no-messages",
+        "--text",
+        "--binary",
+        "--null",
+        "--only-matching",
+        "--quiet"
+      ]
+  end
+
+  defp safe_search_flag?(_tool, _option), do: false
 
   defp scope_read_option_token?(token) when is_binary(token),
     do: token == "--" or String.starts_with?(token, "-")
@@ -2521,8 +2745,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scope_read_option_token?(_token), do: true
 
   defp normalize_scope_operand_path(path) when is_binary(path) do
+    path = if match?({:win32, _}, :os.type()), do: String.replace(path, "\\", "/"), else: path
+
     path
-    |> String.replace("\\", "/")
     |> String.trim_leading("./")
     |> String.trim_trailing("/")
   end
@@ -2530,66 +2755,195 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp normalize_scope_operand_path(_path), do: ""
 
   defp unwrap_shell_login_command(command) when is_binary(command) do
-    normalized =
-      command
-      |> unescape_shell_argument_quotes()
-      |> String.trim()
+    command = String.trim(command)
 
-    cond do
-      String.starts_with?(normalized, ~s(/bin/zsh -lc ")) and
-          String.ends_with?(normalized, "\"") ->
-        normalized
-        |> String.trim_leading(~s(/bin/zsh -lc "))
-        |> String.trim_trailing("\"")
-
-      String.starts_with?(normalized, "/bin/zsh -lc '") and
-          String.ends_with?(normalized, "'") ->
-        normalized
-        |> String.trim_leading("/bin/zsh -lc '")
-        |> String.trim_trailing("'")
-
-      true ->
-        normalized
+    case shell_command_payload(command) do
+      {:ok, wrapped} -> unwrap_shell_command_argument(wrapped)
+      _ -> command |> unescape_shell_argument_quotes() |> String.trim()
     end
+  rescue
+    _error -> String.trim(command)
   end
 
   defp unwrap_shell_login_command(_command), do: ""
+
+  defp shell_command_payload(command) when is_binary(command) do
+    case Regex.run(
+           ~r/\A(?:\/bin\/)?(?:zsh|bash|sh)\s+((?:(?:--login|-[A-Za-z]+)\s+)+)(.*)\z/s,
+           String.trim(command),
+           capture: :all_but_first
+         ) do
+      [options, payload] ->
+        if options
+           |> String.split()
+           |> Enum.any?(&Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1)) do
+          {:ok, payload}
+        else
+          :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp shell_command_payload(_command), do: :error
+
+  defp unwrap_shell_command_argument("\"" <> rest) do
+    if String.ends_with?(rest, "\"") do
+      rest
+      |> binary_part(0, byte_size(rest) - 1)
+      |> String.replace(~r/\\(["\\])/, "\\1")
+    else
+      "\"" <> rest
+    end
+  end
+
+  defp unwrap_shell_command_argument("'" <> rest) do
+    if String.ends_with?(rest, "'") do
+      rest
+      |> binary_part(0, byte_size(rest) - 1)
+      |> String.replace("'\"'\"'", "'")
+    else
+      "'" <> rest
+    end
+  end
+
+  defp unwrap_shell_command_argument(argument), do: String.trim(argument)
 
   defp pure_scope_read_command?(command) when is_binary(command) do
     not command_chain_operator_outside_quotes?(command) and
       not String.contains?(command, ["$(", "`"]) and
       not unsafe_scope_read_option?(command) and
-      Regex.match?(
-        ~r/\A(?:sed\s+-n|(?:cat|head|tail|nl|rg|grep|ls)\s|git\s+(?:diff|log|ls-files)(?:\s|$))/,
-        command
-      )
+      is_binary(exact_read_command_class(command))
   end
 
   defp pure_scope_read_command?(_command), do: false
 
   defp unsafe_scope_read_option?(command) when is_binary(command) do
-    (String.starts_with?(command, "sed ") and not safe_sed_print_slice?(command)) or
-      (String.starts_with?(command, "rg ") and
+    normalized = normalized_read_command(command)
+
+    (String.starts_with?(normalized, "sed ") and not safe_sed_print_slice?(command)) or
+      (String.starts_with?(normalized, "rg ") and
          Regex.match?(
            ~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|pre(?:-glob)?|ignore-file|hostname-bin)(?:=|\s|$))/,
-           command
+           normalized
          )) or
-      (String.starts_with?(command, "grep ") and
-         Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, command)) or
-      (Regex.match?(~r/\Agit\s+(?:diff|log)(?:\s|$)/, command) and
-         not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, command) and
-                Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, command))) or
-      (String.starts_with?(command, "git ") and
-         Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, command))
+      (String.starts_with?(normalized, "grep ") and
+         Regex.match?(~r/(?:^|\s)(?:-f(?:\S+)?|--(?:file|exclude-from)(?:=|\s|$))/, normalized)) or
+      (git_diff_or_log_command?(command) and
+         not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, normalized) and
+                Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, normalized))) or
+      unsafe_git_file_input_option?(command) or
+      git_executable_read_option?(command) or
+      (String.starts_with?(normalized, "git ") and
+         Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, normalized))
   end
 
   defp unsafe_scope_read_option?(_command), do: false
 
-  defp safe_sed_print_slice?(command) when is_binary(command) do
-    Regex.match?(
-      ~r/\Ased\s+-n\s+(?:'\d+(?:,\d+)?p'|"\d+(?:,\d+)?p"|\d+(?:,\d+)?p)\s+(?:--\s+)?(?:'[^']+'|"[^"]+"|[A-Za-z0-9_.\/-]+)\z/,
-      command
+  defp git_diff_or_log_command?(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      ["git" | args] ->
+        match?(
+          {:ok, subcommand, _args} when subcommand in ["diff", "log"],
+          git_read_subcommand_and_args(args)
+        )
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_diff_or_log_command?(_command), do: false
+
+  defp unsafe_git_file_input_option?(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      ["git" | args] -> Enum.any?(args, &unsafe_git_file_input_token?/1)
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp unsafe_git_file_input_option?(_command), do: false
+
+  defp unsafe_git_file_input_token?(token) when is_binary(token) do
+    token in [
+      "-O",
+      "-X",
+      "--order-file",
+      "--exclude-from",
+      "--pathspec-from-file",
+      "--stdin",
+      "--no-index",
+      "--exclude-per-directory"
+    ] or
+      Regex.match?(~r/\A(?:-O|-X).+\z/, token) or
+      Regex.match?(~r/\A--(?:order-file|exclude-from|exclude-per-directory|pathspec-from-file)=.+\z/, token) or
+      abbreviated_git_file_input_token?(token)
+  end
+
+  defp unsafe_git_file_input_token?(_token), do: false
+
+  defp git_executable_read_option?(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      ["git" | args] -> unsafe_git_executable_read_args?(args, :global)
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_executable_read_option?(_command), do: false
+
+  defp unsafe_git_executable_read_args?([], _position), do: false
+
+  defp unsafe_git_executable_read_args?([option | rest], :global) do
+    cond do
+      option in ["-p", "--paginate"] -> true
+      option in ["diff", "log", "ls-files"] -> unsafe_git_executable_read_args?(rest, :subcommand)
+      true -> unsafe_git_executable_read_args?(rest, :global)
+    end
+  end
+
+  defp unsafe_git_executable_read_args?([option | rest], :subcommand) do
+    option == "--show-signature" or unsafe_git_executable_read_args?(rest, :subcommand)
+  end
+
+  defp abbreviated_git_file_input_token?("--" <> _rest = token) do
+    option_name = token |> String.split("=", parts: 2) |> List.first()
+
+    Enum.any?(
+      [
+        {"--order-file", "--order-f"},
+        {"--exclude-from", "--exclude-f"},
+        {"--exclude-per-directory", "--exclude-p"},
+        {"--pathspec-from-file", "--pathspec-f"},
+        {"--no-index", "--no-inde"}
+      ],
+      fn {full_name, shortest_sensitive_prefix} ->
+        String.starts_with?(option_name, shortest_sensitive_prefix) and
+          String.starts_with?(full_name, option_name)
+      end
     )
+  end
+
+  defp abbreviated_git_file_input_token?(_token), do: false
+
+  defp safe_sed_print_slice?(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      ["sed", "-n", slice, path] ->
+        Regex.match?(~r/\A\d+(?:,\d+)?p\z/, slice) and path != "-"
+
+      ["sed", "-n", slice, "--", path] ->
+        Regex.match?(~r/\A\d+(?:,\d+)?p\z/, slice) and path != "-"
+
+      _ ->
+        false
+    end
   end
 
   defp safe_sed_print_slice?(_command), do: false
@@ -2837,20 +3191,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scoped_conflict_marker_scan_allowed?(_command, _workspace), do: false
 
   defp scoped_file_grep_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
-    with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
+    with mode when mode in ["review_rework", "integration_check", "handoff_recovery"] <-
+           dispatch_preflight_mode(workspace),
          true <- file_scoped_grep_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
-      allowed_paths =
-        preflight
-        |> review_rework_allowed_read_paths(workspace)
-        |> MapSet.new()
-
-      command_paths =
-        command
-        |> search_path_tokens()
-        |> Enum.uniq()
-
-      scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
+      if mode == "handoff_recovery" do
+        handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+      else
+        allowed_paths = preflight |> review_rework_allowed_read_paths(workspace) |> MapSet.new()
+        command_paths = command |> search_path_tokens() |> Enum.uniq()
+        scoped_search_paths_allowed?(workspace, command_paths, allowed_paths)
+      end
     else
       _ -> false
     end
@@ -2859,6 +3210,646 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scoped_file_grep_allowed?(_command, _workspace), do: false
+
+  defp handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+       when is_binary(command) and is_map(preflight) and is_binary(workspace) do
+    command = unwrap_shell_login_command(command)
+    allowed_paths = preflight |> runtime_contract_scope_bundle_read_paths() |> MapSet.new()
+    denied_scopes = runtime_contract_scope_bundle_denied_paths(preflight)
+
+    with true <- pure_scope_read_command?(command),
+         command_class when is_binary(command_class) <- exact_read_command_class(command),
+         paths when is_list(paths) and paths != [] <- scope_read_operand_paths(command, command_class) do
+      Enum.all?(paths, &exact_handoff_path_allowed?(workspace, &1, allowed_paths, denied_scopes))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp handoff_recovery_exact_read_allowed?(_command, _preflight, _workspace), do: false
+
+  defp structured_handoff_read_candidate?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    structured_handoff_recovery?(workspace) and
+      (is_binary(exact_read_command_class(unwrap_shell_login_command(command))) or
+         git_read_like_candidate?(unwrap_shell_login_command(command)) or
+         read_tool_invocation_candidate?(unwrap_shell_login_command(command)) or
+         shell_wrapper_read_candidate?(command) or
+         shell_substitution_present?(command) or
+         command_parse_failed?(command) or
+         command_chain_operator_outside_quotes?(command))
+  end
+
+  defp structured_handoff_read_candidate?(_command, _workspace), do: false
+
+  defp structured_handoff_exact_read_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    with {:ok, preflight} <- DispatchPreflight.read(workspace) do
+      handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp structured_handoff_exact_read_allowed?(_command, _workspace), do: false
+
+  defp runtime_contract_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+       when is_map(bundle) do
+    [
+      {Map.get(bundle, "write_scope"), ["write", "write-if-conflicted"]},
+      {Map.get(bundle, "read_context"), ["read", "search"]}
+    ]
+    |> Enum.flat_map(fn {entries, allowed_operations} ->
+      entries
+      |> List.wrap()
+      |> Enum.flat_map(fn
+        %{"path" => path, "source" => "runtime_contract." <> _, "operation" => operation}
+        when is_binary(path) and is_binary(operation) ->
+          if operation in allowed_operations, do: [normalize_requirement_path(path)], else: []
+
+        _ ->
+          []
+      end)
+    end)
+    |> Enum.uniq()
+  end
+
+  defp runtime_contract_scope_bundle_read_paths(_preflight), do: []
+
+  defp runtime_contract_scope_bundle_denied_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+       when is_map(bundle) do
+    bundle
+    |> Map.get("denied_scope", [])
+    |> List.wrap()
+    |> Enum.flat_map(fn
+      %{"path" => path, "source" => "runtime_contract." <> _} when is_binary(path) ->
+        [normalize_requirement_path(path)]
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp runtime_contract_scope_bundle_denied_paths(_preflight), do: []
+
+  defp shell_substitution_present?(command) when is_binary(command),
+    do: String.contains?(command, ["$(", "`"])
+
+  defp shell_substitution_present?(_command), do: false
+
+  defp exact_read_command_class(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      [tool | _args] when tool in ["sed", "cat", "head", "tail", "nl"] -> "bounded_file_read"
+      [tool | _args] when tool in ["rg", "grep"] -> "bounded_file_search"
+      ["ls" | _args] -> "directory_listing"
+      ["git" | _args] -> exact_git_read_command_class(command)
+      _ -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp exact_read_command_class(_command), do: nil
+
+  defp exact_git_read_command_class(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      ["git" | args] ->
+        case git_read_subcommand_and_args(args) do
+          {:ok, "diff", _args} -> "git_diff"
+          {:ok, subcommand, _args} when subcommand in ["log", "ls-files"] -> "git_discovery"
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp exact_git_read_command_class(_command), do: nil
+
+  defp git_read_like_candidate?(command) when is_binary(command) do
+    case candidate_read_argv(command) do
+      ["git" | args] -> git_candidate_read_subcommand?(args)
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_read_like_candidate?(_command), do: false
+
+  defp git_candidate_read_subcommand?([subcommand | _args])
+       when subcommand in ["diff", "log", "ls-files"],
+       do: true
+
+  defp git_candidate_read_subcommand?([option | rest])
+       when option in [
+              "-p",
+              "-P",
+              "--paginate",
+              "--no-pager",
+              "--no-replace-objects",
+              "--bare",
+              "--literal-pathspecs",
+              "--glob-pathspecs",
+              "--noglob-pathspecs",
+              "--icase-pathspecs",
+              "--no-optional-locks"
+            ],
+       do: git_candidate_read_subcommand?(rest)
+
+  defp git_candidate_read_subcommand?([option, _value | rest])
+       when option in [
+              "-c",
+              "-C",
+              "--git-dir",
+              "--work-tree",
+              "--namespace",
+              "--config-env",
+              "--attr-source",
+              "--exec-path",
+              "--super-prefix",
+              "--list-cmds"
+            ],
+       do: git_candidate_read_subcommand?(rest)
+
+  defp git_candidate_read_subcommand?([option | rest]) when is_binary(option) do
+    cond do
+      not String.starts_with?(option, "-") ->
+        false
+
+      Regex.match?(~r/\A(?:-c|-C).+\z/, option) or
+          Regex.match?(
+            ~r/\A--(?:git-dir|work-tree|namespace|config-env|attr-source|exec-path|super-prefix|list-cmds)=.+\z/,
+            option
+          ) ->
+        git_candidate_read_subcommand?(rest)
+
+      true ->
+        Enum.any?(rest, &(&1 in ["diff", "log", "ls-files"]))
+    end
+  end
+
+  defp git_candidate_read_subcommand?(_args), do: false
+
+  defp shell_wrapper_read_candidate?(command) when is_binary(command) do
+    case command |> OptionParser.split() |> shell_invocation_argv() do
+      [shell | _args] -> Path.basename(shell) in shell_executable_names()
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp shell_wrapper_read_candidate?(_command), do: false
+
+  defp shell_command_string_argument(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> shell_invocation_argv()
+    |> shell_command_string_argument_tokens()
+  end
+
+  defp shell_command_string_argument(_command), do: :error
+
+  defp shell_command_string_argument_tokens([shell | args]) do
+    if Path.basename(shell) in shell_executable_names() do
+      parse_shell_command_string_option(args)
+    else
+      :error
+    end
+  end
+
+  defp shell_command_string_argument_tokens(_tokens), do: :error
+
+  defp parse_shell_command_string_option(["--" | _rest]), do: :error
+
+  defp parse_shell_command_string_option([option, payload | rest])
+       when is_binary(option) and is_binary(payload) do
+    cond do
+      Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, option) -> {:ok, payload}
+      option in ["-O", "-o", "--rcfile", "--init-file"] -> parse_shell_command_string_option(rest)
+      String.starts_with?(option, "-") -> parse_shell_command_string_option([payload | rest])
+      true -> :error
+    end
+  end
+
+  defp parse_shell_command_string_option([option | rest]) when is_binary(option) do
+    if String.starts_with?(option, "-"), do: parse_shell_command_string_option(rest), else: :error
+  end
+
+  defp parse_shell_command_string_option(_args), do: :error
+
+  defp shell_invocation_argv([executable | args]) do
+    case Path.basename(executable) do
+      "env" -> args |> candidate_env_utility_argv() |> shell_invocation_argv()
+      "command" -> args |> candidate_command_utility_argv() |> shell_invocation_argv()
+      "nice" -> args |> candidate_nice_utility_argv() |> shell_invocation_argv()
+      "nohup" -> args |> drop_optional_delimiter() |> shell_invocation_argv()
+      "exec" -> args |> candidate_exec_utility_argv() |> shell_invocation_argv()
+      _ -> [executable | args]
+    end
+  end
+
+  defp shell_invocation_argv(_tokens), do: :unclassified
+
+  defp shell_executable_names,
+    do: ["sh", "bash", "zsh", "dash", "ash", "ksh", "mksh", "fish", "csh", "tcsh"]
+
+  defp safe_wrapped_handoff_delivery_command?(command) when is_binary(command) do
+    with true <- trusted_shell_invocation?(command),
+         {:ok, payload} <- shell_command_string_argument(command),
+         false <- command_chain_operator_outside_quotes?(payload),
+         false <- Regex.match?(~r/[;&|<>()$`\\\n\r]/, payload),
+         ["git", subcommand | args] <- OptionParser.split(payload) do
+      safe_wrapped_git_delivery_args?(subcommand, args)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp safe_wrapped_handoff_delivery_command?(_command), do: false
+
+  defp safe_wrapped_git_delivery_args?("status", args) when is_list(args) do
+    Enum.all?(args, fn arg ->
+      arg in ["-s", "-b", "--short", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2"] or
+        String.starts_with?(arg, "--untracked-files=")
+    end)
+  end
+
+  defp safe_wrapped_git_delivery_args?("add", args) when is_list(args) and args != [] do
+    args
+    |> drop_optional_delimiter()
+    |> Enum.all?(&(is_binary(&1) and &1 != "" and not String.starts_with?(&1, "-")))
+  end
+
+  defp safe_wrapped_git_delivery_args?("commit", ["-m", message]) when is_binary(message),
+    do: message != ""
+
+  defp safe_wrapped_git_delivery_args?("push", args) when is_list(args) do
+    args
+    |> drop_optional_delimiter()
+    |> Enum.all?(&(is_binary(&1) and &1 != "" and not String.starts_with?(&1, "-")))
+  end
+
+  defp safe_wrapped_git_delivery_args?(_subcommand, _args), do: false
+
+  defp trusted_shell_invocation?(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> trusted_shell_invocation_tokens?()
+  rescue
+    _error -> false
+  end
+
+  defp trusted_shell_invocation?(_command), do: false
+
+  defp trusted_shell_invocation_tokens?([executable | args]) do
+    name = Path.basename(executable)
+
+    cond do
+      name in shell_executable_names() ->
+        trusted_system_executable?(executable, ["sh", "bash", "zsh"]) and
+          safe_shell_startup_options?(args)
+
+      name == "env" ->
+        false
+
+      name == "command" ->
+        executable == "command" and
+          trusted_shell_invocation_tokens?(candidate_command_utility_argv(args))
+
+      name == "nice" ->
+        trusted_system_executable?(executable, ["nice"]) and
+          trusted_shell_invocation_tokens?(candidate_nice_utility_argv(args))
+
+      name == "nohup" ->
+        trusted_system_executable?(executable, ["nohup"]) and
+          trusted_shell_invocation_tokens?(drop_optional_delimiter(args))
+
+      name == "exec" ->
+        executable == "exec" and
+          trusted_shell_invocation_tokens?(candidate_exec_utility_argv(args))
+
+      true ->
+        false
+    end
+  end
+
+  defp trusted_shell_invocation_tokens?(_tokens), do: false
+
+  defp safe_shell_startup_options?(["-c", payload | _rest]) when is_binary(payload), do: true
+
+  defp safe_shell_startup_options?([option | rest])
+       when option in ["-l", "--login", "--noprofile", "--norc"],
+       do: safe_shell_startup_options?(rest)
+
+  defp safe_shell_startup_options?(["-o", "pipefail" | rest]),
+    do: safe_shell_startup_options?(rest)
+
+  defp safe_shell_startup_options?([option, payload | _rest])
+       when is_binary(option) and is_binary(payload) do
+    Regex.match?(~r/\A-(?:lc|cl)\z/, option)
+  end
+
+  defp safe_shell_startup_options?(_args), do: false
+
+  defp read_tool_invocation_candidate?(command) when is_binary(command) do
+    case candidate_read_argv(command) do
+      [tool | _args] -> tool in List.delete(read_tool_names(), "git")
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp read_tool_invocation_candidate?(_command), do: false
+
+  defp command_parse_failed?(command) when is_binary(command) do
+    OptionParser.split(command)
+    false
+  rescue
+    _error -> true
+  end
+
+  defp command_parse_failed?(_command), do: true
+
+  defp normalized_read_command(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      argv when is_list(argv) -> Enum.join(argv, " ")
+      _ -> command
+    end
+  end
+
+  defp normalized_read_command(command), do: command
+
+  defp normalized_read_argv(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> normalize_read_argv_tokens()
+  rescue
+    _error -> :unclassified
+  end
+
+  defp normalized_read_argv(_command), do: :unclassified
+
+  defp candidate_read_argv(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> candidate_read_argv_tokens()
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_read_argv(_command), do: :unclassified
+
+  defp normalize_read_argv_tokens([executable | args]) do
+    case Path.basename(executable) do
+      "env" ->
+        if trusted_system_executable?(executable, ["env"]),
+          do: normalize_env_read_argv(args),
+          else: :unclassified
+
+      "command" ->
+        if executable == "command",
+          do: args |> drop_optional_delimiter() |> normalize_direct_read_argv(),
+          else: :unclassified
+
+      _ ->
+        normalize_direct_read_argv([executable | args])
+    end
+  end
+
+  defp normalize_read_argv_tokens(_tokens), do: :unclassified
+
+  defp candidate_read_argv_tokens([executable | args]) do
+    if environment_assignment?(executable) do
+      candidate_read_argv_tokens(args)
+    else
+      case Path.basename(executable) do
+        "env" -> args |> candidate_env_utility_argv() |> candidate_read_argv_tokens()
+        "command" -> args |> candidate_command_utility_argv() |> candidate_read_argv_tokens()
+        "nice" -> args |> candidate_nice_utility_argv() |> candidate_read_argv_tokens()
+        "nohup" -> args |> drop_optional_delimiter() |> candidate_read_argv_tokens()
+        "exec" -> args |> candidate_exec_utility_argv() |> candidate_read_argv_tokens()
+        _ -> candidate_direct_read_argv([executable | args])
+      end
+    end
+  end
+
+  defp candidate_read_argv_tokens(_tokens), do: :unclassified
+
+  defp candidate_env_utility_argv(["--" | rest]), do: rest
+
+  defp candidate_env_utility_argv([option, _value | rest]) when option in ["-u", "--unset"],
+    do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv([option, _value | rest]) when option in ["-C", "--chdir"],
+    do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv([option, split_string | rest])
+       when option in ["-S", "--split-string"] and is_binary(split_string) do
+    OptionParser.split(split_string) ++ rest
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_env_utility_argv(["--chdir=" <> _directory | rest]),
+    do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv(["--split-string=" <> split_string | rest]) do
+    OptionParser.split(split_string) ++ rest
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_env_utility_argv(["-S" <> split_string | rest]) when split_string != "" do
+    OptionParser.split(split_string) ++ rest
+  rescue
+    _error -> :unclassified
+  end
+
+  defp candidate_env_utility_argv([option | rest])
+       when option in ["-i", "--ignore-environment"],
+       do: candidate_env_utility_argv(rest)
+
+  defp candidate_env_utility_argv([token | rest]) when is_binary(token) do
+    cond do
+      Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token) -> candidate_env_utility_argv(rest)
+      String.starts_with?(token, "-") -> candidate_env_utility_argv(rest)
+      true -> [token | rest]
+    end
+  end
+
+  defp candidate_env_utility_argv(_args), do: :unclassified
+
+  defp candidate_command_utility_argv(["--" | rest]), do: rest
+
+  defp candidate_command_utility_argv([option | rest]) when option in ["-p"],
+    do: candidate_command_utility_argv(rest)
+
+  defp candidate_command_utility_argv(args), do: args
+
+  defp candidate_nice_utility_argv([option, _priority | rest]) when option in ["-n", "--adjustment"],
+    do: candidate_nice_utility_argv(rest)
+
+  defp candidate_nice_utility_argv(["--adjustment=" <> _priority | rest]),
+    do: candidate_nice_utility_argv(rest)
+
+  defp candidate_nice_utility_argv(["--" | rest]), do: rest
+
+  defp candidate_nice_utility_argv([option | rest]) when is_binary(option) do
+    if Regex.match?(~r/\A-\d+\z/, option), do: candidate_nice_utility_argv(rest), else: [option | rest]
+  end
+
+  defp candidate_nice_utility_argv(args), do: args
+
+  defp candidate_exec_utility_argv(["-a", _name | rest]),
+    do: candidate_exec_utility_argv(rest)
+
+  defp candidate_exec_utility_argv([option | rest]) when option in ["-c", "-l"],
+    do: candidate_exec_utility_argv(rest)
+
+  defp candidate_exec_utility_argv(["--" | rest]), do: rest
+  defp candidate_exec_utility_argv(args), do: args
+
+  defp normalize_env_read_argv(args) when is_list(args) do
+    case drop_optional_delimiter(args) do
+      [token | _rest] = argv ->
+        if Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token),
+          do: :unclassified,
+          else: normalize_direct_read_argv(argv)
+
+      _ ->
+        :unclassified
+    end
+  end
+
+  defp normalize_env_read_argv(_args), do: :unclassified
+
+  defp drop_optional_delimiter(["--" | rest]), do: rest
+  defp drop_optional_delimiter(args), do: args
+
+  defp normalize_direct_read_argv([executable | args]) do
+    case trusted_read_executable_name(executable) do
+      tool when is_binary(tool) -> [tool | args]
+      _ -> :unclassified
+    end
+  end
+
+  defp normalize_direct_read_argv(_args), do: :unclassified
+
+  defp candidate_direct_read_argv([executable | args]) do
+    tool = Path.basename(executable)
+    if tool in read_tool_names(), do: [tool | args], else: :unclassified
+  end
+
+  defp candidate_direct_read_argv(_args), do: :unclassified
+
+  defp trusted_read_executable_name(executable) when is_binary(executable) do
+    tool = Path.basename(executable)
+
+    cond do
+      tool not in read_tool_names() -> nil
+      executable == tool -> tool
+      Path.dirname(executable) in ["/bin", "/usr/bin"] -> tool
+      true -> nil
+    end
+  end
+
+  defp trusted_read_executable_name(_executable), do: nil
+
+  defp trusted_system_executable?(executable, allowed_names)
+       when is_binary(executable) and is_list(allowed_names) do
+    name = Path.basename(executable)
+
+    name in allowed_names and
+      (executable == name or Path.dirname(executable) in ["/bin", "/usr/bin"])
+  end
+
+  defp trusted_system_executable?(_executable, _allowed_names), do: false
+
+  defp environment_assignment?(token) when is_binary(token),
+    do: Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token)
+
+  defp environment_assignment?(_token), do: false
+
+  defp read_tool_names,
+    do: ["sed", "cat", "head", "tail", "nl", "rg", "grep", "ls", "git"]
+
+  defp ansi_c_shell_payload?(command) when is_binary(command) do
+    case shell_command_payload(command) do
+      {:ok, payload} -> String.starts_with?(String.trim(payload), ["$'", "$\""])
+      :error -> false
+    end
+  end
+
+  defp ansi_c_shell_payload?(_command), do: false
+
+  defp exact_handoff_path_allowed?(workspace, path, allowed_paths, denied_scopes)
+       when is_binary(workspace) and is_binary(path) and is_list(denied_scopes) do
+    normalized_path = normalize_scope_operand_path(path)
+
+    with false <- wildcard_path?(normalized_path),
+         false <- Enum.any?(denied_scopes, &scope_pattern_matches?(normalized_path, &1)),
+         true <- MapSet.member?(allowed_paths, normalized_path),
+         false <- Path.type(normalized_path) == :absolute,
+         {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, canonical_target} <- PathSafety.canonicalize(Path.join(workspace, normalized_path)),
+         true <- File.regular?(canonical_target) do
+      canonical_target != canonical_workspace and
+        String.starts_with?(canonical_target, canonical_workspace <> "/")
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp exact_handoff_path_allowed?(_workspace, _path, _allowed_paths, _denied_scopes), do: false
+
+  defp scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+    cond do
+      scope == "" ->
+        false
+
+      String.ends_with?(scope, "/**") ->
+        prefix = String.trim_trailing(scope, "/**")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.ends_with?(scope, "/*") ->
+        prefix = String.trim_trailing(scope, "/*")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.contains?(scope, "*") ->
+        scope
+        |> Regex.escape()
+        |> String.replace("\\*", ".*")
+        |> then(&Regex.compile!("^#{&1}$"))
+        |> Regex.match?(path)
+
+      true ->
+        path == scope or String.starts_with?(path, scope <> "/")
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scope_pattern_matches?(_path, _scope), do: false
+
+  defp wildcard_path?(path) when is_binary(path),
+    do: String.contains?(path, ["*", "?", "[", "]", "{", "}"])
+
+  defp wildcard_path?(_path), do: true
 
   defp scoped_file_rg_allowed?(command, workspace) when is_binary(command) and is_binary(workspace) do
     with true <- dispatch_preflight_mode(workspace) in ["review_rework", "integration_check"],
@@ -2916,20 +3907,33 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp review_rework_missing_referenced_read_allowed?(command, workspace)
        when is_binary(command) and is_binary(workspace) do
-    with true <- dispatch_preflight_mode(workspace) == "review_rework",
-         true <- simple_file_read_command?(command),
+    case dispatch_preflight_mode(workspace) do
+      "handoff_recovery" ->
+        with {:ok, preflight} <- DispatchPreflight.read(workspace) do
+          handoff_recovery_exact_read_allowed?(command, preflight, workspace)
+        else
+          _ -> false
+        end
+
+      "review_rework" ->
+        review_rework_simple_read_allowed?(command, workspace)
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp review_rework_missing_referenced_read_allowed?(_command, _workspace), do: false
+
+  defp review_rework_simple_read_allowed?(command, workspace)
+       when is_binary(command) and is_binary(workspace) do
+    with true <- simple_file_read_command?(command),
          {:ok, preflight} <- DispatchPreflight.read(workspace) do
-      allowed_paths =
-        preflight
-        |> review_rework_allowed_read_paths(workspace)
-        |> MapSet.new()
-
+      allowed_paths = preflight |> review_rework_allowed_read_paths(workspace) |> MapSet.new()
       reference_text = review_rework_reference_text(preflight, workspace)
-
-      command_paths =
-        command
-        |> paths_from_review_rework_text()
-        |> Enum.uniq()
+      command_paths = command |> paths_from_review_rework_text() |> Enum.uniq()
 
       command_paths != [] and
         Enum.all?(command_paths, fn path ->
@@ -2939,11 +3943,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     else
       _ -> false
     end
-  rescue
-    _error -> false
   end
 
-  defp review_rework_missing_referenced_read_allowed?(_command, _workspace), do: false
+  defp review_rework_simple_read_allowed?(_command, _workspace), do: false
 
   defp simple_file_read_command?(command) when is_binary(command) do
     read_command =
@@ -2951,7 +3953,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         Regex.match?(~r/(^|\s|["'])(cat|head|tail|nl)\s+/, command)
 
     read_command and
-      not Regex.match?(~r/\s(?:&&|\|\|)\s|;\s|\$\(|`/, command)
+      not command_chain_operator_outside_quotes?(command) and
+      not Regex.match?(~r/\$\(|`/, command)
   end
 
   defp simple_file_read_command?(_command), do: false
@@ -3631,6 +4634,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp command_chain_operator_outside_quotes?(command) when is_binary(command) do
     command
+    |> unwrap_shell_login_command()
     |> String.graphemes()
     |> chain_operator_scan(nil, nil)
   end
@@ -3639,11 +4643,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp chain_operator_scan([], _quote, _previous), do: false
 
-  defp chain_operator_scan(["\\" | rest], "'", _previous) do
-    chain_operator_scan(rest, "'", "\\")
-  end
-
-  defp chain_operator_scan(["\\" | [_escaped | rest]], quote, _previous) do
+  defp chain_operator_scan(["\\" | [_escaped | rest]], quote, _previous) when quote != "'" do
     chain_operator_scan(rest, quote, "\\")
   end
 
@@ -3834,7 +4834,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp normalize_command(command) when is_binary(command) do
     command
-    |> String.replace(~r/\s+/, " ")
+    |> String.replace(~r/[^\S\r\n]+/, " ")
     |> String.trim()
     |> case do
       "" -> nil

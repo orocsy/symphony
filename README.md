@@ -42,6 +42,13 @@ mode-specific command guards. Review rework may allow one local metadata-only ch
 operator-configured policy also admits it. Revision selectors, pathspecs, content-producing output,
 other flags, and unbounded history remain denied.
 
+Structured handoff recovery may read a file named directly by the active Runtime Contract's
+`write_scope` or `read_context`. The allowance is read-only and exact-path: every parsed operand
+must be declared, derived/imported context is not promoted, shell chains and substitutions remain
+denied, and an operator-configured command ban always takes precedence. When a denied compound
+read is recoverable, the worker is instructed to split it into separate single-purpose commands;
+the runtime never authorizes the compound command itself.
+
 ---
 
 ## License
