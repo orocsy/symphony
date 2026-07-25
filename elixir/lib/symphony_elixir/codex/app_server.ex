@@ -2513,7 +2513,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         search_scope_read_operand_paths(tool, args)
 
       {"directory_listing", ["ls" | args]} ->
-        scope_read_non_option_operands(args)
+        ls_scope_read_operands(args)
 
       {command_class, ["git" | args]}
       when command_class in ["git_diff", "git_discovery"] ->
@@ -2572,6 +2572,30 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp scope_read_non_option_operands(_args), do: []
+
+  defp ls_scope_read_operands(args) when is_list(args), do: parse_ls_scope_read_operands(args, [])
+
+  defp ls_scope_read_operands(_args), do: :unclassified
+
+  defp parse_ls_scope_read_operands(["--" | paths], []) do
+    if Enum.all?(paths, &(is_binary(&1) and &1 not in ["", "-"])), do: paths, else: :unclassified
+  end
+
+  defp parse_ls_scope_read_operands([option | rest], []) when is_binary(option) do
+    if Regex.match?(~r/\A-(?:1|[aAl]+)\z/, option),
+      do: parse_ls_scope_read_operands(rest, []),
+      else: parse_ls_scope_read_operands([option | rest], :paths)
+  end
+
+  defp parse_ls_scope_read_operands(paths, :paths) when is_list(paths) do
+    if paths != [] and
+         Enum.all?(paths, &(is_binary(&1) and &1 not in ["", "-"] and not String.starts_with?(&1, "-"))),
+       do: paths,
+       else: :unclassified
+  end
+
+  defp parse_ls_scope_read_operands([], []), do: :unclassified
+  defp parse_ls_scope_read_operands(_args, _state), do: :unclassified
 
   defp finite_head_tail_scope_operands("tail", args) when is_list(args) do
     finite_counted_read_operands(args, "tail")
@@ -3471,7 +3495,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     cond do
       name in shell_executable_names() ->
-        trusted_system_executable?(executable, shell_executable_names()) and
+        trusted_system_executable?(executable, ["sh", "bash", "zsh"]) and
           safe_shell_startup_options?(args)
 
       name == "env" ->
@@ -3500,17 +3524,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp trusted_shell_invocation_tokens?(_tokens), do: false
 
-  defp safe_shell_startup_options?(args) when is_list(args) do
-    args
-    |> Enum.take_while(&(&1 != "--"))
-    |> Enum.all?(fn option ->
-      cond do
-        option in ["--rcfile", "--init-file", "-i"] -> false
-        String.starts_with?(option, ["--rcfile=", "--init-file="]) -> false
-        Regex.match?(~r/\A-[A-Za-z]*i[A-Za-z]*\z/, option) -> false
-        true -> true
-      end
-    end)
+  defp safe_shell_startup_options?(["-c", payload | _rest]) when is_binary(payload), do: true
+
+  defp safe_shell_startup_options?([option | rest])
+       when option in ["-l", "--login", "--noprofile", "--norc"],
+       do: safe_shell_startup_options?(rest)
+
+  defp safe_shell_startup_options?(["-o", "pipefail" | rest]),
+    do: safe_shell_startup_options?(rest)
+
+  defp safe_shell_startup_options?([option, payload | _rest])
+       when is_binary(option) and is_binary(payload) do
+    Regex.match?(~r/\A-(?:lc|cl)\z/, option)
   end
 
   defp safe_shell_startup_options?(_args), do: false
@@ -3566,9 +3591,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp normalize_read_argv_tokens([executable | args]) do
     case Path.basename(executable) do
-      "env" -> normalize_env_read_argv(args)
-      "command" -> args |> drop_optional_delimiter() |> normalize_direct_read_argv()
-      _ -> normalize_direct_read_argv([executable | args])
+      "env" ->
+        if trusted_system_executable?(executable, ["env"]),
+          do: normalize_env_read_argv(args),
+          else: :unclassified
+
+      "command" ->
+        if executable == "command",
+          do: args |> drop_optional_delimiter() |> normalize_direct_read_argv(),
+          else: :unclassified
+
+      _ ->
+        normalize_direct_read_argv([executable | args])
     end
   end
 

@@ -16219,6 +16219,7 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
       File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
       File.write!(Path.join(workspace, "123"), "undeclared\n")
+      File.write!(Path.join(workspace, "1K"), "declared ls operand\n")
       File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
 
       scope_bundle =
@@ -16277,6 +16278,12 @@ defmodule SymphonyElixir.CoreTest do
             },
             %{
               "path" => ".github/workflows/ci.yml",
+              "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
+              "operation" => "read",
+              "expires" => "turn"
+            },
+            %{
+              "path" => "1K",
               "source" => "runtime_contract.miu:MT-HANDOFF-SPLIT-READ",
               "operation" => "read",
               "expires" => "turn"
@@ -16517,6 +16524,8 @@ defmodule SymphonyElixir.CoreTest do
       workspace_named_cat = "./cat config/config.exs"
       temporary_named_cat = "/tmp/cat config/config.exs"
       env_wrapped_cat = "env cat /etc/passwd"
+      untrusted_env_wrapped_scoped_cat = "/tmp/env cat config/config.exs"
+      untrusted_command_wrapped_scoped_cat = "./command cat config/config.exs"
       path_qualified_scoped_cat = "/bin/cat config/config.exs"
       env_wrapped_scoped_cat = "env cat config/config.exs"
       env_path_wrapped_rg = "env PATH=. rg -n test config/config.exs"
@@ -16548,6 +16557,10 @@ defmodule SymphonyElixir.CoreTest do
       delimited_wrapped_shell_read = "nice -- bash -c 'cat /etc/passwd'"
       composed_wrapped_shell_read = "env nice bash -c 'cat /etc/passwd'"
       alternate_shell_read = "/usr/bin/dash -c 'cat /etc/passwd'"
+
+      fish_init_wrapped_git_status =
+        "/usr/bin/fish --init-command='rm -rf target' -c 'git status --short --branch'"
+
       single_quote_escape_chain = "cat 'config/config.exs\\' ; rm -f target"
       wrapped_git_status = "/bin/bash -lc 'git status --short --branch'"
       wrapped_git_add = "/bin/bash -lc 'git add diff'"
@@ -16585,6 +16598,7 @@ defmodule SymphonyElixir.CoreTest do
       finite_suffixed_head = "head -c 1K config/config.exs"
       finite_suffixed_tail = "tail -v --bytes=1MiB config/config.exs"
       directory_ls = "ls tests/e2e"
+      value_option_ls = "ls --block-size 1K"
       git_diff_read = "git diff -- config/config.exs"
       git_log_read = "git log -- config/config.exs"
       git_global_diff_read = "git --no-pager diff -- /etc/passwd"
@@ -16647,6 +16661,20 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^env_wrapped_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, env_wrapped_cat, [])
+
+      assert {:error, ^untrusted_env_wrapped_scoped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 untrusted_env_wrapped_scoped_cat,
+                 []
+               )
+
+      assert {:error, ^untrusted_command_wrapped_scoped_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 untrusted_command_wrapped_scoped_cat,
+                 []
+               )
 
       assert :ok =
                AppServer.command_policy_violation_for_test(workspace, path_qualified_scoped_cat, [])
@@ -16719,6 +16747,13 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^alternate_shell_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, alternate_shell_read, [])
+
+      assert {:error, ^fish_init_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 fish_init_wrapped_git_status,
+                 []
+               )
 
       assert {:error, ^single_quote_escape_chain, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, single_quote_escape_chain, [])
@@ -16818,6 +16853,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^directory_ls, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, directory_ls, [])
+
+      assert {:error, ^value_option_ls, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, value_option_ls, [])
 
       assert {:error, ^git_diff_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, git_diff_read, [])
