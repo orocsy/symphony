@@ -14899,19 +14899,56 @@ defmodule SymphonyElixir.CoreTest do
       labels: ["runtime"]
     }
 
-    prompt = PromptBuilder.build_prompt(issue)
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-compact-prompt-#{System.unique_integer([:positive])}"
+      )
 
-    assert prompt =~ "Symphony compacted the workflow instructions"
-    assert prompt =~ "Workflow reference:"
-    assert prompt =~ "Issue snapshot:"
-    assert prompt =~ "MT-207"
-    assert prompt =~ "orocsy/mt-207-lean-prompt"
-    assert prompt =~ "first-turn-miu-handoff"
-    assert prompt =~ "review-feedback-classified"
-    assert prompt =~ "technical-miu-trace"
-    assert prompt =~ "Never merge automatically"
-    refute prompt =~ "FULL_WORKFLOW_TAIL_SHOULD_NOT_INLINE"
-    assert byte_size(prompt) < 8_000
+    try do
+      File.mkdir_p!(workspace)
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+
+      assert prompt =~ "Symphony compacted the workflow instructions"
+      assert prompt =~ "Workflow reference:"
+      assert prompt =~ "Issue snapshot:"
+      assert prompt =~ "MT-207"
+      assert prompt =~ "orocsy/mt-207-lean-prompt"
+      assert prompt =~ "Issue brief: none is present in either canonical location."
+      assert prompt =~ "Do not probe for one"
+      refute prompt =~ "If `.codex/agentic/issue-briefs/MT-207.md` exists"
+      assert prompt =~ "first-turn-miu-handoff"
+      assert prompt =~ "review-feedback-classified"
+      assert prompt =~ "technical-miu-trace"
+      assert prompt =~ "Never merge automatically"
+      refute prompt =~ "FULL_WORKFLOW_TAIL_SHOULD_NOT_INLINE"
+      assert byte_size(prompt) < 8_000
+
+      long_issue = %{
+        issue
+        | description:
+            String.duplicate("bounded issue contract ", 300) <>
+              "END_OF_COMPACT_DESCRIPTION"
+      }
+
+      truncated_prompt = PromptBuilder.build_prompt(long_issue, workspace: workspace)
+
+      assert truncated_prompt =~ "Use the runtime-confirmed issue brief when present"
+      refute truncated_prompt =~ "END_OF_COMPACT_DESCRIPTION"
+
+      brief_dir = Path.join(workspace, ".codex/agentic/issue-briefs")
+      File.mkdir_p!(brief_dir)
+      File.write!(Path.join(brief_dir, "MT-207.md"), "# MT-207 focused brief\n")
+
+      prompt_with_brief = PromptBuilder.build_prompt(issue, workspace: workspace)
+
+      assert prompt_with_brief =~
+               "Issue brief: `.codex/agentic/issue-briefs/MT-207.md` is runtime-confirmed present."
+
+      refute prompt_with_brief =~ "Issue brief: none is present"
+    after
+      File.rm_rf(workspace)
+    end
   end
 
   test "prompt builder does not duplicate issue brief already embedded in rendered issue description" do

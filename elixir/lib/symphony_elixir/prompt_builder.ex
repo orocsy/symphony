@@ -338,6 +338,9 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp compact_workflow_prompt(issue, workflow_prompt, opts) do
+    issue_brief_policy =
+      compact_issue_brief_policy(issue, Keyword.get(opts, :workspace))
+
     """
     You are working on Linear issue `#{issue_value(issue, :identifier)}`.
 
@@ -360,12 +363,12 @@ defmodule SymphonyElixir.PromptBuilder do
     #{indent(compact_issue_description(issue_value(issue, :description)))}
 
     Core workflow policy:
-    - Work only the current issue and its declared write scope. Use the Linear issue, focused issue brief, current code, and current PR review as source of truth.
+    - Work only the current issue and its declared write scope. Use the Linear issue, focused issue brief when present, current code, and current PR review as source of truth.
     - Start from `git status --short --branch`, the issue branch, the runtime dispatch preflight Base/PR target branch when listed (otherwise latest `origin/main`), and the focused files named by the issue/brief. Avoid broad logs, historical tickets, unrelated docs, and unrelated GitHub/Linear data.
-    - If `.codex/agentic/issue-briefs/#{safe_issue_identifier(issue_value(issue, :identifier))}.md` exists, read that focused brief before broad rediscovery.
+    #{issue_brief_policy}
     - First substantive progress guard: before optional skills, broad docs, recursive listings, or scanning more than eight implementation files, produce one real checkpoint:
       - Rework/existing PR: use the current-head feedback supplied by the runtime, inspect only the referenced in-scope file ranges, then make the scoped edit or record an explicit blocker. Append `review-feedback-classified` only after a scoped edit/blocker decision exists; classification alone is lifecycle context, not durable product progress.
-      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the issue brief plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
+      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the runtime-confirmed issue brief when present plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
       - Blocked issue: create an Orocsy inbox correction with the exact blocker and stop.
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
     - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
@@ -375,6 +378,16 @@ defmodule SymphonyElixir.PromptBuilder do
     - Never merge automatically from inside the worker.
     """
     |> String.trim()
+  end
+
+  defp compact_issue_brief_policy(issue, workspace) do
+    case issue_brief_reference(issue, workspace) do
+      %{path: path} ->
+        "- Issue brief: `#{path}` is runtime-confirmed present. Read that exact file before broader discovery."
+
+      _ ->
+        "- Issue brief: none is present in either canonical location. Do not probe for one; use the injected issue snapshot and active Runtime Contract gate, and query Linear only if a required field is missing."
+    end
   end
 
   defp compact_issue_description(description) when is_binary(description) do
@@ -388,7 +401,7 @@ defmodule SymphonyElixir.PromptBuilder do
         trim_text(
           text,
           @compact_issue_description_max_bytes,
-          "[Linear issue description compacted by Symphony prompt builder. Use the issue brief or Linear only if required fields are missing.]"
+          "[Linear issue description compacted by Symphony prompt builder. Use the runtime-confirmed issue brief when present, or query Linear only if required fields are missing.]"
         )
     end
   end
