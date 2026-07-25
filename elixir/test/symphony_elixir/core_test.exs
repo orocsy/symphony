@@ -16215,6 +16215,7 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, "tests/e2e/knowledge-helper.ts"), "export {};\n")
       File.write!(Path.join(workspace, "tests/e2e/declared-dir/child.ts"), "export {};\n")
       File.write!(Path.join(workspace, "config/config.exs"), "import Config\n")
+      File.write!(Path.join(workspace, "config\\config.exs"), "undeclared backslash path\n")
       File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
       File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
       File.write!(Path.join(workspace, "123"), "undeclared\n")
@@ -16558,6 +16559,12 @@ defmodule SymphonyElixir.CoreTest do
       wrapped_git_status_with_shell_option =
         "/bin/bash -o pipefail -lc 'git status --short --branch'"
 
+      env_startup_wrapped_git_status =
+        "env BASH_ENV=evil /bin/bash -lc 'git status --short --branch'"
+
+      init_file_wrapped_git_status =
+        "/bin/bash --init-file evil -i -c 'git status --short --branch'"
+
       shell_exec_cat = "/bin/bash -lc 'exec cat /etc/passwd'"
       shell_newline_cat = "/bin/bash -lc 'echo ok\ncat /etc/passwd'"
       zsh_process_substitution = "/bin/zsh -lc 'git status =(rm -rf target)'"
@@ -16565,6 +16572,7 @@ defmodule SymphonyElixir.CoreTest do
       assigned_cat = "FOO=1 cat /etc/passwd"
       exec_named_cat = "exec -a harmless cat /etc/passwd"
       legacy_nice_cat = "nice -5 cat /etc/passwd"
+      backslash_named_cat = "cat 'config\\config.exs'"
 
       tail_follow = "tail -f config/config.exs"
       tail_retry_follow = "tail -F config/config.exs"
@@ -16740,6 +16748,20 @@ defmodule SymphonyElixir.CoreTest do
                  []
                )
 
+      assert {:error, ^env_startup_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 env_startup_wrapped_git_status,
+                 []
+               )
+
+      assert {:error, ^init_file_wrapped_git_status, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 init_file_wrapped_git_status,
+                 []
+               )
+
       assert {:error, ^shell_exec_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, shell_exec_cat, [])
 
@@ -16760,6 +16782,9 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:error, ^legacy_nice_cat, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, legacy_nice_cat, [])
+
+      assert {:error, ^backslash_named_cat, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, backslash_named_cat, [])
 
       assert {:error, ^tail_follow, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, tail_follow, [])

@@ -2722,8 +2722,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp scope_read_option_token?(_token), do: true
 
   defp normalize_scope_operand_path(path) when is_binary(path) do
+    path = if match?({:win32, _}, :os.type()), do: String.replace(path, "\\", "/"), else: path
+
     path
-    |> String.replace("\\", "/")
     |> String.trim_leading("./")
     |> String.trim_trailing("/")
   end
@@ -3470,11 +3471,11 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     cond do
       name in shell_executable_names() ->
-        trusted_system_executable?(executable, shell_executable_names())
+        trusted_system_executable?(executable, shell_executable_names()) and
+          safe_shell_startup_options?(args)
 
       name == "env" ->
-        trusted_system_executable?(executable, ["env"]) and
-          trusted_shell_invocation_tokens?(candidate_env_utility_argv(args))
+        false
 
       name == "command" ->
         executable == "command" and
@@ -3498,6 +3499,21 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp trusted_shell_invocation_tokens?(_tokens), do: false
+
+  defp safe_shell_startup_options?(args) when is_list(args) do
+    args
+    |> Enum.take_while(&(&1 != "--"))
+    |> Enum.all?(fn option ->
+      cond do
+        option in ["--rcfile", "--init-file", "-i"] -> false
+        String.starts_with?(option, ["--rcfile=", "--init-file="]) -> false
+        Regex.match?(~r/\A-[A-Za-z]*i[A-Za-z]*\z/, option) -> false
+        true -> true
+      end
+    end)
+  end
+
+  defp safe_shell_startup_options?(_args), do: false
 
   defp read_tool_invocation_candidate?(command) when is_binary(command) do
     case candidate_read_argv(command) do
