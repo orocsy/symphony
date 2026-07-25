@@ -8701,6 +8701,8 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert preflight["first_task"] =~ "dirty test-spec checkpoint"
+      assert preflight["first_task"] =~ "git diff --no-ext-diff --no-textconv -- <dirty-file>"
+      assert preflight["first_task"] =~ "separate command"
       assert preflight["first_task"] =~ "implementation is intentionally not present yet"
       assert preflight["first_task"] =~ "do not edit production source"
     after
@@ -14999,7 +15001,8 @@ defmodule SymphonyElixir.CoreTest do
 
       assert String.starts_with?(prompt, "Dirty validated handoff checkpoint:")
       assert prompt =~ "guest continue regression passed"
-      assert prompt =~ "First action: inspect the focused diff with `git diff -- <dirty-file>`"
+      assert prompt =~ "git diff --no-ext-diff --no-textconv -- <dirty-file>"
+      assert prompt =~ "Never combine checkpoint reads"
       assert prompt =~ "Commit and push only after focused validation passes"
       assert prompt =~ "Do not run file-discovery commands such as `git ls-files`"
       assert prompt =~ "Do not query broad Linear/GitHub context"
@@ -16383,19 +16386,6 @@ defmodule SymphonyElixir.CoreTest do
 
       assert compound_scope_access["decision"] == "allow_once"
       assert compound_scope_access["reason_class"] == "safe_read_context"
-
-      handoff_checkpoint_chain =
-        "git status --short --branch && " <>
-          "printf '\\n--- focused diff ---\\n' && " <>
-          "git diff -- #{test_path}"
-
-      handoff_checkpoint_request =
-        SymphonyElixir.ScopeAccess.classify_command(handoff_checkpoint_chain, preflight)
-
-      assert handoff_checkpoint_request["operation"] == "read"
-      assert handoff_checkpoint_request["command_class"] == "bounded_read_chain"
-      assert handoff_checkpoint_request["paths"] == [test_path]
-      refute handoff_checkpoint_request["broad"]
 
       cross_root_chain =
         "cat config/config.exs && sed -n '1,20p' priv/data.json && cat .github/workflows/ci.yml"

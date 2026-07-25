@@ -65,8 +65,8 @@ defmodule SymphonyElixir.ScopeAccess do
     with {:ok, segments} when length(segments) > 1 <- split_read_chain(command),
          requests when length(requests) == length(segments) <-
            Enum.map(segments, &bounded_read_segment_request(&1, policy_bundle)),
-         true <- Enum.all?(requests, &bounded_exact_read_request?/1),
-         [_ | _] = paths <- requests |> Enum.flat_map(& &1["paths"]) |> Enum.uniq() do
+         true <- Enum.all?(requests, &bounded_exact_read_request?/1) do
+      paths = requests |> Enum.flat_map(& &1["paths"]) |> Enum.uniq()
       request(command, "read", "bounded_read_chain", paths, false, policy_bundle)
     else
       _ -> nil
@@ -76,8 +76,7 @@ defmodule SymphonyElixir.ScopeAccess do
   defp bounded_read_segment_request(command, policy_bundle) do
     case exact_read_segment(command) do
       {:ok, operation, command_class, paths} ->
-        broad? = command_class != "bounded_metadata_read" and broad_paths?(paths)
-        request(command, operation, command_class, paths, broad?, policy_bundle)
+        request(command, operation, command_class, paths, broad_paths?(paths), policy_bundle)
 
       :error ->
         nil
@@ -102,15 +101,6 @@ defmodule SymphonyElixir.ScopeAccess do
           [_ | _] = paths -> exact_segment_paths("search", "bounded_file_search", paths)
           _ -> :error
         end
-
-      ["git", "status", "--short", "--branch"] ->
-        {:ok, "read", "bounded_metadata_read", []}
-
-      ["git", "diff", "--" | paths] when paths != [] ->
-        exact_segment_paths("read", "git_diff", paths)
-
-      ["printf" | args] when args != [] ->
-        {:ok, "read", "bounded_metadata_read", []}
 
       _ ->
         :error
@@ -147,7 +137,7 @@ defmodule SymphonyElixir.ScopeAccess do
   defp normalize_direct_segment([executable | args]) do
     tool = Path.basename(executable)
 
-    if tool in ["sed", "cat", "head", "tail", "nl", "rg", "grep", "git", "printf"] and
+    if tool in ["sed", "cat", "head", "tail", "nl", "rg", "grep"] and
          (executable == tool or Path.dirname(executable) in ["/bin", "/usr/bin"]),
        do: [tool | args],
        else: :unclassified
@@ -311,9 +301,6 @@ defmodule SymphonyElixir.ScopeAccess do
   defp bounded_exact_read_request?(%{"operation" => operation, "paths" => [_ | _], "broad" => false})
        when operation in ["read", "search"],
        do: true
-
-  defp bounded_exact_read_request?(%{"operation" => "read", "paths" => [], "broad" => false}),
-    do: true
 
   defp bounded_exact_read_request?(_request), do: false
 
