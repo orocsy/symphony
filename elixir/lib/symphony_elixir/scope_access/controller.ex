@@ -24,6 +24,17 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       paths == [] ->
         {:block, correction(request, "missing_exact_path", "The denied command did not name an exact workspace file.")}
 
+      Enum.any?(paths, &denied_scope_path?(&1, policy)) ->
+        {:block, correction(request, "denied_scope", "An explicit denied-scope rule covers the requested path.")}
+
+      current_issue_brief_request?(paths, policy) and Map.get(policy, "mode") != "handoff_recovery" ->
+        {:block,
+         correction(
+           request,
+           "issue_brief_mode_not_allowed",
+           "Canonical issue-brief recovery authority is limited to handoff recovery."
+         )}
+
       is_map(active_patch) ->
         {:allow_once, active_patch}
 
@@ -176,18 +187,81 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       normalized in scope_bundle_paths(policy, "write_scope", ["write", "write-if-conflicted"])
   end
 
-  defp current_issue_brief?(path, %{"issue" => issue}, workspace)
+  defp current_issue_brief?(
+         path,
+         %{"issue" => issue, "mode" => "handoff_recovery"} = policy,
+         workspace
+       )
        when is_binary(path) and is_binary(issue) and is_binary(workspace) do
     safe_issue = String.replace(String.trim(issue), ~r/[^A-Za-z0-9._-]+/, "-")
     normalized = normalize_path(path)
 
-    normalized in [
-      ".orocsy/delivery/issue-brief.md",
-      Path.join([".codex/agentic/issue-briefs", "#{safe_issue}.md"])
-    ] and regular_workspace_file?(workspace, normalized)
+    canonical_issue_brief_path?(normalized, safe_issue) and
+      not denied_scope_path?(normalized, policy) and
+      regular_workspace_file?(workspace, normalized)
   end
 
   defp current_issue_brief?(_path, _policy, _workspace), do: false
+
+  defp current_issue_brief_request?(paths, %{"issue" => issue})
+       when is_list(paths) and is_binary(issue) do
+    safe_issue = String.replace(String.trim(issue), ~r/[^A-Za-z0-9._-]+/, "-")
+    Enum.any?(paths, &canonical_issue_brief_path?(normalize_path(&1), safe_issue))
+  end
+
+  defp current_issue_brief_request?(_paths, _policy), do: false
+
+  defp canonical_issue_brief_path?(path, safe_issue) do
+    path in [
+      ".orocsy/delivery/issue-brief.md",
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue}.md"])
+    ]
+  end
+
+  defp denied_scope_path?(path, policy) do
+    normalized = normalize_path(path)
+
+    policy
+    |> scope_bundle()
+    |> Map.get("denied_scope", [])
+    |> List.wrap()
+    |> Enum.any?(fn
+      %{"path" => scope} when is_binary(scope) ->
+        scope_pattern_matches?(normalized, normalize_path(scope))
+
+      _ ->
+        false
+    end)
+  end
+
+  defp scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+    cond do
+      scope == "" ->
+        false
+
+      String.ends_with?(scope, "/**") ->
+        prefix = String.trim_trailing(scope, "/**")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.ends_with?(scope, "/*") ->
+        prefix = String.trim_trailing(scope, "/*")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.contains?(scope, "*") ->
+        scope
+        |> Regex.escape()
+        |> String.replace("\\*", ".*")
+        |> then(&Regex.compile!("^#{&1}$"))
+        |> Regex.match?(path)
+
+      true ->
+        path == scope or String.starts_with?(path, scope <> "/")
+    end
+  rescue
+    _error -> false
+  end
+
+  defp scope_pattern_matches?(_path, _scope), do: false
 
   defp regular_workspace_file?(workspace, relative_path) do
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),

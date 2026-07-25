@@ -16386,6 +16386,41 @@ defmodule SymphonyElixir.CoreTest do
 
       refute current_issue_brief_request["broad"]
 
+      review_rework_preflight = Map.put(preflight, "mode", "review_rework")
+
+      assert {:block, review_rework_correction} =
+               SymphonyElixir.ScopeAccess.Controller.decide(
+                 current_issue_brief_request,
+                 review_rework_preflight,
+                 workspace
+               )
+
+      assert get_in(review_rework_correction, [:guard, "reason_class"]) ==
+               "issue_brief_mode_not_allowed"
+
+      denied_brief_preflight =
+        put_in(
+          preflight,
+          ["requirements", "scope_bundle", "denied_scope"],
+          [
+            %{
+              "path" => ".codex/agentic/issue-briefs/**",
+              "source" => "runtime_contract.denied_scope",
+              "operation" => "read",
+              "expires" => "contract"
+            }
+          ]
+        )
+
+      assert {:block, denied_brief_correction} =
+               SymphonyElixir.ScopeAccess.Controller.decide(
+                 current_issue_brief_request,
+                 denied_brief_preflight,
+                 workspace
+               )
+
+      assert get_in(denied_brief_correction, [:guard, "reason_class"]) == "denied_scope"
+
       assert :ok =
                AppServer.command_policy_violation_for_test(
                  workspace,
@@ -16417,6 +16452,43 @@ defmodule SymphonyElixir.CoreTest do
                ".codex/agentic/issue-briefs/MT-HANDOFF-SPLIT-READ.md"
 
       assert current_issue_brief_patch["source"] == "scope_access.auto.current_issue_brief"
+
+      assert {:ok, patched_preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      patched_review_rework_preflight = Map.put(patched_preflight, "mode", "review_rework")
+
+      assert {:block, patched_review_rework_correction} =
+               SymphonyElixir.ScopeAccess.Controller.decide(
+                 current_issue_brief_request,
+                 patched_review_rework_preflight,
+                 workspace
+               )
+
+      assert get_in(patched_review_rework_correction, [:guard, "reason_class"]) ==
+               "issue_brief_mode_not_allowed"
+
+      current_issue_brief_path =
+        Path.join(workspace, ".codex/agentic/issue-briefs/MT-HANDOFF-SPLIT-READ.md")
+
+      File.rm!(current_issue_brief_path)
+      File.ln_s!("/etc/passwd", current_issue_brief_path)
+
+      assert {:error, ^current_issue_brief_command, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 current_issue_brief_command,
+                 []
+               )
+
+      File.rm!(current_issue_brief_path)
+      File.write!(current_issue_brief_path, "# Current issue brief\n")
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 current_issue_brief_command,
+                 []
+               )
 
       legacy_issue_brief_path = Path.join(workspace, ".orocsy/delivery/issue-brief.md")
       File.ln_s!("/etc/passwd", legacy_issue_brief_path)
