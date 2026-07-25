@@ -16393,6 +16393,48 @@ defmodule SymphonyElixir.CoreTest do
                  []
                )
 
+      assert {:retry, 1, current_issue_brief_scope_access} =
+               AgentRunner.policy_violation_recovery_action_for_test(
+                 workspace,
+                 issue,
+                 current_issue_brief_command,
+                 "handoff_recovery_exact_read_scope",
+                 0,
+                 1
+               )
+
+      assert current_issue_brief_scope_access["decision"] == "allow_once"
+      assert current_issue_brief_scope_access["reason_class"] == "safe_read_context"
+
+      current_issue_brief_patch =
+        workspace
+        |> Path.join(current_issue_brief_scope_access["path"])
+        |> File.read!()
+        |> Jason.decode!()
+        |> get_in(["entries", Access.at(0)])
+
+      assert current_issue_brief_patch["path"] ==
+               ".codex/agentic/issue-briefs/MT-HANDOFF-SPLIT-READ.md"
+
+      assert current_issue_brief_patch["source"] == "scope_access.auto.current_issue_brief"
+
+      legacy_issue_brief_path = Path.join(workspace, ".orocsy/delivery/issue-brief.md")
+      File.ln_s!("/etc/passwd", legacy_issue_brief_path)
+      legacy_issue_brief_command = "/bin/zsh -lc 'cat .orocsy/delivery/issue-brief.md'"
+
+      legacy_issue_brief_request =
+        SymphonyElixir.ScopeAccess.classify_command(legacy_issue_brief_command, preflight)
+
+      assert {:block, legacy_issue_brief_correction} =
+               SymphonyElixir.ScopeAccess.Controller.decide(
+                 legacy_issue_brief_request,
+                 preflight,
+                 workspace
+               )
+
+      assert get_in(legacy_issue_brief_correction, [:guard, "reason_class"]) ==
+               "not_safe_read_context"
+
       assert {:error, ^unrelated_issue_brief_command, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(
                  workspace,

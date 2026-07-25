@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   @moduledoc false
 
   alias SymphonyElixir.ControllerEvidence
+  alias SymphonyElixir.PathSafety
 
   @policy_patch_dir ".orocsy/delivery/policy-patches"
   @supported_extensions ~w(.ts .tsx .js .jsx .mjs .cjs)
@@ -89,6 +90,9 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
 
   defp safe_read_entry(path, _request, policy, workspace) do
     cond do
+      current_issue_brief?(path, policy, workspace) ->
+        scope_entry(path, "scope_access.auto.current_issue_brief", "The active issue owns this canonical brief.")
+
       current_review_path?(path, policy) ->
         scope_entry(path, "scope_access.auto.current_review_path", "Current review feedback names this path.")
 
@@ -170,6 +174,32 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
 
     normalized in review_feedback_paths(policy) or
       normalized in scope_bundle_paths(policy, "write_scope", ["write", "write-if-conflicted"])
+  end
+
+  defp current_issue_brief?(path, %{"issue" => issue}, workspace)
+       when is_binary(path) and is_binary(issue) and is_binary(workspace) do
+    safe_issue = String.replace(String.trim(issue), ~r/[^A-Za-z0-9._-]+/, "-")
+    normalized = normalize_path(path)
+
+    normalized in [
+      ".orocsy/delivery/issue-brief.md",
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue}.md"])
+    ] and regular_workspace_file?(workspace, normalized)
+  end
+
+  defp current_issue_brief?(_path, _policy, _workspace), do: false
+
+  defp regular_workspace_file?(workspace, relative_path) do
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, canonical_target} <- PathSafety.canonicalize(Path.join(workspace, relative_path)),
+         true <- File.regular?(canonical_target) do
+      canonical_target != canonical_workspace and
+        String.starts_with?(canonical_target, canonical_workspace <> "/")
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
   end
 
   defp conflict_path?(path, policy) do
