@@ -24,6 +24,7 @@ review_monitor:
     - In Review
   rework_state: Rework
   request_stale_after_ms: 600000
+  request_timeout_ms: 30000
 hooks:
   timeout_ms: 300000
   after_create: |

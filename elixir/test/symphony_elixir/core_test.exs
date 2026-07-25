@@ -10095,6 +10095,55 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "GitHub review command timeout terminates and reaps the OS process" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-command-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    previous_executable = Application.get_env(:symphony_elixir, :github_executable)
+
+    try do
+      File.mkdir_p!(test_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy",
+        review_monitor_request_timeout_ms: 200
+      )
+
+      pid_path = Path.join(test_root, "github-command.pid")
+      fake_gh = Path.join(test_root, "fake-gh")
+
+      File.write!(
+        fake_gh,
+        "#!/bin/sh\nprintf '%s' \"$$\" > #{pid_path}\nexec sleep 60\n"
+      )
+
+      File.chmod!(fake_gh, 0o700)
+      Application.put_env(:symphony_elixir, :github_executable, fake_gh)
+
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, {:github_request_timed_out, :rest, 200}} =
+               SymphonyElixir.ReviewMonitor.run_github_command_for_test(["api", "user"], :rest)
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+      assert elapsed_ms < 2_000
+
+      pid = pid_path |> File.read!() |> String.trim()
+      assert {_output, exit_code} = System.cmd("kill", ["-0", pid], stderr_to_stdout: true)
+      assert exit_code != 0
+    after
+      if is_nil(previous_executable),
+        do: Application.delete_env(:symphony_elixir, :github_executable),
+        else: Application.put_env(:symphony_elixir, :github_executable, previous_executable)
+
+      File.rm_rf(test_root)
+    end
+  end
+
   test "runtime dispatch preflight does not satisfy first durable event guard" do
     test_root =
       Path.join(

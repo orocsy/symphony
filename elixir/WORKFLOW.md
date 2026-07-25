@@ -24,6 +24,7 @@ review_monitor:
   states:
     - Human Review
   rework_state: Rework
+  request_timeout_ms: 30000
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
