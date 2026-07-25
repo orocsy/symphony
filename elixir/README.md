@@ -37,7 +37,11 @@ parsed file operand is named directly by the active Runtime Contract's `write_sc
 `read_context`. The runtime rejects derived/imported context, absolute paths, wildcard operands,
 workspace symlink escapes, unsafe file-fed search options, shell composition, and substitutions.
 Configured operator bans always take precedence. A recoverable compound read is split into separate
-commands by the worker; the compound command itself is never authorized.
+commands by the worker; the compound command itself is never authorized. In `handoff_recovery`
+only, the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
+`.codex/agentic/issue-briefs/<active-id>.md` may receive the same one-read authority. Explicit
+denied scope wins, no other issue brief or dispatch mode is included, and the app-server
+canonicalizes and verifies the target as a regular workspace file immediately before execution.
 
 ### Structured Runtime Contracts
 

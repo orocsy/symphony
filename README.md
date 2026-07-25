@@ -47,7 +47,11 @@ Structured handoff recovery may read a file named directly by the active Runtime
 must be declared, derived/imported context is not promoted, shell chains and substitutions remain
 denied, and an operator-configured command ban always takes precedence. When a denied compound
 read is recoverable, the worker is instructed to split it into separate single-purpose commands;
-the runtime never authorizes the compound command itself.
+the runtime never authorizes the compound command itself. In `handoff_recovery` only, the runtime
+may also admit the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
+`.codex/agentic/issue-briefs/<active-id>.md`. Explicit denied scope takes precedence, other issue
+briefs and dispatch modes receive no such authority, and the target is revalidated as a regular
+file inside the workspace immediately before execution.
 
 ---
 
