@@ -16207,6 +16207,7 @@ defmodule SymphonyElixir.CoreTest do
       File.mkdir_p!(Path.join(workspace, "config"))
       File.mkdir_p!(Path.join(workspace, "priv"))
       File.mkdir_p!(Path.join(workspace, ".github/workflows"))
+      File.mkdir_p!(Path.join(workspace, ".codex/agentic/issue-briefs"))
       File.mkdir_p!(state_dir)
 
       File.write!(
@@ -16222,6 +16223,17 @@ defmodule SymphonyElixir.CoreTest do
       File.write!(Path.join(workspace, "priv/data.json"), "{}\n")
       File.write!(Path.join(workspace, "priv/denied.json"), "{}\n")
       File.write!(Path.join(workspace, ".github/workflows/ci.yml"), "name: ci\n")
+
+      File.write!(
+        Path.join(workspace, ".codex/agentic/issue-briefs/MT-HANDOFF-SPLIT-READ.md"),
+        "# Current issue brief\n"
+      )
+
+      File.write!(
+        Path.join(workspace, ".codex/agentic/issue-briefs/MT-OTHER.md"),
+        "# Unrelated issue brief\n"
+      )
+
       File.write!(Path.join(workspace, "123"), "undeclared\n")
       File.write!(Path.join(workspace, "1K"), "declared ls operand\n")
       File.ln_s!("/etc/passwd", Path.join(workspace, "tests/e2e/declared-symlink.spec.ts"))
@@ -16355,11 +16367,42 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_grep_command, [])
       assert :ok = AppServer.command_policy_violation_for_test(workspace, wrapped_sed_command, [])
       assert :ok = AppServer.command_policy_violation_for_test(workspace, quoted_bash_grep, [])
+      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
+
+      current_issue_brief_command =
+        "/bin/zsh -lc 'cat .codex/agentic/issue-briefs/MT-HANDOFF-SPLIT-READ.md'"
+
+      unrelated_issue_brief_command =
+        "/bin/zsh -lc 'cat .codex/agentic/issue-briefs/MT-OTHER.md'"
+
+      current_issue_brief_request =
+        SymphonyElixir.ScopeAccess.classify_command(current_issue_brief_command, preflight)
+
+      assert current_issue_brief_request["command_class"] == "bounded_file_read"
+
+      assert current_issue_brief_request["paths"] == [
+               ".codex/agentic/issue-briefs/MT-HANDOFF-SPLIT-READ.md"
+             ]
+
+      refute current_issue_brief_request["broad"]
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 current_issue_brief_command,
+                 []
+               )
+
+      assert {:error, ^unrelated_issue_brief_command, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 unrelated_issue_brief_command,
+                 []
+               )
 
       assert {:error, ^compound_command, compound_pattern} =
                AppServer.command_policy_violation_for_test(workspace, compound_command, [])
 
-      assert {:ok, preflight} = SymphonyElixir.DispatchPreflight.read(workspace)
       compound_request = SymphonyElixir.ScopeAccess.classify_command(compound_command, preflight)
 
       assert compound_request["operation"] == "read"
