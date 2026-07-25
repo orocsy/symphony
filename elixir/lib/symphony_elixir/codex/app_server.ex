@@ -2545,7 +2545,7 @@ defmodule SymphonyElixir.Codex.AppServer do
        do: {:ok, subcommand, args}
 
   defp parse_git_read_subcommand_and_args([option | rest])
-       when option in ["-p", "-P", "--paginate", "--no-pager"],
+       when option in ["-P", "--no-pager"],
        do: parse_git_read_subcommand_and_args(rest)
 
   defp parse_git_read_subcommand_and_args(_args), do: :unclassified
@@ -2811,6 +2811,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          not (Regex.match?(~r/(?:^|\s)--no-ext-diff(?:\s|$)/, normalized) and
                 Regex.match?(~r/(?:^|\s)--no-textconv(?:\s|$)/, normalized))) or
       unsafe_git_file_input_option?(command) or
+      git_executable_read_option?(command) or
       (String.starts_with?(normalized, "git ") and
          Regex.match?(~r/(?:^|\s)--(?:ext-diff|output|textconv)(?:=|\s|$)/, normalized))
   end
@@ -2862,6 +2863,31 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp unsafe_git_file_input_token?(_token), do: false
+
+  defp git_executable_read_option?(command) when is_binary(command) do
+    case normalized_read_argv(command) do
+      ["git" | args] -> unsafe_git_executable_read_args?(args, :global)
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp git_executable_read_option?(_command), do: false
+
+  defp unsafe_git_executable_read_args?([], _position), do: false
+
+  defp unsafe_git_executable_read_args?([option | rest], :global) do
+    cond do
+      option in ["-p", "--paginate"] -> true
+      option in ["diff", "log", "ls-files"] -> unsafe_git_executable_read_args?(rest, :subcommand)
+      true -> unsafe_git_executable_read_args?(rest, :global)
+    end
+  end
+
+  defp unsafe_git_executable_read_args?([option | rest], :subcommand) do
+    option == "--show-signature" or unsafe_git_executable_read_args?(rest, :subcommand)
+  end
 
   defp abbreviated_git_file_input_token?("--" <> _rest = token) do
     option_name = token |> String.split("=", parts: 2) |> List.first()
@@ -3361,7 +3387,7 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_binary(option) and is_binary(payload) do
     cond do
       Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, option) -> {:ok, payload}
-      option in ["-O", "--rcfile", "--init-file"] -> parse_shell_command_string_option(rest)
+      option in ["-O", "-o", "--rcfile", "--init-file"] -> parse_shell_command_string_option(rest)
       String.starts_with?(option, "-") -> parse_shell_command_string_option([payload | rest])
       true -> :error
     end
@@ -3390,11 +3416,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     do: ["sh", "bash", "zsh", "dash", "ash", "ksh", "mksh", "fish", "csh", "tcsh"]
 
   defp safe_wrapped_handoff_delivery_command?(command) when is_binary(command) do
-    with {:ok, payload} <- shell_command_string_argument(command),
+    with true <- trusted_shell_invocation?(command),
+         {:ok, payload} <- shell_command_string_argument(command),
          false <- command_chain_operator_outside_quotes?(payload),
          false <- Regex.match?(~r/[;&|<>()$`\\\n\r]/, payload),
-         ["git", subcommand | _args] <- OptionParser.split(payload) do
-      subcommand in ["status", "add", "commit", "push"]
+         ["git", subcommand | args] <- OptionParser.split(payload) do
+      safe_wrapped_git_delivery_args?(subcommand, args)
     else
       _ -> false
     end
@@ -3403,6 +3430,74 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp safe_wrapped_handoff_delivery_command?(_command), do: false
+
+  defp safe_wrapped_git_delivery_args?("status", args) when is_list(args) do
+    Enum.all?(args, fn arg ->
+      arg in ["-s", "-b", "--short", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2"] or
+        String.starts_with?(arg, "--untracked-files=")
+    end)
+  end
+
+  defp safe_wrapped_git_delivery_args?("add", args) when is_list(args) and args != [] do
+    args
+    |> drop_optional_delimiter()
+    |> Enum.all?(&(is_binary(&1) and &1 != "" and not String.starts_with?(&1, "-")))
+  end
+
+  defp safe_wrapped_git_delivery_args?("commit", ["-m", message]) when is_binary(message),
+    do: message != ""
+
+  defp safe_wrapped_git_delivery_args?("push", args) when is_list(args) do
+    args
+    |> drop_optional_delimiter()
+    |> Enum.all?(&(is_binary(&1) and &1 != "" and not String.starts_with?(&1, "-")))
+  end
+
+  defp safe_wrapped_git_delivery_args?(_subcommand, _args), do: false
+
+  defp trusted_shell_invocation?(command) when is_binary(command) do
+    command
+    |> OptionParser.split()
+    |> trusted_shell_invocation_tokens?()
+  rescue
+    _error -> false
+  end
+
+  defp trusted_shell_invocation?(_command), do: false
+
+  defp trusted_shell_invocation_tokens?([executable | args]) do
+    name = Path.basename(executable)
+
+    cond do
+      name in shell_executable_names() ->
+        trusted_system_executable?(executable, shell_executable_names())
+
+      name == "env" ->
+        trusted_system_executable?(executable, ["env"]) and
+          trusted_shell_invocation_tokens?(candidate_env_utility_argv(args))
+
+      name == "command" ->
+        executable == "command" and
+          trusted_shell_invocation_tokens?(candidate_command_utility_argv(args))
+
+      name == "nice" ->
+        trusted_system_executable?(executable, ["nice"]) and
+          trusted_shell_invocation_tokens?(candidate_nice_utility_argv(args))
+
+      name == "nohup" ->
+        trusted_system_executable?(executable, ["nohup"]) and
+          trusted_shell_invocation_tokens?(drop_optional_delimiter(args))
+
+      name == "exec" ->
+        executable == "exec" and
+          trusted_shell_invocation_tokens?(candidate_exec_utility_argv(args))
+
+      true ->
+        false
+    end
+  end
+
+  defp trusted_shell_invocation_tokens?(_tokens), do: false
 
   defp read_tool_invocation_candidate?(command) when is_binary(command) do
     case candidate_read_argv(command) do
@@ -3538,6 +3633,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     do: candidate_nice_utility_argv(rest)
 
   defp candidate_nice_utility_argv(["--" | rest]), do: rest
+
+  defp candidate_nice_utility_argv([option | rest]) when is_binary(option) do
+    if Regex.match?(~r/\A-\d+\z/, option), do: candidate_nice_utility_argv(rest), else: [option | rest]
+  end
+
   defp candidate_nice_utility_argv(args), do: args
 
   defp candidate_exec_utility_argv(["-a", _name | rest]),
@@ -3594,6 +3694,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp trusted_read_executable_name(_executable), do: nil
+
+  defp trusted_system_executable?(executable, allowed_names)
+       when is_binary(executable) and is_list(allowed_names) do
+    name = Path.basename(executable)
+
+    name in allowed_names and
+      (executable == name or Path.dirname(executable) in ["/bin", "/usr/bin"])
+  end
+
+  defp trusted_system_executable?(_executable, _allowed_names), do: false
 
   defp environment_assignment?(token) when is_binary(token),
     do: Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token)
