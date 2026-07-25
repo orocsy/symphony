@@ -2853,10 +2853,11 @@ defmodule SymphonyElixir.Codex.AppServer do
       "--exclude-from",
       "--pathspec-from-file",
       "--stdin",
-      "--no-index"
+      "--no-index",
+      "--exclude-per-directory"
     ] or
       Regex.match?(~r/\A(?:-O|-X).+\z/, token) or
-      Regex.match?(~r/\A--(?:order-file|exclude-from|pathspec-from-file)=.+\z/, token) or
+      Regex.match?(~r/\A--(?:order-file|exclude-from|exclude-per-directory|pathspec-from-file)=.+\z/, token) or
       abbreviated_git_file_input_token?(token)
   end
 
@@ -2869,6 +2870,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       [
         {"--order-file", "--order-f"},
         {"--exclude-from", "--exclude-f"},
+        {"--exclude-per-directory", "--exclude-p"},
         {"--pathspec-from-file", "--pathspec-f"},
         {"--no-index", "--no-inde"}
       ],
@@ -3324,9 +3326,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp git_candidate_read_subcommand?(_args), do: false
 
   defp shell_wrapper_read_candidate?(command) when is_binary(command) do
-    case shell_command_string_argument(command) do
-      {:ok, _payload} -> true
-      :error -> false
+    case command |> OptionParser.split() |> shell_invocation_argv() do
+      [shell | _args] -> Path.basename(shell) in shell_executable_names()
+      _ -> false
     end
   rescue
     _error -> false
@@ -3345,10 +3347,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp shell_command_string_argument_tokens([shell | args]) do
     if Path.basename(shell) in shell_executable_names() do
-      case Enum.find_index(args, &Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, &1)) do
-        nil -> :error
-        index -> args |> Enum.at(index + 1) |> then(&if(is_binary(&1), do: {:ok, &1}, else: :error))
-      end
+      parse_shell_command_string_option(args)
     else
       :error
     end
@@ -3356,12 +3355,31 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp shell_command_string_argument_tokens(_tokens), do: :error
 
+  defp parse_shell_command_string_option(["--" | _rest]), do: :error
+
+  defp parse_shell_command_string_option([option, payload | rest])
+       when is_binary(option) and is_binary(payload) do
+    cond do
+      Regex.match?(~r/\A-[A-Za-z]*c[A-Za-z]*\z/, option) -> {:ok, payload}
+      option in ["-O", "--rcfile", "--init-file"] -> parse_shell_command_string_option(rest)
+      String.starts_with?(option, "-") -> parse_shell_command_string_option([payload | rest])
+      true -> :error
+    end
+  end
+
+  defp parse_shell_command_string_option([option | rest]) when is_binary(option) do
+    if String.starts_with?(option, "-"), do: parse_shell_command_string_option(rest), else: :error
+  end
+
+  defp parse_shell_command_string_option(_args), do: :error
+
   defp shell_invocation_argv([executable | args]) do
     case Path.basename(executable) do
       "env" -> args |> candidate_env_utility_argv() |> shell_invocation_argv()
       "command" -> args |> candidate_command_utility_argv() |> shell_invocation_argv()
       "nice" -> args |> candidate_nice_utility_argv() |> shell_invocation_argv()
-      wrapper when wrapper in ["nohup", "exec"] -> args |> drop_optional_delimiter() |> shell_invocation_argv()
+      "nohup" -> args |> drop_optional_delimiter() |> shell_invocation_argv()
+      "exec" -> args |> candidate_exec_utility_argv() |> shell_invocation_argv()
       _ -> [executable | args]
     end
   end
@@ -3374,7 +3392,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp safe_wrapped_handoff_delivery_command?(command) when is_binary(command) do
     with {:ok, payload} <- shell_command_string_argument(command),
          false <- command_chain_operator_outside_quotes?(payload),
-         false <- String.contains?(payload, ["$(", "`", "\n", "\r"]),
+         false <- Regex.match?(~r/[;&|<>()$`\\\n\r]/, payload),
          ["git", subcommand | _args] <- OptionParser.split(payload) do
       subcommand in ["status", "add", "commit", "push"]
     else
@@ -3446,12 +3464,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp normalize_read_argv_tokens(_tokens), do: :unclassified
 
   defp candidate_read_argv_tokens([executable | args]) do
-    case Path.basename(executable) do
-      "env" -> args |> candidate_env_utility_argv() |> candidate_read_argv_tokens()
-      "command" -> args |> candidate_command_utility_argv() |> candidate_read_argv_tokens()
-      "nice" -> args |> candidate_nice_utility_argv() |> candidate_read_argv_tokens()
-      wrapper when wrapper in ["nohup", "exec"] -> args |> drop_optional_delimiter() |> candidate_read_argv_tokens()
-      _ -> normalize_direct_read_argv([executable | args])
+    if environment_assignment?(executable) do
+      candidate_read_argv_tokens(args)
+    else
+      case Path.basename(executable) do
+        "env" -> args |> candidate_env_utility_argv() |> candidate_read_argv_tokens()
+        "command" -> args |> candidate_command_utility_argv() |> candidate_read_argv_tokens()
+        "nice" -> args |> candidate_nice_utility_argv() |> candidate_read_argv_tokens()
+        "nohup" -> args |> drop_optional_delimiter() |> candidate_read_argv_tokens()
+        "exec" -> args |> candidate_exec_utility_argv() |> candidate_read_argv_tokens()
+        _ -> candidate_direct_read_argv([executable | args])
+      end
     end
   end
 
@@ -3517,6 +3540,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp candidate_nice_utility_argv(["--" | rest]), do: rest
   defp candidate_nice_utility_argv(args), do: args
 
+  defp candidate_exec_utility_argv(["-a", _name | rest]),
+    do: candidate_exec_utility_argv(rest)
+
+  defp candidate_exec_utility_argv([option | rest]) when option in ["-c", "-l"],
+    do: candidate_exec_utility_argv(rest)
+
+  defp candidate_exec_utility_argv(["--" | rest]), do: rest
+  defp candidate_exec_utility_argv(args), do: args
+
   defp normalize_env_read_argv(args) when is_list(args) do
     case drop_optional_delimiter(args) do
       [token | _rest] = argv ->
@@ -3535,11 +3567,38 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp drop_optional_delimiter(args), do: args
 
   defp normalize_direct_read_argv([executable | args]) do
+    case trusted_read_executable_name(executable) do
+      tool when is_binary(tool) -> [tool | args]
+      _ -> :unclassified
+    end
+  end
+
+  defp normalize_direct_read_argv(_args), do: :unclassified
+
+  defp candidate_direct_read_argv([executable | args]) do
     tool = Path.basename(executable)
     if tool in read_tool_names(), do: [tool | args], else: :unclassified
   end
 
-  defp normalize_direct_read_argv(_args), do: :unclassified
+  defp candidate_direct_read_argv(_args), do: :unclassified
+
+  defp trusted_read_executable_name(executable) when is_binary(executable) do
+    tool = Path.basename(executable)
+
+    cond do
+      tool not in read_tool_names() -> nil
+      executable == tool -> tool
+      Path.dirname(executable) in ["/bin", "/usr/bin"] -> tool
+      true -> nil
+    end
+  end
+
+  defp trusted_read_executable_name(_executable), do: nil
+
+  defp environment_assignment?(token) when is_binary(token),
+    do: Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*=/, token)
+
+  defp environment_assignment?(_token), do: false
 
   defp read_tool_names,
     do: ["sed", "cat", "head", "tail", "nl", "rg", "grep", "ls", "git"]

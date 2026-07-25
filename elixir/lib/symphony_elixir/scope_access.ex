@@ -137,9 +137,10 @@ defmodule SymphonyElixir.ScopeAccess do
   defp normalize_direct_segment([executable | args]) do
     tool = Path.basename(executable)
 
-    if tool in ["sed", "cat", "head", "tail", "nl", "rg", "grep"],
-      do: [tool | args],
-      else: :unclassified
+    if tool in ["sed", "cat", "head", "tail", "nl", "rg", "grep"] and
+         (executable == tool or Path.dirname(executable) in ["/bin", "/usr/bin"]),
+       do: [tool | args],
+       else: :unclassified
   end
 
   defp normalize_direct_segment(_args), do: :unclassified
