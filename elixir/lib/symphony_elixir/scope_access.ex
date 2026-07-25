@@ -45,6 +45,7 @@ defmodule SymphonyElixir.ScopeAccess do
 
   defp command_request(command, policy_bundle) do
     [
+      &bounded_read_request/2,
       &bounded_read_chain_request/2,
       &shell_chain_request/2,
       &sed_read_request/2,
@@ -59,6 +60,20 @@ defmodule SymphonyElixir.ScopeAccess do
       &patch_request/2
     ]
     |> Enum.find_value(fn classifier -> classifier.(command, policy_bundle) end)
+  end
+
+  defp bounded_read_request(command, policy_bundle) do
+    if command_chain_operator?(command) do
+      nil
+    else
+      case command |> unwrap_shell_payload() |> exact_read_segment() do
+        {:ok, operation, command_class, paths} ->
+          request(command, operation, command_class, paths, broad_paths?(paths), policy_bundle)
+
+        :error ->
+          nil
+      end
+    end
   end
 
   defp bounded_read_chain_request(command, policy_bundle) do

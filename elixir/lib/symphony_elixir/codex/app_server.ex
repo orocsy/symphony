@@ -3257,28 +3257,42 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp structured_handoff_exact_read_allowed?(_command, _workspace), do: false
 
-  defp runtime_contract_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}})
+  defp runtime_contract_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}} = preflight)
        when is_map(bundle) do
-    [
-      {Map.get(bundle, "write_scope"), ["write", "write-if-conflicted"]},
-      {Map.get(bundle, "read_context"), ["read", "search"]}
-    ]
-    |> Enum.flat_map(fn {entries, allowed_operations} ->
-      entries
-      |> List.wrap()
-      |> Enum.flat_map(fn
-        %{"path" => path, "source" => "runtime_contract." <> _, "operation" => operation}
-        when is_binary(path) and is_binary(operation) ->
-          if operation in allowed_operations, do: [normalize_requirement_path(path)], else: []
+    scope_paths =
+      [
+        {Map.get(bundle, "write_scope"), ["write", "write-if-conflicted"]},
+        {Map.get(bundle, "read_context"), ["read", "search"]}
+      ]
+      |> Enum.flat_map(fn {entries, allowed_operations} ->
+        entries
+        |> List.wrap()
+        |> Enum.flat_map(fn
+          %{"path" => path, "source" => "runtime_contract." <> _, "operation" => operation}
+          when is_binary(path) and is_binary(operation) ->
+            if operation in allowed_operations, do: [normalize_requirement_path(path)], else: []
 
-        _ ->
-          []
+          _ ->
+            []
+        end)
       end)
-    end)
+
+    (scope_paths ++ runtime_contract_issue_brief_paths(preflight))
     |> Enum.uniq()
   end
 
   defp runtime_contract_scope_bundle_read_paths(_preflight), do: []
+
+  defp runtime_contract_issue_brief_paths(%{"issue" => issue}) when is_binary(issue) do
+    safe_issue = String.replace(String.trim(issue), ~r/[^A-Za-z0-9._-]+/, "-")
+
+    [
+      ".orocsy/delivery/issue-brief.md",
+      Path.join([".codex/agentic/issue-briefs", "#{safe_issue}.md"])
+    ]
+  end
+
+  defp runtime_contract_issue_brief_paths(_preflight), do: []
 
   defp runtime_contract_scope_bundle_denied_paths(%{"requirements" => %{"scope_bundle" => bundle}})
        when is_map(bundle) do
