@@ -104,6 +104,13 @@ current runtime certificate, PR head/base/branch, raw unresolved review
 threads, CI checks, clean current-head GitHub Codex review, open corrections,
 and GitHub mergeability. Any unavailable or stale input fails closed.
 
+GitHub review-monitor REST, GraphQL, and comment commands are bounded by
+`review_monitor.request_timeout_ms` (default 30 seconds). A timed-out command
+is terminated and reaped; dispatch preflight records review inspection as
+unavailable and continues without treating unknown review state as clean.
+Increase the value in `WORKFLOW.md` only for environments where a normal
+GitHub request reliably needs longer.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 

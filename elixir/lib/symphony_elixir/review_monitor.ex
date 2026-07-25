@@ -1404,6 +1404,9 @@ defmodule SymphonyElixir.ReviewMonitor do
       {:ok, decoded} ->
         {:ok, decoded}
 
+      {:error, _reason} = error ->
+        error
+
       {output, 0} when is_binary(output) ->
         Jason.decode(output)
 
@@ -1423,7 +1426,7 @@ defmodule SymphonyElixir.ReviewMonitor do
         runner
 
       _ ->
-        fn endpoint -> System.cmd("gh", ["api", endpoint], stderr_to_stdout: true) end
+        fn endpoint -> run_github_command(["api", endpoint], :rest) end
     end
   end
 
@@ -1445,6 +1448,9 @@ defmodule SymphonyElixir.ReviewMonitor do
     case github_api_post_runner().(endpoint, fields) do
       {:ok, decoded} ->
         {:ok, decoded}
+
+      {:error, _reason} = error ->
+        error
 
       {output, 0} when is_binary(output) ->
         Jason.decode(output)
@@ -1473,7 +1479,7 @@ defmodule SymphonyElixir.ReviewMonitor do
               |> Enum.flat_map(fn {key, value} -> ["-f", "#{key}=#{value}"] end)
             )
 
-          System.cmd("gh", args, stderr_to_stdout: true)
+          run_github_command(args, :rest_post)
         end
     end
   end
@@ -1482,6 +1488,9 @@ defmodule SymphonyElixir.ReviewMonitor do
     case github_graphql_runner().(query, variables) do
       {:ok, decoded} ->
         {:ok, decoded}
+
+      {:error, _reason} = error ->
+        error
 
       {output, 0} when is_binary(output) ->
         Jason.decode(output)
@@ -1512,9 +1521,95 @@ defmodule SymphonyElixir.ReviewMonitor do
             )
             |> Kernel.++(["-f", "query=#{query}"])
 
-          System.cmd("gh", args, stderr_to_stdout: true)
+          run_github_command(args, :graphql)
         end
     end
+  end
+
+  defp run_github_command(args, operation) when is_list(args) do
+    timeout_ms = Config.settings!().review_monitor.request_timeout_ms
+    executable = Application.get_env(:symphony_elixir, :github_executable) || System.find_executable("gh")
+
+    case executable do
+      path when is_binary(path) and path != "" ->
+        port =
+          Port.open(
+            {:spawn_executable, path},
+            [:binary, :exit_status, :stderr_to_stdout, {:args, args}]
+          )
+
+        collect_github_command(
+          port,
+          operation,
+          timeout_ms,
+          System.monotonic_time(:millisecond),
+          ""
+        )
+
+      _ ->
+        {:error, {:github_executable_unavailable, operation}}
+    end
+  rescue
+    error -> {:error, {:github_request_exception, operation, Exception.message(error)}}
+  end
+
+  defp collect_github_command(port, operation, timeout_ms, started_ms, output) do
+    remaining_ms = max(0, timeout_ms - (System.monotonic_time(:millisecond) - started_ms))
+
+    receive do
+      {^port, {:data, data}} ->
+        collect_github_command(port, operation, timeout_ms, started_ms, output <> data)
+
+      {^port, {:exit_status, exit_code}} ->
+        {output, exit_code}
+    after
+      remaining_ms ->
+        terminate_github_command(port)
+        {:error, {:github_request_timed_out, operation, timeout_ms}}
+    end
+  end
+
+  defp terminate_github_command(port) do
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} when is_integer(pid) -> pid
+        _ -> nil
+      end
+
+    if is_integer(os_pid), do: signal_process(os_pid, "-TERM")
+
+    receive do
+      {^port, {:exit_status, _exit_code}} ->
+        :ok
+    after
+      250 ->
+        if is_integer(os_pid), do: signal_process(os_pid, "-KILL")
+
+        receive do
+          {^port, {:exit_status, _exit_code}} -> :ok
+        after
+          250 ->
+            if Port.info(port), do: Port.close(port)
+        end
+    end
+  rescue
+    _error ->
+      if Port.info(port), do: Port.close(port)
+      :ok
+  end
+
+  defp signal_process(os_pid, signal) do
+    case System.find_executable("kill") do
+      path when is_binary(path) -> System.cmd(path, [signal, Integer.to_string(os_pid)], stderr_to_stdout: true)
+      _ -> {"kill executable unavailable", 1}
+    end
+  end
+
+  if Mix.env() == :test do
+    @spec run_github_command_for_test([String.t()], atom()) ::
+            {String.t(), non_neg_integer()} | {:error, term()}
+    def run_github_command_for_test(args, operation),
+      do: run_github_command(args, operation)
   end
 
   defp split_repo(repo) when is_binary(repo) do
