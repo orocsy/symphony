@@ -39,8 +39,12 @@ agent:
 codex:
   # Dispatch preflight may start isolated fresh_implementation/review_rework sessions; in those modes
   # Symphony disables broad tools and rejects broad-discovery commands before Codex can run them.
+  # Structured contracts route by ticket type and certified MIU lifecycle before generic Git
+  # handoff heuristics. A committed but uncertified MIU delta is recovered; it is not restarted.
   # Review rework can admit only `git log -N --oneline [--decorate|--no-decorate]` for N=1..20
   # when no earlier operator-configured forbidden pattern rejects that exact metadata-only command.
+  # Observer token telemetry is written under .orocsy/delivery/token-telemetry and never controls
+  # dispatch, retry, correction, or completion.
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
   thread_sandbox: workspace-write

@@ -136,7 +136,9 @@ transition.
 4. Final handoff begins only after every declared MIU is certified.
 5. A write-scope path is readable by the same MIU.
 6. Contract compilation rejects overlapping allow-read and deny-read rules.
-7. A target declared as creatable must not be read or diffed before creation.
+7. A missing target declared as creatable may receive one exact-path probe, but
+   only after canonical containment proves that the missing path remains inside
+   the workspace. Existing targets must also be regular files.
 8. `allow_once` executes in the current app-server turn.
 9. Policy denial never starts a fresh model session merely to try equivalent
    command syntax.
@@ -149,6 +151,7 @@ transition.
 | --- | --- | --- |
 | R1 | clean branch, MIU 1 certified, MIU 2 remaining, local commits | `fresh_implementation` for MIU 2 |
 | R2 | same as R1, MIU 2 target absent | prompt says create target; no dirty-diff instruction |
+| R2a | current pending MIU already has a committed delta after its certification base | `handoff_recovery`; do not reimplement the MIU |
 | R3 | all MIUs certified, clean local commits | final handoff gate |
 | R4 | current MIU has a dirty declared target | focused recovery for that MIU |
 | R5 | read context overlaps denied read scope | contract rejected before dispatch |
@@ -196,7 +199,8 @@ delivery controllers as explicit extensions.
 4. Remove model-session retry as the implementation of `allow_once`.
 5. Add observer-only per-attempt and per-issue aggregate telemetry.
 6. Integrate the relevant upstream runtime changes under R9-R10.
-7. Rewrite COD-276 to one remaining MIU with a non-contradictory contract.
+7. Rewrite COD-276 into two explicit remaining MIUs: harden the existing unit
+   contract, then add the missing serial responsive E2E contract.
 8. Compile the live issue and verify the generated preflight before starting a
    real worker.
 9. Redispatch once. Stop after one abnormal attempt and compare it to R1-R11.
@@ -210,15 +214,27 @@ redispatched:
 
 - `DispatchPreflight` now derives the next structured MIU from the authoritative
   Runtime Contract and valid runtime certificates. A clean branch with a
-  certified MIU and another pending MIU enters `fresh_implementation`.
+  pending MIU enters `fresh_implementation` only when that MIU has no committed
+  delta after its certification base. A committed but uncertified delta remains
+  in `handoff_recovery`, even when the branch is clean, tracks a pushed remote
+  tip, and has no prior telemetry checkpoint. Its first task names the committed
+  pending MIU and write target; it does not fabricate a dirty-file recovery
+  instruction.
 - `PromptBuilder` clears the generic local-handoff checkpoint for that same
-  state, so certified micro commits do not hide the next MIU instructions.
+  no-delta state, so certified micro commits do not hide the next MIU
+  instructions and an uncertified microcommit is never discarded.
+- `integration-check` contracts retain integration mode before generic pending
+  MIU classification.
 - Fresh preflight names the exact next MIU and its first write target.
 - Contract compilation rejects MIU read or write scopes fully covered by
-  `denied_scope`, before a worker starts.
+  `denied_scope`, before a worker starts. It returns validation errors for
+  malformed non-list `mius` values and uses the same plain-directory descendant
+  semantics as command enforcement.
 - Handoff exact-read policy decisions, including the historical missing-target
-  command shape, are resolved in the active app-server turn. Unsafe requests are
-  denied there instead of being deferred into another model session.
+  command shape, are resolved in the active app-server turn. Existing targets
+  and missing targets are canonicalized before an allow-once decision, so a
+  declared symlink cannot escape the workspace. Unsafe requests are denied
+  there instead of being deferred into another model session.
 - Token telemetry now writes
   `.orocsy/delivery/token-telemetry/issue-aggregate.json` after every turn. It
   includes attempts, consecutive no-progress count, token totals, dominant
@@ -227,7 +243,11 @@ redispatched:
 
 Regression coverage:
 
-- R1 and R2: new clean multi-MIU test-spec lifecycle reproduction.
+- R1, R2, and R2a: clean multi-MIU progression, missing-target handling, and
+  committed-but-uncertified recovery, including a stale prior preflight plus an
+  explicit rewritten-contract certification base. The explicit migration base
+  also precedes a remote issue-branch tip when no valid current-contract
+  preflight exists, so a fresh clone cannot hide a pre-existing MIU delta.
 - R3 and R4: retained structured final-handoff and dirty-MIU recovery tests.
 - R5: new contradictory contract compiler test.
 - R6: retained write-scope exact-read tests.

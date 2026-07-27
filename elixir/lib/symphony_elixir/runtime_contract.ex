@@ -191,34 +191,35 @@ defmodule SymphonyElixir.RuntimeContract do
 
   defp validate_miu(_miu, errors), do: ["invalid_miu" | errors]
 
-  defp validate_scope_conflicts(errors, contract) do
+  defp validate_scope_conflicts(errors, %{"mius" => mius} = contract) when is_list(mius) do
     denied_scope = Map.get(contract, "denied_scope", [])
+    Enum.reduce(mius, errors, &validate_miu_scope_conflicts(&1, &2, denied_scope))
+  end
 
-    contract
-    |> Map.get("mius", [])
-    |> Enum.reduce(errors, fn raw_miu, acc ->
-      case stringify_keys(raw_miu) do
-        %{} = miu ->
-          miu_id = Map.get(miu, "id", "unknown")
+  defp validate_scope_conflicts(errors, _contract), do: errors
 
-          acc
-          |> validate_authorized_scope_not_fully_denied(
-            Map.get(miu, "write_scope", []),
-            denied_scope,
-            "write_scope",
-            miu_id
-          )
-          |> validate_authorized_scope_not_fully_denied(
-            Map.get(miu, "read_context", []),
-            denied_scope,
-            "read_context",
-            miu_id
-          )
+  defp validate_miu_scope_conflicts(raw_miu, errors, denied_scope) do
+    case stringify_keys(raw_miu) do
+      %{} = miu ->
+        miu_id = Map.get(miu, "id", "unknown")
 
-        _malformed_miu ->
-          acc
-      end
-    end)
+        errors
+        |> validate_authorized_scope_not_fully_denied(
+          Map.get(miu, "write_scope", []),
+          denied_scope,
+          "write_scope",
+          miu_id
+        )
+        |> validate_authorized_scope_not_fully_denied(
+          Map.get(miu, "read_context", []),
+          denied_scope,
+          "read_context",
+          miu_id
+        )
+
+      _malformed_miu ->
+        errors
+    end
   end
 
   defp validate_authorized_scope_not_fully_denied(
@@ -260,7 +261,7 @@ defmodule SymphonyElixir.RuntimeContract do
         scope_has_prefix?(authorized_pattern, String.trim_trailing(denied_pattern, "/*"))
 
       true ->
-        false
+        scope_has_prefix?(authorized_pattern, denied_pattern)
     end
   end
 

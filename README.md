@@ -45,13 +45,25 @@ other flags, and unbounded history remain denied.
 Structured handoff recovery may read a file named directly by the active Runtime Contract's
 `write_scope` or `read_context`. The allowance is read-only and exact-path: every parsed operand
 must be declared, derived/imported context is not promoted, shell chains and substitutions remain
-denied, and an operator-configured command ban always takes precedence. When a denied compound
+denied, and an operator-configured command ban always takes precedence. Existing targets must
+canonicalize to regular files inside the workspace; a missing declared target may be probed only
+when its canonical path remains inside the workspace. When a denied compound
 read is recoverable, the worker is instructed to split it into separate single-purpose commands;
 the runtime never authorizes the compound command itself. In `handoff_recovery` only, the runtime
 may also admit the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
 `.codex/agentic/issue-briefs/<active-id>.md`. Explicit denied scope takes precedence, other issue
 briefs and dispatch modes receive no such authority, and the target is revalidated as a regular
 file inside the workspace immediately before execution.
+
+For structured Runtime Contracts, dispatch follows ticket type and certified MIU lifecycle before
+generic Git handoff heuristics. Integration-check tickets retain integration mode. A clean branch
+with a pending MIU starts fresh implementation only when no committed delta exists after that MIU's
+certification base; otherwise Symphony recovers and certifies the existing checkpoint.
+
+Observer telemetry writes a non-authoritative per-issue aggregate under
+`.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive
+no-progress attempts, token totals, dominant phase/signature, and latest progress without changing
+dispatch state.
 
 ---
 

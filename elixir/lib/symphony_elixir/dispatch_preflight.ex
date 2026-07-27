@@ -480,8 +480,16 @@ defmodule SymphonyElixir.DispatchPreflight do
       retryable_review_rework_validation_correction?(workspace) ->
         "review_rework"
 
+      explicit_integration_check_requirements?(requirements) ->
+        "integration_check"
+
       structured_contract_has_pending_miu?(workspace, issue, requirements) and
-          clean_worktree?(workspace) ->
+          ValidationController.pending_miu_committed_delta?(struct_issue(issue), workspace) ->
+        "handoff_recovery"
+
+      structured_contract_has_pending_miu?(workspace, issue, requirements) and
+        clean_worktree?(workspace) and
+          not ValidationController.pending_miu_committed_delta?(struct_issue(issue), workspace) ->
         "fresh_implementation"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
@@ -494,9 +502,6 @@ defmodule SymphonyElixir.DispatchPreflight do
         "handoff_recovery"
 
       integration_check_review?(requirements, inspection) ->
-        "integration_check"
-
-      explicit_integration_check_requirements?(requirements) ->
         "integration_check"
 
       true ->
@@ -659,7 +664,8 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp in_progress_implementation_continuation?(workspace, requirements)
        when is_binary(workspace) and is_map(requirements) do
-    implementation_issue?(requirements) and
+    requirements["runtime_contract_status"] != "structured" and
+      implementation_issue?(requirements) and
       requirement_state(requirements) == "in progress" and
       clean_worktree?(workspace) and
       not validated_handoff_checkpoint?(workspace)
@@ -1211,7 +1217,7 @@ defmodule SymphonyElixir.DispatchPreflight do
           structured_contract? -> "runtime-contract-gate"
           true -> "gate.post-miu"
         end,
-      "first_task" => handoff_recovery_first_task(all_open_corrections, requirements),
+      "first_task" => handoff_recovery_first_task(all_open_corrections, requirements, workspace, issue),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
@@ -1229,7 +1235,12 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
-  defp handoff_recovery_first_task([correction | _], %{"runtime_contract_status" => "structured"}) do
+  defp handoff_recovery_first_task(
+         [correction | _],
+         %{"runtime_contract_status" => "structured"},
+         _workspace,
+         _issue
+       ) do
     if retryable_controller_validation_correction?(correction) do
       summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
@@ -1239,12 +1250,19 @@ defmodule SymphonyElixir.DispatchPreflight do
     end
   end
 
-  defp handoff_recovery_first_task([correction | _], _requirements) do
+  defp handoff_recovery_first_task([correction | _], _requirements, _workspace, _issue) do
     handoff_recovery_correction_task(correction)
   end
 
-  defp handoff_recovery_first_task(_open_corrections, requirements) when is_map(requirements) do
+  defp handoff_recovery_first_task(_open_corrections, requirements, workspace, issue)
+       when is_map(requirements) do
     cond do
+      is_binary(workspace) and
+        requirements["runtime_contract_status"] == "structured" and
+        clean_worktree?(workspace) and
+          ValidationController.pending_miu_committed_delta?(struct_issue(issue), workspace) ->
+        committed_pending_miu_recovery_task(workspace, issue, requirements)
+
       test_spec_issue?(requirements) and requirements["runtime_contract_status"] == "structured" ->
         "Recover the existing dirty test-spec checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Finish the named expected-failure marker, create one clean local micro commit, append the exact miu.completion_requested event from the Runtime Contract execution gate, and stop. Do not run contract-declared validation inside the Codex worker; Symphony's validation controller runs it authoritatively outside the worker sandbox. Do not edit production source or broaden scope."
 
@@ -1252,12 +1270,29 @@ defmodule SymphonyElixir.DispatchPreflight do
         "Recover the existing dirty test-spec checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
 
       true ->
-        handoff_recovery_first_task([], nil)
+        handoff_recovery_first_task([], nil, workspace, issue)
     end
   end
 
-  defp handoff_recovery_first_task(_open_corrections, _requirements) do
+  defp handoff_recovery_first_task(_open_corrections, _requirements, _workspace, _issue) do
     "Recover the existing dirty/local handoff checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. If the dirty validated checkpoint lists current passed evidence and the diff is unchanged, use that evidence and commit, push, and request/update Codex review. Otherwise run the smallest validation for those files, then either fix exact in-scope validation failures or commit/push after validation passes. Do not restart broad implementation or broaden project discovery."
+  end
+
+  defp handoff_recovery_first_task(open_corrections, requirements) do
+    handoff_recovery_first_task(open_corrections, requirements, nil, nil)
+  end
+
+  defp committed_pending_miu_recovery_task(workspace, issue, requirements) do
+    case remaining_structured_mius(workspace, issue, requirements) do
+      [%{"id" => miu_id, "write_scope" => [first_path | _]} | _] ->
+        "Continue the committed but uncertified MIU `#{miu_id}` on the clean canonical branch. Open its first declared write-scope path `#{first_path}` and compare the existing implementation with that MIU's acceptance requirements. Edit only missing in-scope behavior; if the committed delta already satisfies the MIU, do not recreate it or make an empty commit. Append the exact `miu.completion_requested` event from the Runtime Contract gate and stop so Symphony can validate and certify the existing delta."
+
+      [%{"id" => miu_id} | _] ->
+        "Continue the committed but uncertified MIU `#{miu_id}` on the clean canonical branch. Verify the existing delta against that MIU's acceptance requirements, edit only missing in-scope behavior, and do not recreate completed work or make an empty commit. Append the exact `miu.completion_requested` event from the Runtime Contract gate and stop so Symphony can validate and certify the existing delta."
+
+      _ ->
+        handoff_recovery_first_task([], nil, workspace, issue)
+    end
   end
 
   defp handoff_recovery_correction_summaries(all_open_corrections) do

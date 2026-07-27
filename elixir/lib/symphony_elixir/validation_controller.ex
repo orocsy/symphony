@@ -194,6 +194,63 @@ defmodule SymphonyElixir.ValidationController do
 
   def certified_miu_ids(_issue, _workspace), do: []
 
+  @spec pending_miu_committed_delta?(Issue.t(), String.t()) :: boolean()
+  def pending_miu_committed_delta?(%Issue{} = issue, workspace) when is_binary(workspace) do
+    with {:ok, compiled} <- structured_contract(issue),
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         completed_ids <- valid_certified_miu_ids(issue, workspace, compiled, head_sha) |> MapSet.new(),
+         miu_id when is_binary(miu_id) <-
+           Enum.find(compiled.miu_ids, &(not MapSet.member?(completed_ids, &1))),
+         {:ok, base_head_sha} <-
+           pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id),
+         {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha) do
+      changed_paths != []
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  def pending_miu_committed_delta?(_issue, _workspace), do: false
+
+  defp pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id) do
+    if List.first(compiled.miu_ids) == miu_id do
+      first_pending_miu_base_sha(issue, workspace, compiled, head_sha)
+    else
+      certification_base_sha(issue, workspace, compiled, head_sha, miu_id)
+    end
+  end
+
+  defp first_pending_miu_base_sha(issue, workspace, compiled, head_sha) do
+    case dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
+      {:ok, base_head_sha} ->
+        {:ok, base_head_sha}
+
+      :none ->
+        explicit_pending_miu_base_sha(
+          workspace,
+          compiled,
+          head_sha,
+          integration_certification_base_sha(workspace, compiled, head_sha)
+        )
+
+      {:error, _reason} = error ->
+        explicit_pending_miu_base_sha(workspace, compiled, head_sha, error)
+    end
+  end
+
+  defp explicit_pending_miu_base_sha(workspace, compiled, head_sha, fallback) do
+    explicit_base_sha = compiled.contract["certification_base_sha"]
+
+    if is_binary(explicit_base_sha) and explicit_base_sha != "" and
+         git_ancestor?(workspace, explicit_base_sha, head_sha) do
+      {:ok, explicit_base_sha}
+    else
+      fallback
+    end
+  end
+
   @spec validate_final(Issue.t(), String.t()) :: {:ok, [map()]} | {:error, term()} | {:blocked, term()}
   def validate_final(%Issue{} = issue, workspace) when is_binary(workspace) do
     with {:ok, compiled} <- structured_contract(issue),

@@ -1170,6 +1170,74 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "handoff exact-read guard rejects a declared symlink that escapes the workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-handoff-symlink-escape-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-HANDOFF-SYMLINK")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      target_path = "tests/e2e/desktop-discover.spec.ts"
+      outside_path = Path.join(test_root, "outside.spec.ts")
+      File.mkdir_p!(Path.join(workspace, "tests/e2e"))
+      File.mkdir_p!(state_dir)
+      File.write!(outside_path, "outside\n")
+      File.ln_s!(outside_path, Path.join(workspace, target_path))
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-HANDOFF-SYMLINK",
+          "write_scope" => [
+            %{
+              "path" => target_path,
+              "source" => "runtime_contract.miu:COD-276-MIU-2",
+              "operation" => "write",
+              "expires" => "contract"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "issue" => "MT-HANDOFF-SYMLINK",
+          "requirements" => %{
+            "runtime_contract_status" => "structured",
+            "ticket_type" => "test-spec",
+            "write_scope" => [target_path],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      command = "git diff --no-ext-diff --no-textconv -- #{target_path}"
+
+      assert {:error, ^command, "handoff_recovery_exact_read_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, command)
+
+      assert {:deny, decision} =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 command,
+                 "handoff_recovery_exact_read_scope"
+               )
+
+      assert decision["decision"] == "block"
+      assert decision["status"] == "blocked"
+      assert decision["reason_class"] == "workspace_path_containment_failed"
+      assert Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json")) == []
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows scope bundle read context paths in review rework implementation mode" do
     test_root =
       Path.join(

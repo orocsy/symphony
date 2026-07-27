@@ -2405,34 +2405,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       case ScopeAccess.classify_command(command, policy) do
         %{} = request ->
-          if request["broad"] == true or
-               scope_access_command_eligible?(command, request) do
-            case ScopeAccessController.decide(request, policy, workspace) do
-              {:allow_once, patch} ->
-                if scope_access_command_eligible?(command, request) do
-                  case ScopeAccessController.write_policy_patch(workspace, patch) do
-                    {:ok, written_patch} ->
-                      {:allow, {:scope_access_decision, written_patch, policy}}
-
-                    {:error, reason} ->
-                      decision =
-                        request
-                        |> ScopeAccess.decision_for()
-                        |> Map.put("reason_class", "policy_patch_write_failed")
-                        |> Map.put("error", inspect(reason))
-
-                      {:deny, decision}
-                  end
-                else
-                  :defer
-                end
-
-              {decision, correction_attrs} when decision in [:block, :escalate] ->
-                {:deny, correction_attrs}
-            end
-          else
-            :defer
-          end
+          resolve_scope_access_request(request, command, pattern, policy, workspace)
 
         _ ->
           :defer
@@ -2445,6 +2418,58 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp resolve_scope_access_violation(_command_guard, _command, _pattern), do: :defer
+
+  defp resolve_scope_access_request(request, command, pattern, policy, workspace) do
+    cond do
+      pattern == @handoff_recovery_exact_read_pattern and
+          not handoff_recovery_exact_read_canonically_safe?(command, policy, workspace) ->
+        {:deny, workspace_path_containment_denial(request)}
+
+      request["broad"] == true or scope_access_command_eligible?(command, request) ->
+        resolve_scope_access_controller_decision(request, command, policy, workspace)
+
+      true ->
+        :defer
+    end
+  end
+
+  defp workspace_path_containment_denial(request) do
+    request
+    |> ScopeAccess.decision_for()
+    |> Map.put("decision", "block")
+    |> Map.put("status", "blocked")
+    |> Map.put("reason_class", "workspace_path_containment_failed")
+  end
+
+  defp resolve_scope_access_controller_decision(request, command, policy, workspace) do
+    case ScopeAccessController.decide(request, policy, workspace) do
+      {:allow_once, patch} ->
+        maybe_write_scope_access_patch(request, command, policy, workspace, patch)
+
+      {decision, correction_attrs} when decision in [:block, :escalate] ->
+        {:deny, correction_attrs}
+    end
+  end
+
+  defp maybe_write_scope_access_patch(request, command, policy, workspace, patch) do
+    if scope_access_command_eligible?(command, request) do
+      case ScopeAccessController.write_policy_patch(workspace, patch) do
+        {:ok, written_patch} ->
+          {:allow, {:scope_access_decision, written_patch, policy}}
+
+        {:error, reason} ->
+          decision =
+            request
+            |> ScopeAccess.decision_for()
+            |> Map.put("reason_class", "policy_patch_write_failed")
+            |> Map.put("error", inspect(reason))
+
+          {:deny, decision}
+      end
+    else
+      :defer
+    end
+  end
 
   defp scope_generated_violation?(pattern, workspace)
        when is_binary(pattern) and is_binary(workspace) do
@@ -3258,6 +3283,23 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp structured_handoff_exact_read_allowed?(_command, _workspace), do: false
 
+  defp handoff_recovery_exact_read_canonically_safe?(command, preflight, workspace)
+       when is_binary(command) and is_map(preflight) and is_binary(workspace) do
+    command = unwrap_shell_login_command(command)
+
+    with true <- pure_scope_read_command?(command),
+         command_class when is_binary(command_class) <- exact_read_command_class(command),
+         paths when is_list(paths) and paths != [] <- scope_read_operand_paths(command, command_class) do
+      Enum.all?(paths, &workspace_path_existing_or_missing_safe?(workspace, &1))
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp handoff_recovery_exact_read_canonically_safe?(_command, _preflight, _workspace), do: false
+
   defp runtime_contract_scope_bundle_read_paths(%{"requirements" => %{"scope_bundle" => bundle}} = preflight)
        when is_map(bundle) do
     scope_paths =
@@ -3831,6 +3873,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp exact_handoff_path_allowed?(_workspace, _path, _allowed_paths, _denied_scopes), do: false
+
+  defp workspace_path_existing_or_missing_safe?(workspace, path)
+       when is_binary(workspace) and is_binary(path) do
+    normalized_path = normalize_scope_operand_path(path)
+
+    with false <- wildcard_path?(normalized_path),
+         false <- Path.type(normalized_path) == :absolute,
+         {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, canonical_target} <- PathSafety.canonicalize(Path.join(workspace, normalized_path)),
+         true <-
+           canonical_target != canonical_workspace and
+             String.starts_with?(canonical_target, canonical_workspace <> "/") do
+      not File.exists?(canonical_target) or File.regular?(canonical_target)
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp workspace_path_existing_or_missing_safe?(_workspace, _path), do: false
 
   defp scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
     cond do

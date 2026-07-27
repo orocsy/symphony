@@ -1216,6 +1216,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "write_scope_denied:COD-276-MIU-1:tests/private/desktop-discover.test.ts" in errors
     assert "read_context_denied:COD-276-MIU-1:src/features/discover/**" in errors
     refute "read_context_denied:COD-276-MIU-1:tests/fixtures/menu.ts" in errors
+
+    plain_directory_description =
+      issue.description
+      |> String.replace("src/**", "src/features/discover")
+      |> String.replace("src/features/discover/**", "src/features/discover/DiscoverWorkspace.tsx")
+
+    assert {:error, plain_errors} =
+             SymphonyElixir.RuntimeContract.compile(plain_directory_description)
+
+    assert "read_context_denied:COD-276-MIU-1:src/features/discover/DiscoverWorkspace.tsx" in plain_errors
   end
 
   test "runtime contract rejects glob metacharacters the scope matcher does not implement" do
@@ -1492,6 +1502,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_miu" in errors
     assert "invalid_miu_id" in errors
     assert Enum.any?(errors, &String.starts_with?(&1, "invalid_denied_scope:"))
+
+    null_mius_description = String.replace(issue.description, "mius:\n  - bad", "mius: null")
+
+    assert {:error, null_miu_errors} =
+             SymphonyElixir.RuntimeContract.compile(null_mius_description)
+
+    assert "invalid_mius" in null_miu_errors
   end
 
   test "runtime contract rejects malformed certification baselines" do

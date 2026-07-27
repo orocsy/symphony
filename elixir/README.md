@@ -36,6 +36,9 @@ During structured handoff recovery, the command guard may admit a single pure re
 parsed file operand is named directly by the active Runtime Contract's `write_scope` or
 `read_context`. The runtime rejects derived/imported context, absolute paths, wildcard operands,
 workspace symlink escapes, unsafe file-fed search options, shell composition, and substitutions.
+Existing targets are canonicalized and must be regular files inside the workspace. A declared
+missing target may be probed so a worker can establish that it must be created, but only when
+canonicalizing its missing path still resolves inside the workspace.
 Configured operator bans always take precedence. A recoverable compound read is split into separate
 commands by the worker; the compound command itself is never authorized. In `handoff_recovery`
 only, the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
@@ -47,7 +50,9 @@ canonicalizes and verifies the target as a regular workspace file immediately be
 
 Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
 contract is the sole authority for branch, write scope, MIUs, validation, and
-review behavior. The runtime certifies one clean MIU checkpoint at a time; a
+review behavior. Contract compilation rejects malformed `mius` values and any
+MIU read/write scope fully covered by denied scope, using the same directory
+descendant semantics as command enforcement. The runtime certifies one clean MIU checkpoint at a time; a
 checkpoint may contain multiple focused microcommits. Dispatch preflight
 persists the issue branch's certification baseline in HMAC-signed controller
 evidence bound to the current issue, branch, contract, and issue revision. A
@@ -65,6 +70,20 @@ Authority-bearing MIU, handoff, processed-request, and merge evidence is HMAC
 signed with a runtime key stored outside the issue workspace. Override its
 location with `SYMPHONY_CONTROLLER_EVIDENCE_KEY_PATH`; keep that file unreadable
 from worker sandboxes.
+
+Dispatch mode is derived from ticket type and this certified lifecycle before
+generic Git state. `integration-check` contracts stay in integration mode even
+while their own MIU is pending. For other structured contracts, a clean pending
+MIU starts `fresh_implementation` only when `HEAD` has no committed delta after
+the MIU certification base. A committed but uncertified delta stays in
+`handoff_recovery`, allowing validation and certification without reimplementing
+the same MIU.
+
+After each worker turn, observer-only token telemetry refreshes
+`.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes
+attempt count, consecutive no-progress attempts, token totals, dominant
+phase/signature, last durable progress, and the latest worker. No telemetry
+field participates in dispatch, retry, correction, or completion decisions.
 
 When a signed dispatch preflight is specifically in `review_rework` mode, the
 runtime may certify a pushed delta after the last MIU checkpoint without
