@@ -2448,7 +2448,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp scope_generated_violation?(pattern, workspace)
        when is_binary(pattern) and is_binary(workspace) do
-    pattern in @review_rework_forbidden_command_patterns or
+    pattern == @handoff_recovery_exact_read_pattern or
+      pattern in @review_rework_forbidden_command_patterns or
       pattern in @fresh_implementation_forbidden_command_patterns or
       pattern in review_rework_path_guard_patterns(workspace)
   end

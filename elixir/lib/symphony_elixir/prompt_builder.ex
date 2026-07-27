@@ -163,7 +163,8 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_clear_in_progress_checkpoint(checkpoint, issue, workspace)
        when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
-    if issue_in_progress?(issue) and issue_implementation?(issue) and clean_worktree?(workspace) do
+    if issue_in_progress?(issue) and clean_worktree?(workspace) and
+         (issue_implementation?(issue) or structured_contract_has_pending_miu?(issue, workspace)) do
       ""
     else
       checkpoint
@@ -171,6 +172,23 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_clear_in_progress_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
+
+  defp structured_contract_has_pending_miu?(issue, workspace) do
+    case RuntimeContract.compile(Map.get(issue, :description)) do
+      {:ok, compiled} ->
+        certified_ids =
+          issue
+          |> ValidationController.certified_miu_ids(workspace)
+          |> MapSet.new()
+
+        Enum.any?(compiled.miu_ids, &(not MapSet.member?(certified_ids, &1)))
+
+      _ ->
+        false
+    end
+  rescue
+    _error -> false
+  end
 
   defp maybe_clear_clean_rework_checkpoint(checkpoint, issue, workspace)
        when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do

@@ -11,7 +11,9 @@ defmodule SymphonyElixir.DispatchPreflight do
     KnowledgeLedger,
     PromptBuilder,
     ReviewMonitor,
+    RuntimeContract,
     ScopeAccess,
+    ValidationController,
     Workspace
   }
 
@@ -56,7 +58,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     with mode <-
            if(review_delta_recovery?,
              do: "review_rework",
-             else: preflight_mode(workspace, requirements, inspection)
+             else: preflight_mode(workspace, issue, requirements, inspection)
            ),
          :ok <-
            maybe_switch_to_review_head(
@@ -461,7 +463,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     review_feedback?(inspection) and review_feedback_for_requirements(inspection, requirements) != []
   end
 
-  defp preflight_mode(workspace, requirements, inspection) do
+  defp preflight_mode(workspace, issue, requirements, inspection) do
     cond do
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
@@ -477,6 +479,10 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       retryable_review_rework_validation_correction?(workspace) ->
         "review_rework"
+
+      structured_contract_has_pending_miu?(workspace, issue, requirements) and
+          clean_worktree?(workspace) ->
+        "fresh_implementation"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
         "fresh_implementation"
@@ -660,6 +666,44 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp in_progress_implementation_continuation?(_workspace, _requirements), do: false
+
+  defp structured_contract_has_pending_miu?(workspace, issue, requirements)
+       when is_binary(workspace) and is_map(requirements) do
+    requirements["runtime_contract_status"] == "structured" and
+      remaining_structured_mius(workspace, issue, requirements) != []
+  rescue
+    _error -> false
+  end
+
+  defp structured_contract_has_pending_miu?(_workspace, _issue, _requirements), do: false
+
+  defp remaining_structured_mius(
+         workspace,
+         issue,
+         %{"runtime_contract_status" => "structured"} = requirements
+       ) do
+    issue = struct_issue(issue)
+
+    certified_ids =
+      issue
+      |> ValidationController.certified_miu_ids(workspace)
+      |> MapSet.new()
+
+    case RuntimeContract.compile(issue.description) do
+      {:ok, compiled} ->
+        Enum.reject(compiled.contract["mius"], fn miu ->
+          MapSet.member?(certified_ids, miu["id"])
+        end)
+
+      _ ->
+        requirements
+        |> Map.get("mius", [])
+        |> Enum.map(&%{"id" => &1})
+        |> Enum.reject(fn miu -> MapSet.member?(certified_ids, miu["id"]) end)
+    end
+  end
+
+  defp remaining_structured_mius(_workspace, _issue, _requirements), do: []
 
   defp retryable_review_rework_validation_correction?(workspace) when is_binary(workspace) do
     workspace
@@ -1293,6 +1337,18 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp fresh_implementation_preflight(workspace, issue, requirements, inspection) do
+    first_task =
+      case remaining_structured_mius(workspace, issue, requirements) do
+        [%{"id" => miu_id, "write_scope" => [first_path | _]} | _] ->
+          "Continue with the next uncertified MIU `#{miu_id}` at its first declared write-scope path `#{first_path}`; make the scoped code/test change, create one clean micro commit, and request runtime MIU certification. Do not recover or revalidate already certified MIUs."
+
+        [%{"id" => miu_id} | _] ->
+          "Continue with the next uncertified MIU `#{miu_id}`; make the scoped code/test change, create one clean micro commit, and request runtime MIU certification. Do not recover or revalidate already certified MIUs."
+
+        _ ->
+          "Start with the first MIU and the first declared write-scope path only; make a scoped code/test change and then record technical-miu-trace, or record an explicit blocker before broad project scanning. Trace-only/read-only MIU notes are not durable progress."
+      end
+
     %{
       "schema_version" => 1,
       "mode" => "fresh_implementation",
@@ -1302,8 +1358,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       "branch" => fresh_implementation_branch(workspace, issue, requirements),
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" => "technical-miu-trace",
-      "first_task" =>
-        "Start with the first MIU and the first declared write-scope path only; make a scoped code/test change and then record technical-miu-trace, or record an explicit blocker before broad project scanning. Trace-only/read-only MIU notes are not durable progress.",
+      "first_task" => first_task,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
       "review" => %{

@@ -1174,6 +1174,50 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_write_scope:COD-901-MIU-1:this is explanatory prose" in errors
   end
 
+  test "runtime contract rejects MIU read and write scopes fully covered by denied scope" do
+    issue = %Issue{
+      id: "issue-contradictory-runtime-contract",
+      identifier: "COD-276",
+      title: "Contradictory discover test contract",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: test-spec
+      base_branch: main
+      integration_branch: orocsy/cod-276
+      dependencies: []
+      denied_scope:
+        - src/**
+        - tests/private/**
+      mius:
+        - id: COD-276-MIU-1
+          write_scope:
+            - tests/private/desktop-discover.test.ts
+          read_context:
+            - src/features/discover/**
+            - tests/fixtures/menu.ts
+          validations:
+            - pnpm test
+      final_validations:
+        - pnpm test
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "write_scope_denied:COD-276-MIU-1:tests/private/desktop-discover.test.ts" in errors
+    assert "read_context_denied:COD-276-MIU-1:src/features/discover/**" in errors
+    refute "read_context_denied:COD-276-MIU-1:tests/fixtures/menu.ts" in errors
+  end
+
   test "runtime contract rejects glob metacharacters the scope matcher does not implement" do
     issue = %Issue{
       id: "issue-unsupported-scope-glob",

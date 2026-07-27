@@ -79,6 +79,7 @@ defmodule SymphonyElixir.RuntimeContract do
       |> validate_string_list(contract, "dependencies")
       |> validate_optional_contract_scope(contract, "denied_scope")
       |> validate_mius(contract)
+      |> validate_scope_conflicts(contract)
       |> validate_validation_list(contract, "final_validations")
       |> validate_validation_timeout(contract)
       |> validate_review(contract)
@@ -189,6 +190,85 @@ defmodule SymphonyElixir.RuntimeContract do
   end
 
   defp validate_miu(_miu, errors), do: ["invalid_miu" | errors]
+
+  defp validate_scope_conflicts(errors, contract) do
+    denied_scope = Map.get(contract, "denied_scope", [])
+
+    contract
+    |> Map.get("mius", [])
+    |> Enum.reduce(errors, fn raw_miu, acc ->
+      case stringify_keys(raw_miu) do
+        %{} = miu ->
+          miu_id = Map.get(miu, "id", "unknown")
+
+          acc
+          |> validate_authorized_scope_not_fully_denied(
+            Map.get(miu, "write_scope", []),
+            denied_scope,
+            "write_scope",
+            miu_id
+          )
+          |> validate_authorized_scope_not_fully_denied(
+            Map.get(miu, "read_context", []),
+            denied_scope,
+            "read_context",
+            miu_id
+          )
+
+        _malformed_miu ->
+          acc
+      end
+    end)
+  end
+
+  defp validate_authorized_scope_not_fully_denied(
+         errors,
+         authorized_scope,
+         denied_scope,
+         scope_kind,
+         miu_id
+       )
+       when is_list(authorized_scope) and is_list(denied_scope) do
+    Enum.reduce(authorized_scope, errors, fn path, acc ->
+      if is_binary(path) and Enum.any?(denied_scope, &scope_fully_covers?(&1, path)) do
+        ["#{scope_kind}_denied:#{error_value(miu_id)}:#{error_value(path)}" | acc]
+      else
+        acc
+      end
+    end)
+  end
+
+  defp validate_authorized_scope_not_fully_denied(
+         errors,
+         _authorized_scope,
+         _denied_scope,
+         _scope_kind,
+         _miu_id
+       ),
+       do: errors
+
+  defp scope_fully_covers?(denied_pattern, authorized_pattern)
+       when is_binary(denied_pattern) and is_binary(authorized_pattern) do
+    cond do
+      denied_pattern == authorized_pattern ->
+        true
+
+      String.ends_with?(denied_pattern, "/**") ->
+        scope_has_prefix?(authorized_pattern, String.trim_trailing(denied_pattern, "/**"))
+
+      String.ends_with?(denied_pattern, "/*") ->
+        scope_has_prefix?(authorized_pattern, String.trim_trailing(denied_pattern, "/*"))
+
+      true ->
+        false
+    end
+  end
+
+  defp scope_fully_covers?(_denied_pattern, _authorized_pattern), do: false
+
+  defp scope_has_prefix?(path, prefix) do
+    path == prefix or String.starts_with?(path, prefix <> "/")
+  end
 
   defp validate_scope_list(errors, map, key, id) do
     case map[key] do

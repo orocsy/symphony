@@ -8889,6 +8889,100 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight advances a clean structured test-spec branch to its next uncertified MIU" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-test-spec-next-miu-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-276-next-miu",
+        identifier: "COD-276",
+        title: "Desktop V2 TDD: discover workspace states",
+        state: "In Progress",
+        branch_name: "orocsy/cod-276-desktop-v2-tdd-discover-workspace-states",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: test-spec
+        base_branch: main
+        integration_branch: orocsy/cod-276-desktop-v2-tdd-discover-workspace-states
+        dependencies: []
+        mius:
+          - id: COD-276-MIU-1
+            write_scope:
+              - tests/unit/desktop-discover.test.ts
+            validations:
+              - git diff --check
+          - id: COD-276-MIU-2
+            write_scope:
+              - tests/e2e/desktop-discover.spec.ts
+            validations:
+              - git diff --check
+        final_validations:
+          - git diff --check
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace, stderr_to_stdout: true)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      unit_path = Path.join(workspace, "tests/unit/desktop-discover.test.ts")
+      File.mkdir_p!(Path.dirname(unit_path))
+      File.write!(unit_path, "test('discover states', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/desktop-discover.test.ts"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Test discover states"], cd: workspace, stderr_to_stdout: true)
+
+      assert {:ok, %{"miu_id" => "COD-276-MIU-1"}} =
+               SymphonyElixir.ValidationController.certify_miu(
+                 issue,
+                 workspace,
+                 "COD-276-MIU-1"
+               )
+
+      refute File.exists?(Path.join(workspace, "tests/e2e/desktop-discover.spec.ts"))
+      assert PromptBuilder.workspace_recovery_checkpoint(workspace) =~ "handoff"
+
+      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["first_task"] =~ "COD-276-MIU-2"
+      assert preflight["first_task"] =~ "tests/e2e/desktop-discover.spec.ts"
+      assert preflight["first_task"] =~ "Do not recover or revalidate already certified MIUs"
+      refute preflight["first_task"] =~ "dirty"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Implement only MIU `COD-276-MIU-2`"
+      assert prompt =~ "Mode: fresh implementation"
+      refute prompt =~ "Local handoff recovery checkpoint"
+      refute prompt =~ "inspect the focused local diff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps clean in-progress implementation branches in fresh implementation mode" do
     test_root =
       Path.join(
@@ -16732,12 +16826,15 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, ^derived_context_search, _pattern} =
                AppServer.command_policy_violation_for_test(workspace, derived_context_search, [])
 
-      assert :defer =
+      assert {:deny, denied_context} =
                AppServer.scope_access_resolution_for_test(
                  workspace,
                  derived_context_search,
                  "handoff_recovery_exact_read_scope"
                )
+
+      assert get_in(denied_context, [:guard, "reason_class"]) == "not_safe_read_context"
+      assert denied_context[:next_action] == "block"
 
       assert {:error, ^command_substitution_read, "handoff_recovery_exact_read_scope"} =
                AppServer.command_policy_violation_for_test(workspace, command_substitution_read, [])
