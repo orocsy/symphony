@@ -1,0 +1,15 @@
+{
+  "turn": "codex",
+  "round": 2,
+  "sources": {
+    "design-doc": {
+      "cursor": null,
+      "artifactHash": "sha256:ca27393b1f1c4350",
+      "note": "cursor becomes the REVIEW-CYCLE.md commit SHA once codex authors round 2"
+    }
+  },
+  "falsePositiveLedger": [],
+  "roundHistory": [
+    { "round": 1, "findingsCount": 13, "resolvedIds": [] }
+  ]
+}

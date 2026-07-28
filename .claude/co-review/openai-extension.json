@@ -1,0 +1,19 @@
+{
+  "channel": "openai-extension",
+  "kind": "design",
+  "otherAgent": "codex",
+  "artifact": {
+    "description": "OpenAI-Upstream Orocsy Extension Architecture design doc, authored by codex",
+    "authoredIn": "/tmp/orocsy-symphony-openai-extension-design (branch codex/openai-extension-architecture, untracked file)",
+    "path": "elixir/docs/openai_upstream_orocsy_extension_architecture.md"
+  },
+  "sources": [
+    {
+      "id": "design-doc",
+      "adapter": "doc",
+      "path": ".claude/co-review/openai-extension/REVIEW-CYCLE.md",
+      "artifactPath": "/tmp/orocsy-symphony-openai-extension-design/elixir/docs/openai_upstream_orocsy_extension_architecture.md"
+    }
+  ],
+  "convergence": { "maxRounds": 5, "stallThreshold": 5 }
+}
