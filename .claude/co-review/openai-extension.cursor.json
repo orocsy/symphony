@@ -1,15 +1,47 @@
 {
   "turn": "codex",
-  "round": 2,
+  "round": 6,
   "sources": {
     "design-doc": {
-      "cursor": null,
-      "artifactHash": "sha256:ca27393b1f1c4350",
-      "note": "cursor becomes the REVIEW-CYCLE.md commit SHA once codex authors round 2"
+      "cursor": "2394ee8",
+      "artifactHash": "sha256:bfb4e742a19a3a29"
+    },
+    "miu-design-doc": {
+      "cursor": "764fbbf",
+      "artifactHash": "sha256:653ba76f9dabfbd2"
     }
   },
   "falsePositiveLedger": [],
   "roundHistory": [
-    { "round": 1, "findingsCount": 13, "resolvedIds": [] }
-  ]
+    {
+      "round": 1,
+      "findingsCount": 13,
+      "resolvedIds": []
+    },
+    {
+      "round": 2,
+      "findingsCount": 4,
+      "resolvedIds": [
+        "r1-p1-1",
+        "r1-p1-2",
+        "r1-p1-3",
+        "r1-p1-4",
+        "r1-p1-5",
+        "r1-p1-6",
+        "r1-p2-1",
+        "r1-p2-2",
+        "r1-p2-3",
+        "r1-p2-4",
+        "r1-p2-5",
+        "r1-p2-6",
+        "r1-p3-1"
+      ]
+    },
+    {
+      "round": 5,
+      "findingsCount": 3,
+      "resolvedIds": []
+    }
+  ],
+  "state": "active"
 }
