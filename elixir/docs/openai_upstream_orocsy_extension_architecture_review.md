@@ -12,6 +12,13 @@ Artifact reviewed: `elixir/docs/openai_upstream_orocsy_extension_architecture.md
 prefix ca27393b1f1c4350). Line references are against orocsy `main` @ 9a001b4 and
 upstream `openai/main` @ f8e8b8a, approximate.
 
+## Owner decisions taken during review
+
+- **2026-07-29 — Worker backend is Codex-only.** No multi-worker support and no
+  reserved seam for one. Codex-specific naming and protocol semantics in the
+  kernel are accepted deliberately. See the resolved worker-heterogeneity
+  finding below; the design doc must add this to Non-Goals.
+
 ## Plain-language summary
 
 The fork's problem: three months of custom delivery logic (~27,500 added lines)
@@ -229,21 +236,36 @@ are also what replay fixtures and the canary comparison will diff), and state
 whether the durable admission-record move to <runtime-state-root>/admission/
 coexists with the workspace-local state layout.
 
-### [P2] Worker-backend heterogeneity — decide now as a reserved seam or an explicit non-goal (#non-goals)
+### [P2 — RESOLVED by owner decision 2026-07-29] Worker backend is Codex-only; state it as an explicit non-goal (#non-goals)
 
-The runtime's operating goal includes dispatching workers on Linear tickets
-where the worker backend may not always be Codex. Today Codex is welded in at
-every layer: the only behaviour in either tree is Tracker; protocol constants,
-config namespace (codex.*), orchestrator state keys (codex_totals,
-codex_rate_limits), and message atoms ({:codex_worker_update, ...}) are all
-Codex-named, and Interface 3's own definition says "inside the active Codex
-app-server turn". A WorkerRuntime behaviour would be a fifth extension point
-larger than the other four combined — deferring it is legitimate, but the doc
-is currently silent, and silence shapes interface signatures in Codex-specific
-ways that are expensive to undo. Either add it to Non-Goals with a
-reserved-seam note (keep CommandIntent/TurnContext/RunPlan worker-agnostic in
-naming and shape; config gains worker.kind with codex as sole implementation),
-or scope it as a post-cutover slice.
+Original finding: the doc was silent on whether the worker backend must stay
+Codex. Today Codex is welded in at every layer — the only behaviour in either
+tree is Tracker; protocol constants, config namespace (codex.*), orchestrator
+state keys (codex_totals, codex_rate_limits), and message atoms
+({:codex_worker_update, ...}) are all Codex-named, and Interface 3's own
+definition says "inside the active Codex app-server turn". A WorkerRuntime
+behaviour would have been a fifth extension point larger than the other four
+combined.
+
+**Decision (repository owner, 2026-07-29): Codex is the only supported worker
+backend. No multi-worker compatibility layer, now or as a reserved seam.**
+
+Required doc change: add to Non-Goals — "Supporting worker backends other than
+the Codex app-server." Consequences, all of which simplify the plan and should
+be stated rather than left implicit:
+
+- No fifth interface. The extension set is exactly the four described (plus the
+  prompt-composer and notary roles from the first P1 finding).
+- Codex-specific naming in kernel state, config (`codex.*`), message atoms, and
+  interface names is accepted deliberately, not by omission. Interface 3 keeping
+  "Codex app-server turn" in its definition is correct.
+- Codex protocol semantics may be treated as kernel semantics — turn/thread
+  lifecycle, approval methods, token/rate-limit payload shapes — so the kernel
+  is not obliged to abstract them behind neutral types.
+- Reversal cost if this ever changes: a rename sweep across orchestrator state
+  keys, config schema, message atoms, and the dashboard presenter, plus a new
+  worker behaviour and a rewrite of the agent-runner turn loop. That is a real
+  cost, accepted knowingly; it is not a hidden risk.
 
 ### [P3] Rejection dedupe keying and two migration landmines (#rejection-behavior)
 
