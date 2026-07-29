@@ -283,6 +283,32 @@ checkpoint writer). Rename the ported fork concept (e.g. CertificationBaseline)
 before pinning the baseline to avoid two meanings of "preflight" in one
 codebase.
 
+## Codex Disposition — 2026-07-29
+
+The review was independently checked against Orocsy `main`, OpenAI
+`f8e8b8a`, and the proposed design. Disposition:
+
+| Finding | Disposition | Design response |
+| --- | --- | --- |
+| Prompt/session composition and notarization ownership | Valid | Kept four public interfaces; added `DeliveryController` with private `PromptComposer`, `EvidenceNotary`, `ValidationRunner`, policy, and executor roles. |
+| Legacy telemetry is a live policy input | Valid | Explicitly classified observer-only behavior as a migration; raw counters move to `ProgressEvidence`. |
+| Command authorization requires receive-loop context | Valid | Added immutable `TurnContext`, shell/tool intent union, facade-only call site, and upstream hook proposal. |
+| Kernel patch has no drift enforcement | Valid | Added `UPSTREAM_PATCH_BUDGET.yml`, `mix extensions.audit`, no-op differential tests, and upstream host proposal. |
+| Replay harness and durable fixtures are missing | Valid | Moved sanitizer, fixture schema, archive, and harness skeleton to Slice 0. |
+| Migration-window fork changes are unspecified | Valid | Froze feature/refactor work on fork `main`; added a production-hotfix port-forward ledger. |
+| Legacy-to-target module mapping is missing | Valid | Added explicit module mapping and supersession notices. |
+| DeliverySnapshot lacks controller inputs/live merge guard | Valid | Added nested progress, provider, history, certificate, worker, toolchain, and operator evidence; merge re-fetches preconditions. |
+| RescueSupervisor replacement could deadlock | Valid | Added typed unblock classes, operator decisions, and background reconciliation events. |
+| Validation needs an effectful owner | Valid | Added private `ValidationRunner` behind bounded `DeliveryExecutor`. |
+| Workspace CLI/state contracts are unversioned | Valid | Added the Workspace Delivery Protocol and compatibility gate. |
+| Worker-backend ownership | Resolved by owner | Codex-only is now an explicit non-goal; no generic worker seam is reserved. |
+| Rejection key, eligibility, and preflight naming | Valid with refinement | Malformed contracts use `contract_source_hash` plus error/policy fingerprint; added eligibility tests and retired Orocsy `DispatchPreflight` naming. |
+
+One supporting assertion in the review is incorrect:
+`ProgressController.decide/1` is called by the current orchestrator. That does
+not invalidate the kernel-drift finding, which is supported independently by
+the size, same-path overlap, and repeated policy implementations.
+
 ## Nits (seen, intentionally not blocking)
 
 An explicit no-op-differential E-scenario could be added (Slice 1 already
