@@ -956,7 +956,9 @@ an immediate upstream-baseline comparison.
 - Before branch setup, protect the retained raw trace sources from rotation or
   deletion, compute checksums, and record an owner and privacy-approved
   restricted quarantine location. Raw logs remain outside Git and are not the
-  long-lived replay corpus.
+  long-lived replay corpus. Source-in-place evidence is recorded in
+  `openai_extension_trace_corpus_receipt.md`; it does not claim durable
+  external preservation.
 - Add `UPSTREAM_BASE.yml`.
 - Add the OpenAI remote and sync procedure.
 - Preserve the upstream test suite.

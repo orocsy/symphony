@@ -86,10 +86,11 @@ may be copied only to an owner-approved, access-restricted quarantine. That
 quarantine is not the replay corpus or long-lived archive.
 
 `OXE-0.5` owns sanitization, automated secret scanning, human privacy review,
-and the receipt for the redacted durable archive. If no approved quarantine
-exists, protect the source files in place and block migration bootstrap until
-an owner, location, retention policy, and checksum receipt are recorded. This
-design does not claim that external preservation has already occurred.
+and the receipt for the redacted durable archive. The current source-in-place
+protection and checksum evidence are recorded in
+`openai_extension_trace_corpus_receipt.md`. No approved external quarantine
+or durable preservation is claimed; the receipt keeps the single-host loss
+risk explicit.
 
 The bootstrap operation is also a migration prerequisite rather than a
 behavior MIU. The numbered boxes after it are provisional boundaries; this
