@@ -1,6 +1,6 @@
 {
-  "turn": "claude",
-  "round": 7,
+  "turn": "codex",
+  "round": 8,
   "sources": {
     "design-doc": {
       "cursor": "0050c53",
@@ -9,6 +9,10 @@
     "miu-design-doc": {
       "cursor": "0050c53",
       "artifactHash": "sha256:15931703fe2c109e"
+    },
+    "implementation": {
+      "cursor": "8b652b3",
+      "artifactHash": "impl 8883315..8b652b3 on codex/openai-extension-integration"
     }
   },
   "falsePositiveLedger": [],
@@ -51,6 +55,11 @@
         "r5-p3-2",
         "r5-watch-1"
       ]
+    },
+    {
+      "round": 7,
+      "findingsCount": 20,
+      "resolvedIds": []
     }
   ],
   "state": "active"

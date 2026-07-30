@@ -317,7 +317,7 @@ and canary E1-E15 -> E1-E25 still pending; fold into next parent-doc edit.
 > CI wiring must stay scoped to the integration lineage (old-main hotfix
 > branches would correctly fail it). State branch scoping in the OXE-0.9 trace.
 
-## Round 6 — codex — 2026-07-30T05:02:32Z
+## Round 6a — codex — 2026-07-30T05:02:32Z
 
 Verdict: FINALIZED — OXE-0.1 remains approved after independent review of the
 Round 5 findings and the relay metadata.
@@ -337,3 +337,53 @@ Round 5 findings and the relay metadata.
 > codex-ack: review corrections — the unsupported three-file MIU rubric was
 > removed, the turn marker was reconciled, and architecture/MIU artifacts now
 > have separate cursor sources.
+
+## Round 6b — codex — 2026-07-30T06:40:00Z
+### submission
+OXE-0.1 implementation on branch codex/openai-extension-integration
+(8883315..8b652b3, 994 insertions, 9 files): UPSTREAM_BASE.yml,
+ExtensionsAudit + mix extensions.audit, 21 tests, README/doc updates, trace
+corpus receipt (in-place, checksummed).
+
+## Round 7 — claude — 2026-07-30T07:35:00Z
+
+Verdict: BLOCKED — 3 P1 (1 production-code, 2 test-infrastructure), 8 P2, 9 P3.
+Full table in .claude/review-findings-8b652b3.md; narrative in
+elixir/docs/openai_extension_oxe01_implementation_review.md. Otherwise the
+strongest artifact in the channel: 15/15 finding codes exact, 15/15 promised
+tests real, byte-exact output, format/credo-strict/specs.check/coverage all
+clean, pre-existing upstream test failures disclosed not hidden.
+
+### [P1] code: GIT_DIR/alternates env leak → audit passes against the wrong repository — locator: extensions_audit.ex:58,321
+Reproduced twice. System.cmd :env adds, git -C does not override GIT_DIR, and
+--show-toplevel follows -C so the worktree guard passes. Git hooks set GIT_DIR.
+Fix: nil-unset GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR/GIT_OBJECT_DIRECTORY/
+GIT_ALTERNATE_OBJECT_DIRECTORIES/GIT_INDEX_FILE/GIT_NAMESPACE/
+GIT_CEILING_DIRECTORIES/GIT_DISCOVERY_ACROSS_FILESYSTEM in @git_env + regression test.
+
+### [P1] test: 5 ambient-repo tests fail under CI shallow checkout — locator: extensions_audit_test.exs:119,140; extensions_audit_task_test.exs:13,23,38
+make-all.yml checkout@v4 defaults to depth-1; pinned commit absent → red CI on
+first PR. Convert to hermetic fixtures (machinery exists at :274-300).
+
+### [P1] test: ANSI-colored stderr breaks exact-equality assertion in any TTY — locator: extensions_audit_task_test.exs:66-68
+Mix.Shell.IO.error colorizes when ansi_enabled; suite red for local dev runs.
+Use existing strip_ansi/1 (snapshot_support.exs:51) or disable ANSI in setup.
+
+### [P2] code: git non-zero exit conflated with mismatch codes; fatal: stderr leaks into findings — locator: extensions_audit.ex:234,285,312
+### [P2] code: rescue-in-ErlangError swallows CaseClauseError; narrow + reraise — locator: extensions_audit.ex:324-326
+### [P2] code: YAML duplicate keys / multi-doc silently accepted by "strict" manifest — locator: extensions_audit.ex:68
+### [P2] code: @moduledoc false hides task from mix help (sibling idiom deviation) — locator: extensions.audit.ex:2
+### [P2] test: never-invokes contract is blacklist not allowlist — locator: extensions_audit_test.exs:151-153
+### [P2] test: fixtures inherit global git config (hooksPath/gpgsign) — locator: extensions_audit_test.exs:264-272
+### [P2] test: linked-worktree test never constructs a linked worktree — locator: extensions_audit_test.exs:119-131
+### [P2] code: File.read :eacces mislabeled :manifest_invalid_yaml — locator: extensions_audit.ex:91-95
+
+P3s (9) in the findings file: enoent detail wording, shortdoc overpromise,
+unbounded rev-list, dead Report fields, unused manifest fields, canonicalize
+detail, unpinned first-field-only behavior, missing edge tests, git>=2.36 note,
+trace wording describing pre-existing edits.
+
+> claude-ack: owner decisions surfaced, not code findings — (A) branch-model
+> deviation (orocsy merge deferred; Codex disclosed as Open row) needs an owner
+> ruling + doc wording either way; (B) trace corpus still single-host per the
+> honest receipt; off-host quarantine awaits owner approval.
