@@ -158,3 +158,63 @@ One review recommendation was not accepted literally: copying raw logs to
 general durable storage before redaction would violate the architecture's
 privacy boundary. The finalized design separates restricted quarantine from
 the redacted long-lived archive while preserving the urgency of the finding.
+
+---
+
+# Round 2 addendum (2026-07-30) — owner ruling on dual-fidelity, and one new P1 design requirement
+
+## Owner ruling (recorded)
+
+The owner ruled on the branch-sequencing question: **intermediate branch
+mechanics do not matter. What matters is that the final runtime provably
+preserves BOTH the fork's three months of delivery improvements AND upstream's
+battle-proven behavior.** Working directly on the pinned baseline is blessed;
+the MIU precondition wording ("merge Orocsy history first") should be relaxed
+to match, and the merge remains Slice 2's concern.
+
+## Double-check result: the two sides are NOT equally protected today
+
+Asked to verify that the design guarantees both sides, I re-audited revision 2.
+
+**Upstream side — structurally protected, no gap.** Pinned immutable baseline
+verified by OXE-0.1; same-path files resolved in upstream's favor; no-op
+extension mode must be behaviorally identical to the pinned kernel (E16);
+kernel divergence capped by the patch budget + `mix extensions.audit`; every
+FUTURE upstream commit gets a per-commit `adopt/adapt/superseded/irrelevant`
+classification in sync governance. Upstream behavior cannot silently drift.
+
+**Orocsy side — protected in depth but not in COVERAGE.** The design ports a
+behavior only when "a characterization test and an explicit extension owner
+prove that the behavior is still required" — drop-by-default. That is the
+right default for accidental behavior, but nothing enumerates the candidate
+set. The port-forward ledger covers only freeze-window hotfixes; the per-commit
+classification covers only upstream commits. The existing 229 fork commits —
+the very thing the owner does not want to lose — have NO completeness
+mechanism: a behavior nobody happens to write a characterization test for
+vanishes without anyone having decided to drop it. "We decided to drop X" and
+"X fell through the cracks" are indistinguishable in the current design.
+
+### [P1] design: add a fork-behavior disposition ledger with a zero-unclassified gate — locator: OXE-0.7 / Slice 0
+
+Requirement for the OXE-0.7 trace (and a sentence in the parent architecture):
+apply the design's own ledger tool — already used twice, for upstream commits
+and for hotfixes — to the existing fork history.
+
+- **Seed rows mechanically.** The 229 commits cluster tractably: 199 May
+  commits built the delivery layer that `workflows/symphony-runtime-delivery.md`
+  (Status: Implemented) already specifies behavior-by-behavior — disposition
+  those at the behavior level from that document plus the three design docs
+  and E1-E25. The 30 June/July commits are discrete reviewed incident fixes
+  (#4x-#73) — one row each, since each encodes a production lesson.
+- **Every row gets exactly one disposition:** `port` (names its
+  characterization test + target owner from the Legacy-To-Target mapping) /
+  `superseded-by-upstream` (names the upstream commit) / `drop`
+  (owner-acknowledged, with reason) / `defer` (named slice).
+- **Completeness is gated, not aspirational:** OXE-0.9 and the cutover
+  checklist require zero unclassified rows, mirroring "port-forward ledger has
+  no unresolved port entries."
+
+This makes the owner's ruling enforceable in both directions: upstream fidelity
+is already machine-checked by OXE-0.1; fork fidelity becomes checkable by the
+ledger + characterization corpus. Without it, only one side of the "respect
+both" promise has teeth.

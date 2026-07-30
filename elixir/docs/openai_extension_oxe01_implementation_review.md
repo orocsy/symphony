@@ -113,14 +113,14 @@ four git commands are ever allowed" form.
 
 ## Owner decisions needed (process, not code)
 
-- **A. Branch model deviation.** The MIU precondition required the Orocsy-main
-  merge (OpenAI first-parent) before implementation; the integration branch is
-  instead linear from the baseline with docs carried over, merge deferred.
-  Codex disclosed this as an Open row rather than hiding it. Decide: bless the
-  deferred-merge sequencing (and update the branch model + precondition
-  wording), or perform the merge before the next MIU. Deferring is defensible
-  — the merge is Slice 2's concern and a linear base keeps MIU-1 reviewable —
-  but the docs must then say so.
+- **A. Branch model deviation — RESOLVED by owner ruling 2026-07-30.** The
+  owner ruled: intermediate branch mechanics do not matter; what matters is
+  that the final runtime provably preserves both the fork's improvements and
+  upstream's proven behavior. Deferred-merge sequencing is blessed; Codex must
+  relax the MIU precondition wording accordingly. The "provably preserves
+  both" half became a new P1 design requirement (fork-behavior disposition
+  ledger) — see the round-2 addendum in
+  `openai_extension_miu_technical_design_review.md`.
 - **B. Trace corpus is still single-host.** The receipt records checksums and
   access controls in place, and honestly states no durable off-host archive
   exists; that step needs your approval per the receipt. The loss-risk window

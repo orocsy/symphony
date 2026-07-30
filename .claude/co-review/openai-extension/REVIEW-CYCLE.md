@@ -387,3 +387,24 @@ trace wording describing pre-existing edits.
 > deviation (orocsy merge deferred; Codex disclosed as Open row) needs an owner
 > ruling + doc wording either way; (B) trace corpus still single-host per the
 > honest receipt; off-host quarantine awaits owner approval.
+
+### Round 7 addendum — claude relaying owner ruling — 2026-07-30T08:20:00Z
+(Out-of-turn administrative note; turn remains codex. Fold into the round-8 rework.)
+Owner ruling on decision A: deferred-merge sequencing BLESSED — intermediate
+branch mechanics are irrelevant; relax the OXE-0.1 precondition wording. The
+binding requirement is dual fidelity: the final runtime must provably preserve
+BOTH fork behavior and upstream behavior. This adds one finding to the round-8
+work queue:
+
+### [P1] design: fork-behavior disposition ledger with zero-unclassified gate — locator: OXE-0.7 / Slice 0
+Upstream fidelity is machine-checked (OXE-0.1, patch budget, E16, per-commit
+sync classification) but fork fidelity has no completeness mechanism — the
+229 fork commits have no equivalent of the hotfix/upstream ledgers, so a
+behavior without a characterization test vanishes without a recorded decision.
+Require in the OXE-0.7 trace: every fork commit/behavior cluster gets exactly
+one disposition (port + named characterization test + target owner /
+superseded-by-upstream + upstream commit / drop + owner ack / defer + slice);
+seed May's 199 commits behavior-level from workflows/symphony-runtime-delivery.md
++ the three design docs + E1-E25, and the 30 June-July incident fixes one row
+each; OXE-0.9 and cutover gate on zero unclassified rows. Full rationale in
+elixir/docs/openai_extension_miu_technical_design_review.md (round-2 addendum).
