@@ -1252,6 +1252,14 @@ Orocsy still enforces the patch budget, facade-only imports, no-op differential
 tests, and an explicit upstream baseline. A rejected upstream proposal does not
 justify moving policy back into kernel files.
 
+## Technical MIU Traces
+
+Implementation detail is developed incrementally in
+`openai_extension_miu_technical_design.md`. Its current revision decomposes
+Slice 0 and fully specifies `OXE-0.1`, the pinned upstream-baseline verifier.
+The trace is design-only and does not authorize runtime implementation before
+the approval gate below is accepted.
+
 ## Approval Gate
 
 No runtime implementation begins until this design is reviewed and the
