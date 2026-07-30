@@ -4,7 +4,7 @@ Status: Proposed, revision 2 after architecture review
 
 Date: 2026-07-28
 
-Last revised: 2026-07-29 after review round 1
+Last revised: 2026-07-30 after OXE-0.1 technical review
 
 ## Decision
 
@@ -542,7 +542,7 @@ immediately before mutation and fail closed if they differ.
 stateDiagram-v2
   [*] --> AdmissionPending
   AdmissionPending --> ContractRejected: invalid contract
-  ContractRejected --> AdmissionPending: issue revision changed
+  ContractRejected --> AdmissionPending: contract source or policy changed
   AdmissionPending --> Ready: admitted
 
   Ready --> RunningMIU: dispatch
@@ -953,6 +953,10 @@ an immediate upstream-baseline comparison.
 
 #### Slice 0: Characterization And Baseline
 
+- Before branch setup, protect the retained raw trace sources from rotation or
+  deletion, compute checksums, and record an owner and privacy-approved
+  restricted quarantine location. Raw logs remain outside Git and are not the
+  long-lived replay corpus.
 - Add `UPSTREAM_BASE.yml`.
 - Add the OpenAI remote and sync procedure.
 - Preserve the upstream test suite.
@@ -1070,12 +1074,18 @@ for a diverged fork.
 Add a permanent read-only `openai` remote and a baseline manifest:
 
 ```yaml
+schema_version: 1
 repository: https://github.com/openai/symphony
 commit: f8e8b8a670c799f6e0ade7a8c25c4bf4a4a56ec7
+tree: 37a4c6c184db05cd2d59bfc50943979919ec988a
+elixir_tree: 77d9ba67775e6681eb1ad5cf03a019e678a8e941
 version: 0.0.2
 spec_status: draft-v1
 verified_at: 2026-07-29
 ```
+
+`UPSTREAM_BASE.yml` is the machine authority for this identity. The strict
+schema rejects unknown keys and short object IDs.
 
 Each upstream-sync task must:
 
@@ -1168,7 +1178,9 @@ The canary passes only when:
 - telemetry explains token use without influencing the outcome
 
 Stop after the first abnormal attempt and compare its typed decision,
-fingerprint, wake condition, and evidence against E1-E15.
+fingerprint, wake condition, and evidence against the applicable E1-E25
+scenarios. The canary plan records which scenarios it exercises and which are
+proven by replay, contract, or CI gates instead.
 
 ## Cutover And Rollback
 
@@ -1256,9 +1268,9 @@ justify moving policy back into kernel files.
 
 Implementation detail is developed incrementally in
 `openai_extension_miu_technical_design.md`. Its current revision decomposes
-Slice 0 and fully specifies `OXE-0.1`, the pinned upstream-baseline verifier.
-The trace is design-only and does not authorize runtime implementation before
-the approval gate below is accepted.
+Slice 0 and specifies the approved `OXE-0.1` pinned upstream-baseline
+verifier. Approval remains conditional on accepting the parent architecture
+gate below; no runtime implementation has begun.
 
 ## Approval Gate
 

@@ -1,8 +1,10 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: Proposed — first MIU ready for technical review
+Status: Approved for implementation after the parent architecture approval gate
 
 Date: 2026-07-29
+
+Last reviewed: 2026-07-30
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -48,24 +50,26 @@ commit, not on this design branch.
 
 ```mermaid
 flowchart LR
+  Preserve["Immediate pre-Slice action\nprotect source logs + checksum\napproved restricted quarantine only"]
   Bootstrap["Migration bootstrap\nOpenAI-first-parent integration branch"]
   Baseline["OXE-0.1\nBaseline identity verifier"]
   Budget["OXE-0.2\nKernel patch-budget audit"]
   Eligibility["OXE-0.3\nIssue eligibility characterization"]
   Protocol["OXE-0.4\nWorkspace protocol compatibility"]
-  Corpus["OXE-0.5\nTrace archive and sanitizer"]
+  Sanitizer["OXE-0.5\nTrace sanitizer + archive receipt"]
   Replay["OXE-0.6\nReplay schema and harness"]
   Behavior["OXE-0.7\nAccepted Orocsy behavior corpus"]
   Conformance["OXE-0.8\nUpstream conformance runner"]
   Gate["OXE-0.9\nSlice 0 integration gate"]
 
+  Preserve --> Bootstrap
   Bootstrap --> Baseline
   Baseline --> Budget
   Baseline --> Eligibility
   Baseline --> Protocol
-  Baseline --> Corpus
+  Baseline --> Sanitizer
   Baseline --> Conformance
-  Corpus --> Replay
+  Sanitizer --> Replay
   Eligibility --> Behavior
   Replay --> Behavior
   Budget --> Gate
@@ -74,9 +78,27 @@ flowchart LR
   Conformance --> Gate
 ```
 
-The bootstrap operation is a migration prerequisite rather than a behavior
-MIU. The other boxes are provisional boundaries; this document does not
-authorize their implementation.
+Raw trace preservation is an immediate operational prerequisite, not an MIU
+and not branch-gated. Before migration branch work, protect the retained source
+logs from rotation or deletion and compute their checksums. Raw logs may
+contain prompts, tool payloads, paths, or secrets: they remain outside Git and
+may be copied only to an owner-approved, access-restricted quarantine. That
+quarantine is not the replay corpus or long-lived archive.
+
+`OXE-0.5` owns sanitization, automated secret scanning, human privacy review,
+and the receipt for the redacted durable archive. If no approved quarantine
+exists, protect the source files in place and block migration bootstrap until
+an owner, location, retention policy, and checksum receipt are recorded. This
+design does not claim that external preservation has already occurred.
+
+The bootstrap operation is also a migration prerequisite rather than a
+behavior MIU. The numbered boxes after it are provisional boundaries; this
+document does not authorize their implementation.
+
+`OXE-0.9` must execute the baseline audit only for the new integration
+lineage. Old-`main` freeze-window hotfix branches correctly fail the ancestry
+check and must not run that gate. Shared CI configuration remains allowed when
+branch or lineage conditions enforce this scope.
 
 ## MIU OXE-0.1 - Verify The Pinned Upstream Baseline
 
@@ -448,7 +470,7 @@ Acceptance conditions:
 
 ## Next Design Action
 
-After `OXE-0.1` is reviewed, write the `OXE-0.2` trace. It must derive its
-initial allowed kernel paths from an actual extension-host hook prototype
-against the pinned OpenAI tree; it must not guess line budgets from the current
-Orocsy fork.
+`OXE-0.1` is approved, conditional on the parent architecture approval gate.
+Next, write the `OXE-0.2` trace. It must derive its initial allowed kernel
+paths from an actual extension-host hook prototype against the pinned OpenAI
+tree; it must not guess line budgets from the current Orocsy fork.

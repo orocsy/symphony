@@ -1,14 +1,14 @@
 {
-  "turn": "codex",
-  "round": 6,
+  "turn": "claude",
+  "round": 7,
   "sources": {
     "design-doc": {
-      "cursor": "2394ee8",
-      "artifactHash": "sha256:bfb4e742a19a3a29"
+      "cursor": "0050c53",
+      "artifactHash": "sha256:92b05963a0aad5d0"
     },
     "miu-design-doc": {
-      "cursor": "764fbbf",
-      "artifactHash": "sha256:653ba76f9dabfbd2"
+      "cursor": "0050c53",
+      "artifactHash": "sha256:15931703fe2c109e"
     }
   },
   "falsePositiveLedger": [],
@@ -41,6 +41,16 @@
       "round": 5,
       "findingsCount": 3,
       "resolvedIds": []
+    },
+    {
+      "round": 6,
+      "findingsCount": 0,
+      "resolvedIds": [
+        "r5-p2-1",
+        "r5-p3-1",
+        "r5-p3-2",
+        "r5-watch-1"
+      ]
     }
   ],
   "state": "active"

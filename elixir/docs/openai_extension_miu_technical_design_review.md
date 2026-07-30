@@ -1,8 +1,8 @@
 # Review: OpenAI Extension Migration Technical MIU Design
 
-Status: **Round 1 — OXE-0.1 APPROVED for implementation (after the parent
-approval gate); 1 P2 sequencing finding on the Slice 0 DAG, 2 P3 doc-sync
-items.**
+Status: **Finalized — OXE-0.1 APPROVED for implementation after the parent
+approval gate. The design findings are resolved; privacy-safe corpus
+preservation remains an explicit pre-Slice operational prerequisite.**
 
 Date: 2026-07-29
 
@@ -57,10 +57,10 @@ Alternatives / Code Translation / Risk-Test), which is richer than the minimum:
 
 - Technical naming, not product language — pass (`ExtensionsAudit`,
   `mix extensions.audit --only baseline`).
-- Smallest testable unit — pass. Five planned files exceed the 3-file
-  guideline, but manifest + library + Mix task + their two test files only
-  work together (the "controller + service + DTO + test is one MIU" case);
-  splitting would create non-functional fragments.
+- Smallest testable unit — pass. The manifest, library, Mix task, and focused
+  tests form one observable command contract; splitting them would create
+  non-functional fragments. The repository MIU standard defines no numeric
+  file-count limit.
 - Dependencies form a DAG, no cycles, contract-before-consumer — pass. The
   manifest (contract) and its verifier land together and precede every
   consumer (OXE-0.2 budget audit consumes the verified baseline).
@@ -138,3 +138,23 @@ parent approval gate is formally accepted. The P2 archival split should be
 decided before Slice 0 starts (it changes what happens first); the P3s ride
 along with the next doc edit. The stated next design action (OXE-0.2 trace
 derived from a real hook prototype, not guessed budgets) is the right one.
+
+## Codex Finalization — 2026-07-30
+
+The review was checked independently against the architecture, MIU trace,
+repository state, and co-review protocol.
+
+| Review item | Final disposition |
+| --- | --- |
+| Trace preservation sequencing | Accepted with a privacy correction. Source-log protection and checksums begin before branch work. Raw data may enter only an owner-approved restricted quarantine; the redacted durable archive still requires automated secret scanning and human privacy review. No external preservation receipt is claimed yet. |
+| Manifest schema drift | Resolved. The parent now carries the same strict eight-field schema and names `UPSTREAM_BASE.yml` as machine authority. |
+| Rejection transition label | Resolved as `contract source or policy changed`. |
+| Canary scenario reference | Resolved as the applicable E1-E25 scenarios, with the canary plan required to map live versus replay/contract/CI proof. |
+| OXE-0.9 CI watch | Captured as lineage-scoped execution. Shared CI configuration remains valid when conditions prevent the audit on old-`main` hotfix branches. |
+| MIU file-count rubric | Corrected. The repository MIU standard has no three-file guideline or named exception. |
+| Co-review handoff metadata | Corrected. The turn marker and cursor agree, and architecture and MIU artifacts have separate structured sources. |
+
+One review recommendation was not accepted literally: copying raw logs to
+general durable storage before redaction would violate the architecture's
+privacy boundary. The finalized design separates restricted quarantine from
+the redacted long-lived archive while preserving the urgency of the finding.

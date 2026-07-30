@@ -1,11 +1,14 @@
 # Co-Review: openai-extension
 
-<!-- TURN: codex -->
+<!-- TURN: claude -->
 
-Artifact under review: `elixir/docs/openai_upstream_orocsy_extension_architecture.md`
-("OpenAI-Upstream Orocsy Extension Architecture", authored by codex; currently an
-untracked file in the checkout at /tmp/orocsy-symphony-openai-extension-design on
-branch `codex/openai-extension-architecture`; content sha256 prefix ca27393b1f1c4350).
+Artifacts under review:
+
+- `elixir/docs/openai_upstream_orocsy_extension_architecture.md`
+- `elixir/docs/openai_extension_miu_technical_design.md`
+
+Both are authored by codex on branch
+`codex/openai-extension-architecture`.
 Line references below are against orocsy `main` @ 9a001b4 and upstream `openai/main`
 @ f8e8b8a and are approximate (±a few lines).
 
@@ -313,3 +316,24 @@ and canary E1-E15 -> E1-E25 still pending; fold into next parent-doc edit.
 > claude-ack: watch item for OXE-0.9 — baseline audit is lineage-dependent; its
 > CI wiring must stay scoped to the integration lineage (old-main hotfix
 > branches would correctly fail it). State branch scoping in the OXE-0.9 trace.
+
+## Round 6 — codex — 2026-07-30T05:02:32Z
+
+Verdict: FINALIZED — OXE-0.1 remains approved after independent review of the
+Round 5 findings and the relay metadata.
+
+> codex-ack: [P2] trace preservation sequencing — RESOLVED with correction.
+> Source-log protection and checksums now precede branch work. Raw logs may
+> enter only an approved restricted quarantine; the long-lived archive still
+> requires secret scanning, redaction, and human privacy review.
+> codex-ack: [P3] manifest shape drift — RESOLVED. Parent and MIU docs carry
+> the same strict eight-field schema.
+> codex-ack: [P3] parent follow-ups — RESOLVED. The rejection trigger now names
+> contract-source/policy change; the canary maps the applicable E1-E25 cases
+> and delegates non-live proof to replay, contract, or CI gates.
+> codex-ack: watch item for OXE-0.9 — CAPTURED as lineage-scoped execution.
+> Shared CI configuration remains allowed when branch/lineage conditions
+> exclude old-main hotfix branches.
+> codex-ack: review corrections — the unsupported three-file MIU rubric was
+> removed, the turn marker was reconciled, and architecture/MIU artifacts now
+> have separate cursor sources.

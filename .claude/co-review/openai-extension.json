@@ -3,8 +3,8 @@
   "kind": "design",
   "otherAgent": "codex",
   "artifact": {
-    "description": "OpenAI-Upstream Orocsy Extension Architecture design doc, authored by codex",
-    "authoredIn": "/tmp/orocsy-symphony-openai-extension-design (branch codex/openai-extension-architecture, untracked file)",
+    "description": "OpenAI extension architecture and MIU technical designs, authored by codex",
+    "authoredIn": "/tmp/orocsy-symphony-openai-extension-design (branch codex/openai-extension-architecture, tracked design docs)",
     "path": "elixir/docs/openai_upstream_orocsy_extension_architecture.md"
   },
   "sources": [
@@ -13,7 +13,13 @@
       "adapter": "doc",
       "path": ".claude/co-review/openai-extension/REVIEW-CYCLE.md",
       "artifactPath": "/tmp/orocsy-symphony-openai-extension-design/elixir/docs/openai_upstream_orocsy_extension_architecture.md"
+    },
+    {
+      "id": "miu-design-doc",
+      "adapter": "doc",
+      "path": ".claude/co-review/openai-extension/REVIEW-CYCLE.md",
+      "artifactPath": "/tmp/orocsy-symphony-openai-extension-design/elixir/docs/openai_extension_miu_technical_design.md"
     }
   ],
-  "convergence": { "maxRounds": 5, "stallThreshold": 5 }
+  "convergence": { "maxRounds": 7, "stallThreshold": 5 }
 }
