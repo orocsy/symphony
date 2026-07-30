@@ -210,6 +210,16 @@ and for hotfixes — to the existing fork history.
   characterization test + target owner from the Legacy-To-Target mapping) /
   `superseded-by-upstream` (names the upstream commit) / `drop`
   (owner-acknowledged, with reason) / `defer` (named slice).
+- **Every row also records provenance:** `owner-requested` (traceable to an
+  owner ask — e.g. MIU decomposition per
+  `examples/orocsy-agentic-delivery/skills/agentic-delivery-loop/references/miu-trace.md`,
+  typed tickets, the COD-246 token-burn protections, the COD-266 scope/unblock
+  flow) vs `agent-initiated` (Codex's own implementation elaborations — e.g.
+  the in-client scope-derivation engine, RescueSupervisor string
+  classifications, the #64–#73 self-hardening chain, knowledge ledger).
+  Owner-requested rows may only be `drop` with an explicit owner decision;
+  agent-initiated rows carry the burden of proof to be `port`. This encodes the
+  owner's 2026-07-30 guidance that the two classes are not equally load-bearing.
 - **Completeness is gated, not aspirational:** OXE-0.9 and the cutover
   checklist require zero unclassified rows, mirroring "port-forward ledger has
   no unresolved port entries."
