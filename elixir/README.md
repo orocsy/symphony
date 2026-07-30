@@ -74,6 +74,28 @@ mise exec -- mix build
 mise exec -- ./bin/symphony ./WORKFLOW.md
 ```
 
+## Verify the pinned upstream baseline
+
+Migration branches use repository-root [`UPSTREAM_BASE.yml`](../UPSTREAM_BASE.yml)
+as the machine authority for the pinned OpenAI commit and tree identities. From
+this directory, verify the local checkout with:
+
+```bash
+mise exec -- mix extensions.audit --only baseline
+```
+
+The audit is offline and read-only: it disables partial-clone lazy fetching,
+checks the commit object, repository tree, `elixir/` subtree, ordinary
+ancestry, and first-parent ancestry, then prints one stable success line.
+Missing history or mismatched topology produces deterministic typed findings
+and a non-zero Mix exit. Repair the checkout outside the audit and rerun it;
+the task never fetches, checks out, merges, resets, or changes Git config.
+
+`--repo-root /path/to/checkout` is available for diagnosis and hermetic test
+fixtures. Without it, the task resolves the repository root from `mix.exs`.
+Old Orocsy-lineage hotfix branches are expected to fail this migration-only
+check and should not wire it into their CI path.
+
 ## Burrito releases
 
 Symphony ships self-contained executables built with

@@ -34,6 +34,14 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+### Extension-migration integrity
+
+The Orocsy extension migration pins its OpenAI Symphony source identity in
+[`UPSTREAM_BASE.yml`](UPSTREAM_BASE.yml). Migration branches can verify that
+local object, tree, and first-parent identity offline with the Elixir
+`extensions.audit` task. See the [Elixir runbook](elixir/README.md#verify-the-pinned-upstream-baseline)
+for the command and failure contract.
+
 ---
 
 ## License

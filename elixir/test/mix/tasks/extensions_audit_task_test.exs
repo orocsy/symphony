@@ -56,8 +56,6 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
       a_typo: true
       """)
 
-    on_exit(fn -> File.rm_rf!(root) end)
-
     error_output =
       capture_io(:stderr, fn ->
         assert_raise Mix.Error, "extensions.audit baseline failed", fn ->
@@ -88,6 +86,7 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
     root = Path.join(System.tmp_dir!(), "extensions-audit-task-test-#{System.unique_integer([:positive, :monotonic])}")
     File.mkdir_p!(root)
     File.write!(Path.join(root, "UPSTREAM_BASE.yml"), manifest)
+    on_exit(fn -> File.rm_rf!(root) end)
     root
   end
 end

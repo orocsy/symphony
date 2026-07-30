@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 implemented; focused gates green, pinned-upstream handoff blockers recorded, implementation review pending
+Status: OXE-0.1 implementation candidate; owner sequencing decision and upstream-suite blocker prevent landing
 
 Date: 2026-07-29
 
@@ -130,12 +130,16 @@ immutable Git object and one verified branch lineage.
 
 ### Preconditions And Boundary
 
-Implementation starts on an integration worktree created directly from
-`openai/main@f8e8b8a`. `OXE-0.1` lands on that upstream-only lineage before
-current Orocsy history is merged. This smaller checkpoint makes the baseline
-verifier executable before the high-conflict history merge. The later merge
-must add Orocsy history as the second parent, retain OpenAI as first parent,
-and rerun the verifier before any kernel resolution.
+The approved fixed-point design starts implementation only after the
+integration worktree is created directly from `openai/main@f8e8b8a` and current
+Orocsy history is merged with OpenAI as first parent, following the parent
+architecture's branch model.
+
+A candidate implementation was built on the upstream-only lineage to create a
+small pre-merge checkpoint. That sequencing variation is not approved by the
+fixed-point design. The candidate must not land until the owner either approves
+the pre-merge checkpoint explicitly or directs completion of the Orocsy-history
+merge first.
 
 In scope:
 
@@ -165,17 +169,17 @@ Observed on 2026-07-30:
 | Machine authority | repository-root `UPSTREAM_BASE.yml` contains the approved eight-field schema and pinned identities |
 | Library seam | `SymphonyElixir.ExtensionsAudit.verify_baseline/2` validates the manifest, local Git object identity, both trees, ordinary ancestry, and first-parent ancestry |
 | CLI seam | `mix extensions.audit [--only baseline] [--repo-root PATH]` emits the stable success line or deterministic typed findings |
-| Safety boundary | injected-command tests prove malformed revisions do not reach Git and successful audits invoke no fetch, checkout, switch, merge, reset, config, pull, push, or clone command |
-| Topology boundary | a temporary local repository test accepts an OpenAI-first-parent merge; a second-parent-only lineage is rejected |
+| Safety boundary | tests prove malformed revisions do not reach Git, every Git subprocess disables promisor lazy fetches and optional locks, and successful audits invoke no fetch, checkout, switch, merge, reset, config, pull, push, or clone command |
+| Topology boundary | temporary local repository tests accept an OpenAI-first-parent merge and reject the same baseline when it is reachable only through the second parent |
 | Focused tests | 21 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
 | Focused coverage | `SymphonyElixir.ExtensionsAudit` and `Mix.Tasks.Extensions.Audit` each report 100% |
 | Passing gates | direct audit, formatter check, specs check, Credo strict, escript build, and Dialyzer |
 | Handoff blocker | exact `make all` reaches 100% total coverage but stops on four unchanged pinned-upstream tests described below |
-| Remaining gate | implementation review and disposition of the upstream-suite blocker |
+| Remaining gate | owner decision on pre-merge sequencing, implementation re-review, and disposition of the upstream-suite blocker |
 
-The current integration checkpoint intentionally contains the approved design
-history plus `OXE-0.1`, not the Orocsy runtime merge. The merge is the next
-branch-topology checkpoint, not part of this MIU's behavior or write scope.
+The current integration checkpoint contains the approved design history plus
+the `OXE-0.1` candidate, not the Orocsy runtime merge. This is useful review
+evidence but is not authority to rewrite the approved branch sequence.
 
 ### Validation Record
 
@@ -199,6 +203,24 @@ run alone. `git diff f8e8b8a --` over those test files and their SSH/orchestrato
 implementations is empty, so this implementation does not alter their code.
 They remain a pinned-upstream/environment handoff blocker rather than being
 silently widened into OXE-0.1 scope.
+
+### Implementation Review Disposition
+
+The two-axis review of implementation checkpoint `175354d` found four spec
+issues and four standards/smell issues. The candidate was hardened as follows:
+
+| Review finding | Disposition |
+| --- | --- |
+| Partial-clone Git commands could demand-fetch missing promisor objects | Fixed: every audit subprocess sets `GIT_NO_LAZY_FETCH=1`; the command-contract test asserts the guard. `GIT_OPTIONAL_LOCKS=0` also suppresses optional state refreshes. |
+| Wrong-first-parent counterexample used a fake Git adapter | Fixed: accepting and rejecting cases now share a real temporary repository fixture with opposite merge-parent order. |
+| Repeated bespoke temporary-directory cleanup | Fixed: fixture constructors own cleanup registration. |
+| README run instructions were missing | Fixed in the repository and Elixir READMEs, including manifest authority, command usage, offline behavior, and failure handling. |
+| Repeated fake-Git command switches | Hardened: common successful command evidence and per-test overrides now share one scripted adapter; topology tests use real Git. |
+| Candidate changed the approved branch sequence without explicit owner approval | Open: the parent sequence is restored in this document set, and the upstream-only candidate is explicitly held for an owner decision. |
+| Exact `make all` is not green | Open: the four reproducible unchanged upstream failures above block landing unless fixed or formally waived. |
+
+The implementation review therefore improved the candidate materially but did
+not clear it to land.
 
 ### Data Shape
 
@@ -290,7 +312,9 @@ and requires the baseline to appear in the second command's exact output.
 CI may be offline. If a shallow or partial clone omits the baseline, the audit
 returns a typed failure with repair guidance; it never fetches. YAML is
 normalized once into a typed struct. Git commands use argument lists through
-`System.cmd/3`, never shell interpolation.
+`System.cmd/3`, never shell interpolation. Every Git subprocess sets
+`GIT_NO_LAZY_FETCH=1` so a partial clone cannot demand-fetch a promisor object,
+and `GIT_OPTIONAL_LOCKS=0` to suppress optional repository-state refreshes.
 
 ### Design / Flow
 

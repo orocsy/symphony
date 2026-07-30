@@ -55,6 +55,7 @@ defmodule SymphonyElixir.ExtensionsAudit do
 
   @manifest_file "UPSTREAM_BASE.yml"
   @manifest_keys ~w(schema_version repository commit tree elixir_tree version spec_status verified_at)
+  @git_env [{"GIT_NO_LAZY_FETCH", "1"}, {"GIT_OPTIONAL_LOCKS", "0"}]
 
   @sha_pattern ~r/^[0-9a-f]{40}$/
 
@@ -317,7 +318,7 @@ defmodule SymphonyElixir.ExtensionsAudit do
   end
 
   defp run_git(git, repo_root, args) do
-    case git.("git", ["-C", repo_root | args], stderr_to_stdout: true) do
+    case git.("git", ["-C", repo_root | args], stderr_to_stdout: true, env: @git_env) do
       {output, status} when is_binary(output) and is_integer(status) -> {:ok, output, status}
     end
   rescue
