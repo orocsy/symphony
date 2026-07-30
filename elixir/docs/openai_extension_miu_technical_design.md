@@ -175,7 +175,7 @@ Observed on 2026-07-30:
 | Focused coverage | `SymphonyElixir.ExtensionsAudit` and `Mix.Tasks.Extensions.Audit` each report 100% |
 | Passing gates | direct audit, formatter check, specs check, Credo strict, escript build, and Dialyzer |
 | Handoff blocker | exact `make all` reaches 100% total coverage but stops on four unchanged pinned-upstream tests described below |
-| Remaining gate | owner decision on pre-merge sequencing, implementation re-review, and disposition of the upstream-suite blocker |
+| Remaining gate | owner decision on pre-merge sequencing and disposition of the upstream-suite blocker |
 
 The current integration checkpoint contains the approved design history plus
 the `OXE-0.1` candidate, not the Orocsy runtime merge. This is useful review
@@ -221,6 +221,15 @@ issues and four standards/smell issues. The candidate was hardened as follows:
 
 The implementation review therefore improved the candidate materially but did
 not clear it to land.
+
+The final independent re-review of checkpoint `603f952` found no new issues.
+The spec axis confirmed that the promisor lazy-fetch and hermetic wrong-parent
+findings are resolved; its surviving findings are the owner-controlled
+branch-sequence decision (`P1`) and exact handoff validation (`P2`). The
+standards axis confirmed that the cleanup, README, and duplicate-fixture
+findings are resolved; its sole surviving finding is the exact `make all`
+landing blocker (`P1`). Those findings are represented by the two open rows
+above.
 
 ### Data Shape
 
