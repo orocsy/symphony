@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: Approved for implementation after the parent architecture approval gate
+Status: OXE-0.1 implemented; focused gates green, pinned-upstream handoff blockers recorded, implementation review pending
 
 Date: 2026-07-29
 
@@ -130,9 +130,12 @@ immutable Git object and one verified branch lineage.
 
 ### Preconditions And Boundary
 
-Implementation starts only after the integration worktree is created directly
-from `openai/main@f8e8b8a` and current Orocsy history is merged with OpenAI as
-first parent, following the parent architecture's branch model.
+Implementation starts on an integration worktree created directly from
+`openai/main@f8e8b8a`. `OXE-0.1` lands on that upstream-only lineage before
+current Orocsy history is merged. This smaller checkpoint makes the baseline
+verifier executable before the high-conflict history merge. The later merge
+must add Orocsy history as the second parent, retain OpenAI as first parent,
+and rerun the verifier before any kernel resolution.
 
 In scope:
 
@@ -151,6 +154,51 @@ Out of scope:
 - comparing runtime behavior with no-op extensions
 - porting any Orocsy runtime behavior
 - network access, checkout, merge, reset, or source-file mutation
+
+### Implementation Progress
+
+Observed on 2026-07-30:
+
+| Item | Evidence |
+| --- | --- |
+| Integration lineage | `codex/openai-extension-integration` was created directly from `f8e8b8a670c799f6e0ade7a8c25c4bf4a4a56ec7` |
+| Machine authority | repository-root `UPSTREAM_BASE.yml` contains the approved eight-field schema and pinned identities |
+| Library seam | `SymphonyElixir.ExtensionsAudit.verify_baseline/2` validates the manifest, local Git object identity, both trees, ordinary ancestry, and first-parent ancestry |
+| CLI seam | `mix extensions.audit [--only baseline] [--repo-root PATH]` emits the stable success line or deterministic typed findings |
+| Safety boundary | injected-command tests prove malformed revisions do not reach Git and successful audits invoke no fetch, checkout, switch, merge, reset, config, pull, push, or clone command |
+| Topology boundary | a temporary local repository test accepts an OpenAI-first-parent merge; a second-parent-only lineage is rejected |
+| Focused tests | 21 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
+| Focused coverage | `SymphonyElixir.ExtensionsAudit` and `Mix.Tasks.Extensions.Audit` each report 100% |
+| Passing gates | direct audit, formatter check, specs check, Credo strict, escript build, and Dialyzer |
+| Handoff blocker | exact `make all` reaches 100% total coverage but stops on four unchanged pinned-upstream tests described below |
+| Remaining gate | implementation review and disposition of the upstream-suite blocker |
+
+The current integration checkpoint intentionally contains the approved design
+history plus `OXE-0.1`, not the Orocsy runtime merge. The merge is the next
+branch-topology checkpoint, not part of this MIU's behavior or write scope.
+
+### Validation Record
+
+Final local evidence on 2026-07-30:
+
+| Command | Outcome |
+| --- | --- |
+| `mix test test/symphony_elixir/extensions_audit_test.exs test/mix/tasks/extensions_audit_task_test.exs` | pass, 21 tests |
+| focused `mix test --cover ...` | both OXE-0.1 modules report 100%; the selected-test command itself cannot satisfy the repository-wide 100% threshold because unrelated modules are intentionally not exercised |
+| `mix extensions.audit --only baseline` | pass with the approved commit, repository tree, Elixir tree, and `first_parent=true` |
+| `mix format --check-formatted` | pass |
+| `mix lint` | pass; specs check and Credo strict report no issues |
+| `mix build` | pass |
+| `mix dialyzer --format short` | pass, zero errors |
+| `make all` | setup, build, format, and lint pass; the full test run reports 100% total coverage but exits on four upstream tests |
+
+The four `make all` failures are the two fake-SSH port trace waits at
+`ssh_test.exs:105` and `ssh_test.exs:135`, plus the two retry-window lower
+bounds at `core_test.exs:1022` and `core_test.exs:1062`. They reproduce when
+run alone. `git diff f8e8b8a --` over those test files and their SSH/orchestrator
+implementations is empty, so this implementation does not alter their code.
+They remain a pinned-upstream/environment handoff blocker rather than being
+silently widened into OXE-0.1 scope.
 
 ### Data Shape
 

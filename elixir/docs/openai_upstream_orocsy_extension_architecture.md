@@ -1,6 +1,6 @@
 # OpenAI-Upstream Orocsy Extension Architecture
 
-Status: Proposed, revision 2 after architecture review
+Status: Approved revision 2; Slice 0 OXE-0.1 implemented with upstream-suite blocker recorded
 
 Date: 2026-07-28
 
@@ -918,12 +918,15 @@ contribution. Orocsy's delivery workflow remains out of that contribution.
 2. Keep a permanent read-only `openai` remote.
 3. Create the integration branch directly from pinned
    `openai/main@f8e8b8a`.
-4. Merge current Orocsy `main` into that branch without committing until the
-   tree is resolved and buildable. This preserves both histories while keeping
-   OpenAI as the integration branch's first parent.
-5. Resolve kernel files by retaining upstream behavior, then wire the extension
+4. Land the versioned baseline manifest and `OXE-0.1` verifier on that
+   upstream-only lineage. Run it before introducing the fork history.
+5. Merge current Orocsy `main` as the second parent, without committing until
+   the tree is resolved and buildable. Rerun `OXE-0.1` before and after this
+   merge checkpoint. This preserves both histories while keeping OpenAI as the
+   integration branch's first parent.
+6. Resolve kernel files by retaining upstream behavior, then wire the extension
    interfaces.
-6. Do not cut over `main` until the complete integration passes replay and live
+7. Do not cut over `main` until the complete integration passes replay and live
    canary gates.
 
 The integration branch may contain multiple reviewed micro-commits, but its
@@ -1271,13 +1274,17 @@ justify moving policy back into kernel files.
 Implementation detail is developed incrementally in
 `openai_extension_miu_technical_design.md`. Its current revision decomposes
 Slice 0 and specifies the approved `OXE-0.1` pinned upstream-baseline
-verifier. Approval remains conditional on accepting the parent architecture
-gate below; no runtime implementation has begun.
+verifier. The parent gate is accepted and `OXE-0.1` is implemented on
+the upstream-first integration lineage. Its focused gates are green; the MIU
+trace records four unchanged pinned-upstream tests that block the exact full
+handoff command in this environment. No Orocsy runtime behavior or kernel hook
+has been introduced.
 
 ## Approval Gate
 
-No runtime implementation begins until this design is reviewed and the
-following decisions are accepted:
+The architecture review recorded in
+`openai_upstream_orocsy_extension_architecture_review.md` accepted this gate.
+The following decisions remain binding on implementation:
 
 1. OpenAI `f8e8b8a` is the first pinned kernel baseline.
 2. Orocsy behavior is ported through the four public interfaces and named
