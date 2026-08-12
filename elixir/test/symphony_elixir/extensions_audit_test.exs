@@ -163,6 +163,8 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
                {"GIT_CONFIG_SYSTEM", "/dev/null"} in env and
                {"GIT_CONFIG_COUNT", "0"} in env and
                {"GIT_NO_REPLACE_OBJECTS", "1"} in env and
+               {"GIT_TRACE", nil} in env and
+               {"GIT_TRACE2_EVENT", nil} in env and
                {"GIT_DIR", nil} in env and
                {"GIT_WORK_TREE", nil} in env and
                {"GIT_ALTERNATE_OBJECT_DIRECTORIES", nil} in env
@@ -194,6 +196,23 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
     git!(root, ["switch", "--detach", baseline])
     File.write!(Path.join(root, "UPSTREAM_BASE.yml"), manifest)
     git!(root, ["replace", baseline, replacement])
+
+    assert {:ok, %ExtensionsAudit.Report{baseline_commit: ^baseline}} =
+             ExtensionsAudit.verify_baseline(root)
+  end
+
+  test "ignores inherited Git tracing without contaminating evidence" do
+    %{root: root, baseline: baseline} = create_baseline_fixture!()
+    previous_trace = System.get_env("GIT_TRACE")
+    previous_trace2 = System.get_env("GIT_TRACE2_EVENT")
+
+    on_exit(fn ->
+      restore_env("GIT_TRACE", previous_trace)
+      restore_env("GIT_TRACE2_EVENT", previous_trace2)
+    end)
+
+    System.put_env("GIT_TRACE", "1")
+    System.put_env("GIT_TRACE2_EVENT", "1")
 
     assert {:ok, %ExtensionsAudit.Report{baseline_commit: ^baseline}} =
              ExtensionsAudit.verify_baseline(root)

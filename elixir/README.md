@@ -87,8 +87,8 @@ mise exec -- mix extensions.audit --only baseline
 The audit requires Git 2.36 or newer. It is offline and read-only: it disables
 partial-clone lazy fetching, removes inherited Git repository redirects,
 isolates global, system, and command-scope Git configuration, disables
-replacement objects, checks the commit object, repository tree, `elixir/`
-subtree, ordinary
+replacement objects, and removes inherited Git tracing before checking the
+commit object, repository tree, `elixir/` subtree, ordinary
 ancestry, and first-parent ancestry, then prints one stable success line.
 Missing history, an unreadable or ambiguous manifest, or mismatched topology
 produces deterministic typed findings and a non-zero Mix exit. Repair the

@@ -177,10 +177,10 @@ Observed through 2026-08-13:
 | CLI seam | `mix extensions.audit [--only baseline] [--repo-root PATH]` emits the stable success line or deterministic typed findings |
 | Safety boundary | tests prove malformed revisions do not reach Git, inherited repository-redirect variables are removed, every Git subprocess disables promisor lazy fetches and optional locks, and the audit invokes only its read-only Git allowlist |
 | Topology boundary | temporary local repository tests accept an OpenAI-first-parent merge and reject the same baseline when it is reachable only through the second parent |
-| Focused tests | 27 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
+| Focused tests | 28 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
 | Hermeticity | task success/default-root tests and Git topology tests use temporary repositories; no test requires the ambient checkout to contain the pinned object |
 | Current gate | focused suite, formatter, specs, Credo, build, Dialyzer, direct audit, and 100% total coverage pass after Round 2 hardening |
-| Handoff blocker | three consecutive exact `make all` runs stop on timing-sensitive pinned-upstream SSH/retry tests; the candidate does not modify those paths |
+| Handoff blocker | four consecutive exact `make all` runs stop on timing-sensitive pinned-upstream SSH/retry tests; the candidate does not modify those paths |
 | Remaining gate | final implementation review and an owner-approved fix or waiver for the unchanged upstream-suite blocker |
 
 The current integration checkpoint contains the approved design history plus
@@ -216,11 +216,12 @@ classification, above:
 
 | Command | Outcome |
 | --- | --- |
-| focused audit/task suite | pass, 27 tests |
+| focused audit/task suite | pass, 28 tests |
 | first exact `make all` | setup/build/format/lint pass; 322 tests, 1 fake-SSH trace timeout at `ssh_test.exs:105`, 6 skipped, 100% total coverage |
 | isolated `ssh_test.exs:105` with the same seed | pass, showing the first failure is suite-timing dependent |
 | second exact `make all` | setup/build/format/lint pass; 322 tests, fake-SSH timeout at `ssh_test.exs:135` plus retry lower-bound failure at `core_test.exs:1062`, 6 skipped, 100% total coverage |
 | final exact `make all` after replacement-object hardening | setup/build/format/lint pass; 323 tests, 1 fake-SSH trace timeout at `ssh_test.exs:105`, 6 skipped, 100% total coverage |
+| final exact `make all` after Git-trace hardening | setup/build/format/lint pass; 324 tests, 1 retry lower-bound failure at `core_test.exs:1062`, 6 skipped, 100% total coverage |
 | `mix extensions.audit --only baseline` | pass with the approved identities and `first_parent=true` |
 | `mix help extensions.audit` | pass; task usage and offline contract are discoverable |
 | `mix dialyzer --format short` | pass, zero errors |
@@ -382,7 +383,10 @@ task runs inside a Git hook because inherited Git variables must not redirect
 evidence collection to the caller's repository context. It isolates global,
 system, and command-scope configuration, disables replacement objects, and
 ignores inherited replacement-ref and shallow-file overrides so Git resolves
-the checkout's stored objects and topology directly.
+the checkout's stored objects and topology directly. Git trace, trace2,
+packet, performance, ref, setup, shallow, fsmonitor, pack-access, and curl
+diagnostic variables are removed so merged stderr cannot corrupt evidence or
+leak caller paths.
 
 ### Design / Flow
 
