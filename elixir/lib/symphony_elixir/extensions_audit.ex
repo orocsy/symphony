@@ -140,10 +140,7 @@ defmodule SymphonyElixir.ExtensionsAudit do
   defp decode_manifest(source) do
     case YamlElixir.read_all_from_string(source, maps_as_keywords: true) do
       {:ok, [pairs]} when is_list(pairs) ->
-        case duplicate_key(pairs) do
-          nil -> {:ok, Map.new(pairs)}
-          key -> invalid_yaml("duplicate top-level key: #{unknown_key_name(key)}")
-        end
+        decode_mapping_pairs(pairs)
 
       {:ok, [_document]} ->
         {:ok, :not_a_mapping}
@@ -153,6 +150,21 @@ defmodule SymphonyElixir.ExtensionsAudit do
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  defp decode_mapping_pairs(pairs) do
+    if Enum.all?(pairs, &match?({_key, _value}, &1)) do
+      decode_unique_mapping_pairs(pairs)
+    else
+      {:ok, :not_a_mapping}
+    end
+  end
+
+  defp decode_unique_mapping_pairs(pairs) do
+    case duplicate_key(pairs) do
+      nil -> {:ok, Map.new(pairs)}
+      key -> invalid_yaml("duplicate top-level key: #{unknown_key_name(key)}")
     end
   end
 

@@ -250,6 +250,7 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
     File.rm!(Path.join(missing_root, "UPSTREAM_BASE.yml"))
     malformed_root = create_root!("schema_version: [\n")
     scalar_root = create_root!("baseline\n")
+    sequence_root = create_root!("- baseline\n- other\n")
 
     git = fn _executable, _args, _opts ->
       send(self(), :git_called_for_invalid_manifest)
@@ -264,6 +265,9 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
 
     assert {:error, [%ExtensionsAudit.Finding{code: :manifest_invalid_yaml, detail: "expected a mapping"}]} =
              ExtensionsAudit.verify_baseline(scalar_root, git: git)
+
+    assert {:error, [%ExtensionsAudit.Finding{code: :manifest_invalid_yaml, detail: "expected a mapping"}]} =
+             ExtensionsAudit.verify_baseline(sequence_root, git: git)
 
     refute_received :git_called_for_invalid_manifest
   end
