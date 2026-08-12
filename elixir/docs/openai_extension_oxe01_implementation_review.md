@@ -1,7 +1,7 @@
 # Review: OXE-0.1 Implementation (extensions.audit baseline verifier)
 
-Status: **Round 1 — BLOCKED. 3 P1 findings (1 production, 2 test-infrastructure).
-Implementation quality is otherwise high; fix the P1s and this clears.**
+Status: **Round 2 — implementation findings cleared. Landing remains blocked
+only by the required full handoff gate.**
 
 Date: 2026-07-30
 
@@ -134,3 +134,39 @@ in the same rework commit. This is otherwise the strongest artifact in the
 channel so far: promises kept exactly, deviations disclosed rather than
 buried, and validation reproducible end to end. HEAD `8b652b3` is NOT blessed;
 do not push or merge until re-review.
+
+---
+
+## Round 2 Rework Disposition — 2026-08-13
+
+Rework commits `923e158`, `9862dfd`, `111f8a4`, and `9994f23` resolve all
+three P1 and eight P2 implementation findings above. The final adversarial
+re-review found and closed two additional P2 boundaries before handoff:
+
+- top-level YAML sequences now fail with typed `:manifest_invalid_yaml`
+  findings rather than crashing the duplicate-key decoder;
+- inherited Git trace/trace2, packet, performance, ref, setup, shallow,
+  fsmonitor, pack-access, and curl diagnostics are removed so merged stderr
+  cannot corrupt evidence or leak caller paths.
+
+Independent final review results:
+
+| Axis | Result |
+| --- | --- |
+| Spec | No surviving or new findings. All Round 1 and Round 2 adversarial cases are resolved. |
+| Standards | No surviving code, test, documentation, or smell findings. Shared fixture cleanup is centralized and the deliberately independent Git environment is documented. |
+| Repository gate | `P1` remains: exact `make all` is non-green on unchanged timing-sensitive pinned-upstream SSH/retry tests. |
+
+Validation at final committed candidate `9994f23`:
+
+- 28 focused audit/task tests pass;
+- a real audit with `GIT_TRACE=1 GIT_TRACE2_EVENT=1` emits the clean stable
+  success line;
+- format, specs, Credo strict, build, direct audit, task help, Dialyzer, and
+  100% total coverage pass;
+- the fourth exact `make all` run executes 324 tests and stops on one unchanged
+  retry lower-bound assertion at `core_test.exs:1062` (6 skipped, 100% total
+  coverage).
+
+The implementation itself is review-cleared. Repository policy still forbids
+landing until the unchanged full-suite failures are fixed or formally waived.

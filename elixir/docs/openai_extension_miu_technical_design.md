@@ -278,6 +278,11 @@ as follows; final status remains subject to the full gate and re-review:
 | Unreadable manifests are mislabeled as invalid YAML | Fixed: read failures use typed `:manifest_unreadable` findings with OS error text. |
 | Branch sequencing requires owner resolution | Resolved by owner ruling: upstream-only Slice 0 checkpoints are blessed; Orocsy integration stays in Slice 2, with dual fidelity enforced by OXE-0.7/OXE-0.9. |
 
+Final two-axis re-review of committed candidate `9994f23` found no surviving
+or new spec findings and no in-scope standards or smell findings. The sole
+surviving `P1` is the repository-level exact-`make all` blocker recorded in the
+validation table; it is not an OXE-0.1 implementation defect and is not waived.
+
 ### Data Shape
 
 Repository-root `UPSTREAM_BASE.yml`:
