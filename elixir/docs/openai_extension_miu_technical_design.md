@@ -239,7 +239,7 @@ issues and four standards/smell issues. The candidate was hardened as follows:
 | --- | --- |
 | Partial-clone Git commands could demand-fetch missing promisor objects | Fixed: every audit subprocess sets `GIT_NO_LAZY_FETCH=1`; the command-contract test asserts the guard. `GIT_OPTIONAL_LOCKS=0` also suppresses optional state refreshes. |
 | Wrong-first-parent counterexample used a fake Git adapter | Fixed: accepting and rejecting cases now share a real temporary repository fixture with opposite merge-parent order. |
-| Repeated bespoke temporary-directory cleanup | Fixed: fixture constructors own cleanup registration. |
+| Repeated bespoke temporary-directory cleanup | Fixed: all audit/task root and Git-repository constructors share `ExtensionsAuditFixture`, which owns cleanup registration. |
 | README run instructions were missing | Fixed in the repository and Elixir READMEs, including manifest authority, command usage, offline behavior, and failure handling. |
 | Repeated fake-Git command switches | Hardened: common successful command evidence and per-test overrides now share one scripted adapter; topology tests use real Git. |
 | Candidate changed the approved branch sequence without explicit owner approval | Resolved after this review: the owner's 2026-07-30 ruling blesses upstream-only Slice 0 checkpoints and leaves the merge in Slice 2. |

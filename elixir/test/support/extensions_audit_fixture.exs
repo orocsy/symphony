@@ -32,6 +32,18 @@ defmodule SymphonyElixir.TestSupport.ExtensionsAuditFixture do
     "user.email=extensions-audit@example.invalid"
   ]
 
+  # Keep fixture setup independent from ExtensionsAudit's environment. Sharing
+  # the production constant here would let a regression weaken both the code
+  # and the repositories used to test it in the same edit.
+
+  def create_root!(manifest) do
+    root = unique_root("extensions-audit-test")
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "UPSTREAM_BASE.yml"), manifest)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(root) end)
+    root
+  end
+
   def create_baseline_fixture! do
     root = create_git_repo!()
     baseline = commit_baseline!(root)
