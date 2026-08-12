@@ -84,12 +84,16 @@ this directory, verify the local checkout with:
 mise exec -- mix extensions.audit --only baseline
 ```
 
-The audit is offline and read-only: it disables partial-clone lazy fetching,
-checks the commit object, repository tree, `elixir/` subtree, ordinary
+The audit requires Git 2.36 or newer. It is offline and read-only: it disables
+partial-clone lazy fetching, removes inherited Git repository redirects,
+isolates global, system, and command-scope Git configuration, disables
+replacement objects, checks the commit object, repository tree, `elixir/`
+subtree, ordinary
 ancestry, and first-parent ancestry, then prints one stable success line.
-Missing history or mismatched topology produces deterministic typed findings
-and a non-zero Mix exit. Repair the checkout outside the audit and rerun it;
-the task never fetches, checks out, merges, resets, or changes Git config.
+Missing history, an unreadable or ambiguous manifest, or mismatched topology
+produces deterministic typed findings and a non-zero Mix exit. Repair the
+checkout outside the audit and rerun it; the task never fetches, checks out,
+merges, resets, or changes Git config.
 
 `--repo-root /path/to/checkout` is available for diagnosis and hermetic test
 fixtures. Without it, the task resolves the repository root from `mix.exs`.

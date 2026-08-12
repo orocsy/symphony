@@ -2,8 +2,14 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
+  import SymphonyElixir.TestSupport.ExtensionsAuditFixture
 
   alias Mix.Tasks.Extensions.Audit
+  alias SymphonyElixir.TestSupport.Snapshot
+
+  defmodule FixtureMixProject do
+    def project, do: [app: :extensions_audit_fixture, version: "0.0.0"]
+  end
 
   setup do
     Mix.Task.reenable("extensions.audit")
@@ -11,19 +17,25 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
   end
 
   test "runs the baseline check by default and prints stable success output" do
+    %{root: root, baseline: baseline} = create_baseline_fixture!()
+    tree = git!(root, ["rev-parse", "#{baseline}^{tree}"])
+    elixir_tree = git!(root, ["rev-parse", "#{baseline}:elixir"])
+
     output =
       capture_io(fn ->
-        assert :ok = Audit.run(["--repo-root", repo_root()])
+        assert :ok = Audit.run(["--repo-root", root])
       end)
 
     assert output ==
-             "extensions.audit baseline: ok commit=f8e8b8a670c799f6e0ade7a8c25c4bf4a4a56ec7 tree=37a4c6c184db05cd2d59bfc50943979919ec988a elixir_tree=77d9ba67775e6681eb1ad5cf03a019e678a8e941 first_parent=true\n"
+             "extensions.audit baseline: ok commit=#{baseline} tree=#{tree} elixir_tree=#{elixir_tree} first_parent=true\n"
   end
 
   test "accepts only baseline for --only in OXE-0.1" do
+    %{root: root} = create_baseline_fixture!()
+
     output =
       capture_io(fn ->
-        assert :ok = Audit.run(["--only", "baseline", "--repo-root", repo_root()])
+        assert :ok = Audit.run(["--only", "baseline", "--repo-root", root])
       end)
 
     assert output =~ "extensions.audit baseline: ok"
@@ -31,11 +43,23 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
     Mix.Task.reenable("extensions.audit")
 
     assert_raise Mix.Error, ~r/--only accepts only baseline/, fn ->
-      Audit.run(["--only", "budget", "--repo-root", repo_root()])
+      Audit.run(["--only", "budget", "--repo-root", root])
     end
   end
 
   test "resolves the default root from the Mix project file" do
+    %{root: root} = create_baseline_fixture!()
+    project_file = Path.join([root, "elixir", "mix.exs"])
+    File.mkdir_p!(Path.dirname(project_file))
+
+    Mix.Project.push(FixtureMixProject, project_file)
+    Mix.ProjectStack.printable_app_name()
+
+    on_exit(fn ->
+      Mix.Project.pop()
+      Mix.ProjectStack.printable_app_name()
+    end)
+
     output = capture_io(fn -> assert :ok = Audit.run([]) end)
 
     assert output =~ "extensions.audit baseline: ok"
@@ -63,7 +87,7 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
         end
       end)
 
-    assert error_output ==
+    assert Snapshot.strip_ansi(error_output) ==
              "extensions.audit baseline: error code=manifest_unknown_key field=\"a_typo\"\n" <>
                "extensions.audit baseline: error code=manifest_unknown_key field=\"z_typo\"\n"
   end
@@ -79,8 +103,6 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
       Audit.run(["--unknown"])
     end
   end
-
-  defp repo_root, do: Path.expand("../../../..", __DIR__)
 
   defp create_root!(manifest) do
     root = Path.join(System.tmp_dir!(), "extensions-audit-task-test-#{System.unique_integer([:positive, :monotonic])}")

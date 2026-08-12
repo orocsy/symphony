@@ -1,12 +1,19 @@
 defmodule Mix.Tasks.Extensions.Audit do
-  @moduledoc false
+  @moduledoc """
+  Verifies the repository's pinned OpenAI baseline.
+
+      mix extensions.audit [--only baseline] [--repo-root PATH]
+
+  The audit is local and read-only. Missing Git history fails closed; fetch the
+  required objects outside this task and retry.
+  """
 
   use Mix.Task
 
   alias SymphonyElixir.ExtensionsAudit
   alias SymphonyElixir.ExtensionsAudit.{Finding, Report}
 
-  @shortdoc "Verifies the pinned upstream baseline and extension patch budget"
+  @shortdoc "Verifies the pinned upstream baseline"
   @switches [only: :string, repo_root: :string]
 
   @impl Mix.Task

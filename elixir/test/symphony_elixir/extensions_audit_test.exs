@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.ExtensionsAuditTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.ExtensionsAudit
+  import SymphonyElixir.TestSupport.ExtensionsAuditFixture
 
   @manifest """
   schema_version: 1
@@ -117,14 +118,14 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
   end
 
   test "accepts the pinned baseline from a linked git worktree" do
-    repo_root = Path.expand("../../..", __DIR__)
+    %{root: repo_root, baseline: baseline} = create_linked_worktree_fixture!()
+
+    assert File.regular?(Path.join(repo_root, ".git"))
 
     assert {:ok,
             %ExtensionsAudit.Report{
               check: :baseline,
-              baseline_commit: "f8e8b8a670c799f6e0ade7a8c25c4bf4a4a56ec7",
-              repository_tree: "37a4c6c184db05cd2d59bfc50943979919ec988a",
-              elixir_tree: "77d9ba67775e6681eb1ad5cf03a019e678a8e941",
+              baseline_commit: ^baseline,
               first_parent_verified: true,
               findings: []
             }} = ExtensionsAudit.verify_baseline(repo_root)
@@ -137,8 +138,8 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
              ExtensionsAudit.verify_baseline(root)
   end
 
-  test "never invokes fetch checkout merge reset or config" do
-    repo_root = Path.expand("../../..", __DIR__)
+  test "invokes only the approved read-only Git command allowlist" do
+    %{root: repo_root} = create_baseline_fixture!()
 
     git = fn executable, args, opts ->
       send(self(), {:git_invocation, args, opts})
@@ -148,14 +149,100 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
     assert {:ok, %ExtensionsAudit.Report{}} = ExtensionsAudit.verify_baseline(repo_root, git: git)
 
     invocations = collect_git_invocations([])
-    forbidden = ~w(fetch checkout switch merge reset config pull push clone)
 
-    refute Enum.any?(invocations, fn {args, _opts} -> Enum.any?(forbidden, &(&1 in args)) end)
+    assert Enum.all?(invocations, fn {args, _opts} ->
+             Enum.at(args, 2) in ~w(rev-parse cat-file merge-base rev-list)
+           end)
 
     assert Enum.all?(invocations, fn {_args, opts} ->
              env = Keyword.fetch!(opts, :env)
-             {"GIT_NO_LAZY_FETCH", "1"} in env and {"GIT_OPTIONAL_LOCKS", "0"} in env
+
+             {"GIT_NO_LAZY_FETCH", "1"} in env and
+               {"GIT_OPTIONAL_LOCKS", "0"} in env and
+               {"GIT_CONFIG_GLOBAL", "/dev/null"} in env and
+               {"GIT_CONFIG_SYSTEM", "/dev/null"} in env and
+               {"GIT_CONFIG_COUNT", "0"} in env and
+               {"GIT_NO_REPLACE_OBJECTS", "1"} in env and
+               {"GIT_DIR", nil} in env and
+               {"GIT_WORK_TREE", nil} in env and
+               {"GIT_ALTERNATE_OBJECT_DIRECTORIES", nil} in env
            end)
+  end
+
+  test "ignores inherited Git repository redirect variables" do
+    %{root: target_root, baseline: baseline} = create_baseline_fixture!()
+    %{root: decoy_root} = create_baseline_fixture!()
+    previous_git_dir = System.get_env("GIT_DIR")
+
+    on_exit(fn -> restore_env("GIT_DIR", previous_git_dir) end)
+    System.put_env("GIT_DIR", Path.join(decoy_root, ".git"))
+
+    assert {:ok, %ExtensionsAudit.Report{baseline_commit: ^baseline}} =
+             ExtensionsAudit.verify_baseline(target_root)
+  end
+
+  test "ignores repository replacement refs when verifying pinned objects" do
+    %{root: root, baseline: baseline} = create_baseline_fixture!()
+    manifest = File.read!(Path.join(root, "UPSTREAM_BASE.yml"))
+
+    git!(root, ["switch", "--orphan", "replacement"])
+    File.rm_rf!(Path.join(root, "elixir"))
+    File.write!(Path.join(root, "REPLACEMENT.md"), "replacement object\n")
+    git!(root, ["add", "-A"])
+    git!(root, ["commit", "-m", "replacement object"])
+    replacement = git!(root, ["rev-parse", "HEAD"])
+    git!(root, ["switch", "--detach", baseline])
+    File.write!(Path.join(root, "UPSTREAM_BASE.yml"), manifest)
+    git!(root, ["replace", baseline, replacement])
+
+    assert {:ok, %ExtensionsAudit.Report{baseline_commit: ^baseline}} =
+             ExtensionsAudit.verify_baseline(root)
+  end
+
+  test "rejects duplicate keys and multiple YAML documents before invoking Git" do
+    duplicate_root = create_root!(@manifest <> "commit: #{String.duplicate("a", 40)}\n")
+    multi_document_root = create_root!(@manifest <> "---\n" <> @manifest)
+    git = fn _, _, _ -> flunk("ambiguous manifest reached Git") end
+
+    assert {:error, [%ExtensionsAudit.Finding{code: :manifest_invalid_yaml, detail: "duplicate top-level key: commit"}]} =
+             ExtensionsAudit.verify_baseline(duplicate_root, git: git)
+
+    assert {:error, [%ExtensionsAudit.Finding{code: :manifest_invalid_yaml, detail: "expected exactly one YAML document"}]} =
+             ExtensionsAudit.verify_baseline(multi_document_root, git: git)
+  end
+
+  test "reports an unreadable manifest separately from invalid YAML" do
+    root = create_root!(@manifest)
+    manifest_path = Path.join(root, "UPSTREAM_BASE.yml")
+    File.chmod!(manifest_path, 0o000)
+    on_exit(fn -> File.chmod(manifest_path, 0o600) end)
+
+    assert {:error, [%ExtensionsAudit.Finding{code: :manifest_unreadable, field: "UPSTREAM_BASE.yml"}]} =
+             ExtensionsAudit.verify_baseline(root, git: fn _, _, _ -> flunk("unreadable manifest reached Git") end)
+  end
+
+  test "reports Git command failures without leaking raw command output" do
+    root = create_root!(@manifest)
+    secret = "/private/operator/repository"
+    git = git_with_results(root, %{repository_tree: {"fatal: cannot read #{secret}\n", 128}})
+
+    assert {:error, [%ExtensionsAudit.Finding{code: :git_unavailable, detail: detail}]} =
+             ExtensionsAudit.verify_baseline(root, git: git)
+
+    assert detail == "git command failed while resolving repository tree (status 128)"
+    refute detail =~ secret
+  end
+
+  test "reraises unexpected Erlang errors from the Git adapter" do
+    root = create_root!(@manifest)
+
+    git = fn _, _, _ ->
+      case :unexpected do
+        :expected -> {"", 0}
+      end
+    end
+
+    assert_raise CaseClauseError, fn -> ExtensionsAudit.verify_baseline(root, git: git) end
   end
 
   test "reports missing, malformed, and non-mapping manifests before invoking git" do
@@ -239,10 +326,11 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
 
   test "reports command failures for trees, HEAD, and first-parent enumeration" do
     stages_and_codes = [
-      repository_tree: :baseline_tree_mismatch,
+      repository_tree: :git_unavailable,
       elixir_tree: :baseline_elixir_tree_missing,
       head: :head_unavailable,
-      first_parent: :baseline_not_on_first_parent
+      ancestry: :git_unavailable,
+      first_parent: :git_unavailable
     ]
 
     for {stage, code} <- stages_and_codes do
@@ -259,62 +347,6 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
     File.write!(Path.join(root, "UPSTREAM_BASE.yml"), manifest)
     on_exit(fn -> File.rm_rf!(root) end)
     root
-  end
-
-  defp create_git_repo! do
-    root = Path.join(System.tmp_dir!(), "extensions-audit-git-test-#{System.unique_integer([:positive, :monotonic])}")
-    File.mkdir_p!(root)
-    git!(root, ["init", "-b", "openai"])
-    git!(root, ["config", "user.name", "Extensions Audit Test"])
-    git!(root, ["config", "user.email", "extensions-audit@example.invalid"])
-    on_exit(fn -> File.rm_rf!(root) end)
-    root
-  end
-
-  defp create_merge_fixture!(first_parent) when first_parent in [:openai, :orocsy] do
-    root = create_git_repo!()
-
-    File.mkdir_p!(Path.join(root, "elixir"))
-    File.write!(Path.join([root, "elixir", "README.md"]), "upstream\n")
-    git!(root, ["add", "elixir/README.md"])
-    git!(root, ["commit", "-m", "upstream baseline"])
-
-    baseline = git!(root, ["rev-parse", "HEAD"])
-    tree = git!(root, ["rev-parse", "#{baseline}^{tree}"])
-    elixir_tree = git!(root, ["rev-parse", "#{baseline}:elixir"])
-
-    git!(root, ["switch", "--orphan", "orocsy"])
-    File.rm_rf!(Path.join(root, "elixir"))
-    File.write!(Path.join(root, "OROCSY.md"), "runtime history\n")
-    git!(root, ["add", "-A"])
-    git!(root, ["commit", "-m", "orocsy history"])
-
-    if first_parent == :openai do
-      git!(root, ["switch", "openai"])
-      git!(root, ["merge", "--no-ff", "--allow-unrelated-histories", "-m", "merge orocsy history", "orocsy"])
-    else
-      git!(root, ["merge", "--no-ff", "--allow-unrelated-histories", "-m", "merge OpenAI baseline", "openai"])
-    end
-
-    write_manifest!(root, baseline, tree, elixir_tree)
-    %{root: root, baseline: baseline, head: git!(root, ["rev-parse", "HEAD"])}
-  end
-
-  defp write_manifest!(root, commit, tree, elixir_tree) do
-    manifest =
-      @manifest
-      |> String.replace(~r/^commit: .*$/m, "commit: #{commit}")
-      |> String.replace(~r/^tree: .*$/m, "tree: #{tree}")
-      |> String.replace(~r/^elixir_tree: .*$/m, "elixir_tree: #{elixir_tree}")
-
-    File.write!(Path.join(root, "UPSTREAM_BASE.yml"), manifest)
-  end
-
-  defp git!(root, args) do
-    case System.cmd("git", ["-C", root | args], stderr_to_stdout: true) do
-      {output, 0} -> String.trim(output)
-      {output, status} -> flunk("git #{Enum.join(args, " ")} failed with #{status}: #{output}")
-    end
   end
 
   defp collect_git_invocations(acc) do
@@ -377,4 +409,7 @@ defmodule SymphonyElixir.ExtensionsAuditTest do
   defp successful_git_result(_root, :first_parent) do
     {String.duplicate("e", 40) <> "\nf8e8b8a670c799f6e0ade7a8c25c4bf4a4a56ec7\n", 0}
   end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end

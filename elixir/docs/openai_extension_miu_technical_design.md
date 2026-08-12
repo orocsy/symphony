@@ -1,10 +1,10 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 implementation candidate; owner sequencing decision and upstream-suite blocker prevent landing
+Status: OXE-0.1 review-hardening candidate; unchanged upstream-suite blocker prevents landing
 
 Date: 2026-07-29
 
-Last reviewed: 2026-07-30
+Last reviewed: 2026-08-13
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -96,6 +96,16 @@ The bootstrap operation is also a migration prerequisite rather than a
 behavior MIU. The numbered boxes after it are provisional boundaries; this
 document does not authorize their implementation.
 
+`OXE-0.7` must produce the fork-behavior disposition ledger required by the
+owner's 2026-07-30 dual-fidelity ruling. Every one of the 229 existing fork
+commits, or a mechanically traceable behavior cluster for the May delivery
+layer, receives one provenance (`owner-requested` or `agent-initiated`) and one
+disposition: `port`, `superseded-by-upstream`, `drop`, or `defer`. A `port` row
+names its characterization test and target owner; a superseded row names the
+upstream commit; a drop requires its reason and, for owner-requested behavior,
+explicit owner approval; a defer names its slice. `OXE-0.9` and cutover require
+zero unclassified rows.
+
 `OXE-0.9` must execute the baseline audit only for the new integration
 lineage. Old-`main` freeze-window hotfix branches correctly fail the ancestry
 check and must not run that gate. Shared CI configuration remains allowed when
@@ -130,16 +140,12 @@ immutable Git object and one verified branch lineage.
 
 ### Preconditions And Boundary
 
-The approved fixed-point design starts implementation only after the
-integration worktree is created directly from `openai/main@f8e8b8a` and current
-Orocsy history is merged with OpenAI as first parent, following the parent
-architecture's branch model.
-
-A candidate implementation was built on the upstream-only lineage to create a
-small pre-merge checkpoint. That sequencing variation is not approved by the
-fixed-point design. The candidate must not land until the owner either approves
-the pre-merge checkpoint explicitly or directs completion of the Orocsy-history
-merge first.
+The integration worktree starts directly from `openai/main@f8e8b8a`. The
+owner's 2026-07-30 ruling explicitly blesses reviewable upstream-only
+checkpoints during Slice 0; Orocsy-history integration remains Slice 2 work.
+Intermediate branch mechanics are not the acceptance criterion. The binding
+criterion is dual fidelity: the final runtime must mechanically protect the
+pinned upstream baseline and completely disposition the accepted fork behavior.
 
 In scope:
 
@@ -161,7 +167,7 @@ Out of scope:
 
 ### Implementation Progress
 
-Observed on 2026-07-30:
+Observed through 2026-08-13:
 
 | Item | Evidence |
 | --- | --- |
@@ -169,17 +175,18 @@ Observed on 2026-07-30:
 | Machine authority | repository-root `UPSTREAM_BASE.yml` contains the approved eight-field schema and pinned identities |
 | Library seam | `SymphonyElixir.ExtensionsAudit.verify_baseline/2` validates the manifest, local Git object identity, both trees, ordinary ancestry, and first-parent ancestry |
 | CLI seam | `mix extensions.audit [--only baseline] [--repo-root PATH]` emits the stable success line or deterministic typed findings |
-| Safety boundary | tests prove malformed revisions do not reach Git, every Git subprocess disables promisor lazy fetches and optional locks, and successful audits invoke no fetch, checkout, switch, merge, reset, config, pull, push, or clone command |
+| Safety boundary | tests prove malformed revisions do not reach Git, inherited repository-redirect variables are removed, every Git subprocess disables promisor lazy fetches and optional locks, and the audit invokes only its read-only Git allowlist |
 | Topology boundary | temporary local repository tests accept an OpenAI-first-parent merge and reject the same baseline when it is reachable only through the second parent |
-| Focused tests | 21 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
-| Focused coverage | `SymphonyElixir.ExtensionsAudit` and `Mix.Tasks.Extensions.Audit` each report 100% |
-| Passing gates | direct audit, formatter check, specs check, Credo strict, escript build, and Dialyzer |
-| Handoff blocker | exact `make all` reaches 100% total coverage but stops on four unchanged pinned-upstream tests described below |
-| Remaining gate | owner decision on pre-merge sequencing and disposition of the upstream-suite blocker |
+| Focused tests | 27 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
+| Hermeticity | task success/default-root tests and Git topology tests use temporary repositories; no test requires the ambient checkout to contain the pinned object |
+| Current gate | focused suite, formatter, specs, Credo, build, Dialyzer, direct audit, and 100% total coverage pass after Round 2 hardening |
+| Handoff blocker | three consecutive exact `make all` runs stop on timing-sensitive pinned-upstream SSH/retry tests; the candidate does not modify those paths |
+| Remaining gate | final implementation review and an owner-approved fix or waiver for the unchanged upstream-suite blocker |
 
 The current integration checkpoint contains the approved design history plus
-the `OXE-0.1` candidate, not the Orocsy runtime merge. This is useful review
-evidence but is not authority to rewrite the approved branch sequence.
+the `OXE-0.1` candidate, not the Orocsy runtime merge. That deferred merge is
+the owner-approved sequence; it does not waive the Slice 2 integration or the
+dual-fidelity gate.
 
 ### Validation Record
 
@@ -204,6 +211,25 @@ implementations is empty, so this implementation does not alter their code.
 They remain a pinned-upstream/environment handoff blocker rather than being
 silently widened into OXE-0.1 scope.
 
+Review-hardening evidence on 2026-08-13 supersedes the counts, but not the
+classification, above:
+
+| Command | Outcome |
+| --- | --- |
+| focused audit/task suite | pass, 27 tests |
+| first exact `make all` | setup/build/format/lint pass; 322 tests, 1 fake-SSH trace timeout at `ssh_test.exs:105`, 6 skipped, 100% total coverage |
+| isolated `ssh_test.exs:105` with the same seed | pass, showing the first failure is suite-timing dependent |
+| second exact `make all` | setup/build/format/lint pass; 322 tests, fake-SSH timeout at `ssh_test.exs:135` plus retry lower-bound failure at `core_test.exs:1062`, 6 skipped, 100% total coverage |
+| final exact `make all` after replacement-object hardening | setup/build/format/lint pass; 323 tests, 1 fake-SSH trace timeout at `ssh_test.exs:105`, 6 skipped, 100% total coverage |
+| `mix extensions.audit --only baseline` | pass with the approved identities and `first_parent=true` |
+| `mix help extensions.audit` | pass; task usage and offline contract are discoverable |
+| `mix dialyzer --format short` | pass, zero errors |
+
+The varying failure subset is stronger evidence of timing sensitivity, but it
+does not make the full gate green. Repository policy still blocks landing
+until those unchanged failures are fixed or formally waived. No SSH,
+orchestrator, retry, or corresponding test file is changed by this MIU.
+
 ### Implementation Review Disposition
 
 The two-axis review of implementation checkpoint `175354d` found four spec
@@ -216,7 +242,7 @@ issues and four standards/smell issues. The candidate was hardened as follows:
 | Repeated bespoke temporary-directory cleanup | Fixed: fixture constructors own cleanup registration. |
 | README run instructions were missing | Fixed in the repository and Elixir READMEs, including manifest authority, command usage, offline behavior, and failure handling. |
 | Repeated fake-Git command switches | Hardened: common successful command evidence and per-test overrides now share one scripted adapter; topology tests use real Git. |
-| Candidate changed the approved branch sequence without explicit owner approval | Open: the parent sequence is restored in this document set, and the upstream-only candidate is explicitly held for an owner decision. |
+| Candidate changed the approved branch sequence without explicit owner approval | Resolved after this review: the owner's 2026-07-30 ruling blesses upstream-only Slice 0 checkpoints and leaves the merge in Slice 2. |
 | Exact `make all` is not green | Open: the four reproducible unchanged upstream failures above block landing unless fixed or formally waived. |
 
 The implementation review therefore improved the candidate materially but did
@@ -230,6 +256,26 @@ standards axis confirmed that the cleanup, README, and duplicate-fixture
 findings are resolved; its sole surviving finding is the exact `make all`
 landing blocker (`P1`). Those findings are represented by the two open rows
 above.
+
+That checkpoint review was superseded by the authoritative review of `8b652b3`
+recorded in `openai_extension_oxe01_implementation_review.md`. Round 2 found
+three P1 and eight P2 issues. The 2026-08-13 hardening candidate disposes them
+as follows; final status remains subject to the full gate and re-review:
+
+| Round 2 finding | Candidate disposition |
+| --- | --- |
+| Inherited `GIT_DIR` and related variables can redirect the audit | Fixed: every Git subprocess unsets all reviewed repository/object/index/namespace redirect variables; a real two-repository regression test proves the target root wins. |
+| Ambient-repository tests fail in shallow CI | Fixed: success, default-root, linked-worktree, and topology tests use temporary repositories with their own exact manifests. |
+| ANSI-colored stderr breaks byte comparisons | Fixed: the deterministic-error assertion normalizes ANSI using the shared test helper. |
+| Non-zero Git exits become semantic mismatch findings and leak raw output | Fixed: only the documented semantic exit remains a mismatch; operational failures become sanitized `:git_unavailable` findings with stage and status. |
+| Broad `ErlangError` rescue hides adapter/programming defects | Fixed: only `:enoent` becomes “git executable not found”; other Erlang errors are reraised and regression-tested. |
+| Duplicate keys and multiple YAML documents bypass the strict schema | Fixed: all documents are decoded with duplicate-preserving pairs; exactly one document and one occurrence per key are required. |
+| Mix task is hidden and its short description promises the future budget check | Fixed: the task has usage documentation and describes only the implemented baseline check. |
+| Git command contract is a mutation blacklist | Fixed: tests allow only `rev-parse`, `cat-file`, `merge-base`, and `rev-list`. |
+| Temporary Git repositories inherit global hooks/signing config | Fixed: the shared fixture clears global/system config, signing, and hook paths. |
+| Linked-worktree test does not create a linked worktree | Fixed: it now asserts a pointer-file `.git` before auditing. |
+| Unreadable manifests are mislabeled as invalid YAML | Fixed: read failures use typed `:manifest_unreadable` findings with OS error text. |
+| Branch sequencing requires owner resolution | Resolved by owner ruling: upstream-only Slice 0 checkpoints are blessed; Orocsy integration stays in Slice 2, with dual fidelity enforced by OXE-0.7/OXE-0.9. |
 
 ### Data Shape
 
@@ -287,6 +333,7 @@ Failures are typed rather than prose-only:
 Allowed finding codes in this MIU are:
 
 - `:manifest_missing`
+- `:manifest_unreadable`
 - `:manifest_invalid_yaml`
 - `:manifest_schema_unsupported`
 - `:manifest_unknown_key`
@@ -319,11 +366,23 @@ git rev-list --first-parent HEAD
 and requires the baseline to appear in the second command's exact output.
 
 CI may be offline. If a shallow or partial clone omits the baseline, the audit
-returns a typed failure with repair guidance; it never fetches. YAML is
-normalized once into a typed struct. Git commands use argument lists through
-`System.cmd/3`, never shell interpolation. Every Git subprocess sets
-`GIT_NO_LAZY_FETCH=1` so a partial clone cannot demand-fetch a promisor object,
-and `GIT_OPTIONAL_LOCKS=0` to suppress optional repository-state refreshes.
+returns a typed failure with repair guidance; it never fetches. The task
+requires Git 2.36 or newer so `GIT_NO_LAZY_FETCH` is enforced. YAML is decoded
+as duplicate-preserving pairs and must contain exactly one document with one
+occurrence of each strict-schema key before it is normalized into a typed
+struct.
+
+Git commands use argument lists through `System.cmd/3`, never shell
+interpolation. Every Git subprocess sets `GIT_NO_LAZY_FETCH=1` so a partial
+clone cannot demand-fetch a promisor object, and `GIT_OPTIONAL_LOCKS=0` to
+suppress optional repository-state refreshes. It also unsets `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_COMMON_DIR`, object/alternate-object directories, index,
+namespace, ceiling, and discovery overrides. This is load-bearing when the
+task runs inside a Git hook because inherited Git variables must not redirect
+evidence collection to the caller's repository context. It isolates global,
+system, and command-scope configuration, disables replacement objects, and
+ignores inherited replacement-ref and shallow-file overrides so Git resolves
+the checkout's stored objects and topology directly.
 
 ### Design / Flow
 
@@ -386,7 +445,7 @@ defmodule Mix.Tasks.Extensions.Audit do
 
   alias SymphonyElixir.ExtensionsAudit
 
-  @shortdoc "Verifies the pinned upstream baseline and extension patch budget"
+  @shortdoc "Verifies the pinned upstream baseline"
   @switches [only: :string, repo_root: :string]
 
   @impl Mix.Task
@@ -411,7 +470,7 @@ Repository-root resolution defaults from `Mix.Project.project_file/0`, not
 the caller's current directory. `--repo-root` exists for hermetic task tests
 and diagnosis. The library function always requires an explicit root.
 
-Planned files:
+Implementation files:
 
 ```text
 UPSTREAM_BASE.yml
@@ -419,12 +478,13 @@ elixir/lib/symphony_elixir/extensions_audit.ex
 elixir/lib/mix/tasks/extensions.audit.ex
 elixir/test/symphony_elixir/extensions_audit_test.exs
 elixir/test/mix/tasks/extensions_audit_task_test.exs
+elixir/test/support/extensions_audit_fixture.exs
 ```
 
-The implementation also updates the parent architecture to name
-`UPSTREAM_BASE.yml` as machine authority. It does not yet add the task to
-`make all`; `OXE-0.9` owns the full Slice 0 gate after all Slice 0 checks
-exist.
+The parent architecture already names `UPSTREAM_BASE.yml` as machine
+authority and is kept synchronized with this trace. The implementation does
+not yet add the task to `make all`; `OXE-0.9` owns the full Slice 0 gate after
+all Slice 0 checks exist.
 
 ### Alternatives Rejected
 

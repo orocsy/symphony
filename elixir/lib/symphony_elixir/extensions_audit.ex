@@ -55,7 +55,27 @@ defmodule SymphonyElixir.ExtensionsAudit do
 
   @manifest_file "UPSTREAM_BASE.yml"
   @manifest_keys ~w(schema_version repository commit tree elixir_tree version spec_status verified_at)
-  @git_env [{"GIT_NO_LAZY_FETCH", "1"}, {"GIT_OPTIONAL_LOCKS", "0"}]
+  @git_env [
+    {"GIT_NO_LAZY_FETCH", "1"},
+    {"GIT_OPTIONAL_LOCKS", "0"},
+    {"GIT_CONFIG_GLOBAL", "/dev/null"},
+    {"GIT_CONFIG_SYSTEM", "/dev/null"},
+    {"GIT_CONFIG_NOSYSTEM", "1"},
+    {"GIT_CONFIG_COUNT", "0"},
+    {"GIT_CONFIG_PARAMETERS", nil},
+    {"GIT_NO_REPLACE_OBJECTS", "1"},
+    {"GIT_REPLACE_REF_BASE", nil},
+    {"GIT_SHALLOW_FILE", nil},
+    {"GIT_DIR", nil},
+    {"GIT_WORK_TREE", nil},
+    {"GIT_COMMON_DIR", nil},
+    {"GIT_OBJECT_DIRECTORY", nil},
+    {"GIT_ALTERNATE_OBJECT_DIRECTORIES", nil},
+    {"GIT_INDEX_FILE", nil},
+    {"GIT_NAMESPACE", nil},
+    {"GIT_CEILING_DIRECTORIES", nil},
+    {"GIT_DISCOVERY_ACROSS_FILESYSTEM", nil}
+  ]
 
   @sha_pattern ~r/^[0-9a-f]{40}$/
 
@@ -64,8 +84,8 @@ defmodule SymphonyElixir.ExtensionsAudit do
     manifest_path = Path.join(repo_root, @manifest_file)
     git = Keyword.get(opts, :git, &System.cmd/3)
 
-    with {:ok, source} <- File.read(manifest_path),
-         {:ok, manifest} <- YamlElixir.read_from_string(source),
+    with {:ok, source} <- read_manifest(manifest_path),
+         {:ok, manifest} <- decode_manifest(source),
          :ok <- validate_mapping(manifest),
          :ok <- validate_schema_version(manifest),
          :ok <- reject_unknown_keys(manifest),
@@ -91,12 +111,62 @@ defmodule SymphonyElixir.ExtensionsAudit do
       {:error, :enoent} ->
         {:error, [%Finding{code: :manifest_missing, field: @manifest_file}]}
 
+      {:error, {:manifest_unreadable, reason}} ->
+        {:error,
+         [
+           %Finding{
+             code: :manifest_unreadable,
+             field: @manifest_file,
+             detail: "manifest could not be read: #{:file.format_error(reason)}"
+           }
+         ]}
+
       {:error, _reason} ->
-        {:error, [%Finding{code: :manifest_invalid_yaml, field: @manifest_file, detail: "manifest could not be decoded"}]}
+        {:error, invalid_yaml("manifest could not be decoded")}
 
       findings when is_list(findings) ->
         {:error, findings}
     end
+  end
+
+  defp read_manifest(path) do
+    case File.read(path) do
+      {:ok, source} -> {:ok, source}
+      {:error, :enoent} = error -> error
+      {:error, reason} -> {:error, {:manifest_unreadable, reason}}
+    end
+  end
+
+  defp decode_manifest(source) do
+    case YamlElixir.read_all_from_string(source, maps_as_keywords: true) do
+      {:ok, [pairs]} when is_list(pairs) ->
+        case duplicate_key(pairs) do
+          nil -> {:ok, Map.new(pairs)}
+          key -> invalid_yaml("duplicate top-level key: #{unknown_key_name(key)}")
+        end
+
+      {:ok, [_document]} ->
+        {:ok, :not_a_mapping}
+
+      {:ok, _documents} ->
+        invalid_yaml("expected exactly one YAML document")
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp duplicate_key(pairs) do
+    pairs
+    |> Enum.group_by(fn {key, _value} -> key end)
+    |> Enum.filter(fn {_key, entries} -> length(entries) > 1 end)
+    |> Enum.map(fn {key, _entries} -> key end)
+    |> Enum.sort_by(&unknown_key_name/1)
+    |> List.first()
+  end
+
+  defp invalid_yaml(detail) do
+    [%Finding{code: :manifest_invalid_yaml, field: @manifest_file, detail: detail}]
   end
 
   defp reject_unknown_keys(manifest) when is_map(manifest) do
@@ -231,8 +301,8 @@ defmodule SymphonyElixir.ExtensionsAudit do
           [%Finding{code: :baseline_tree_mismatch, field: "tree", expected: manifest.tree, actual: actual}]
         end
 
-      {:ok, output, _status} ->
-        [%Finding{code: :baseline_tree_mismatch, field: "tree", expected: manifest.tree, actual: String.trim(output)}]
+      {:ok, _output, status} ->
+        git_command_failed("resolving repository tree", status)
 
       {:error, detail} ->
         [%Finding{code: :git_unavailable, field: "git", detail: detail}]
@@ -282,8 +352,11 @@ defmodule SymphonyElixir.ExtensionsAudit do
       {:ok, _output, 0} ->
         :ok
 
-      {:ok, _output, _status} ->
+      {:ok, _output, 1} ->
         [%Finding{code: :baseline_not_ancestor, field: "commit", expected: manifest.commit, actual: head}]
+
+      {:ok, _output, status} ->
+        git_command_failed("checking baseline ancestry", status)
 
       {:error, detail} ->
         [%Finding{code: :git_unavailable, field: "git", detail: detail}]
@@ -309,8 +382,8 @@ defmodule SymphonyElixir.ExtensionsAudit do
           ]
         end
 
-      {:ok, output, _status} ->
-        [%Finding{code: :baseline_not_on_first_parent, field: "commit", expected: manifest.commit, actual: head, detail: String.trim(output)}]
+      {:ok, _output, status} ->
+        git_command_failed("enumerating first-parent history", status)
 
       {:error, detail} ->
         [%Finding{code: :git_unavailable, field: "git", detail: detail}]
@@ -322,6 +395,15 @@ defmodule SymphonyElixir.ExtensionsAudit do
       {output, status} when is_binary(output) and is_integer(status) -> {:ok, output, status}
     end
   rescue
-    error in ErlangError -> {:error, Exception.message(error)}
+    error in ErlangError ->
+      if Map.get(error, :original) == :enoent do
+        {:error, "git executable not found on PATH"}
+      else
+        reraise error, __STACKTRACE__
+      end
+  end
+
+  defp git_command_failed(operation, status) do
+    [%Finding{code: :git_unavailable, field: "git", detail: "git command failed while #{operation} (status #{status})"}]
   end
 end

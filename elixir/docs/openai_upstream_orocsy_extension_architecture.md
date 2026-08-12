@@ -918,13 +918,15 @@ contribution. Orocsy's delivery workflow remains out of that contribution.
 2. Keep a permanent read-only `openai` remote.
 3. Create the integration branch directly from pinned
    `openai/main@f8e8b8a`.
-4. Merge current Orocsy `main` into that branch without committing until the
-   tree is resolved and buildable. This preserves both histories while keeping
-   OpenAI as the integration branch's first parent.
-5. Resolve kernel files by retaining upstream behavior, then wire the extension
-   interfaces.
+4. Land reviewable Slice 0 checkpoints on that upstream-only lineage. The
+   owner's 2026-07-30 ruling explicitly blesses deferred merging; intermediate
+   branch mechanics are not a cutover criterion.
+5. In Slice 2, merge the frozen Orocsy history into the integration branch,
+   resolve kernel files by retaining upstream behavior, and wire the extension
+   interfaces. This preserves both histories while keeping the OpenAI lineage
+   on the integration branch's first-parent chain.
 6. Do not cut over `main` until the complete integration passes replay and live
-   canary gates.
+   canary gates and the fork-behavior ledger has zero unclassified rows.
 
 The integration branch may contain multiple reviewed micro-commits, but its
 tree must remain buildable at every pushed checkpoint.
@@ -948,6 +950,18 @@ Every accepted hotfix creates one entry in
 The ledger is reconciled before every integration-branch push and before the
 NutriBuddy canary. A hotfix that touches a registered kernel hook also triggers
 an immediate upstream-baseline comparison.
+
+The freeze-window ledger is not sufficient for the pre-existing fork history.
+`OXE-0.7` therefore owns a complete fork-behavior disposition ledger for all
+229 fork commits, using mechanically traceable behavior clusters for the May
+delivery layer and one row per June/July incident fix. Every row records
+`owner-requested` or `agent-initiated` provenance and exactly one disposition:
+`port`, `superseded-by-upstream`, `drop`, or `defer`. Port rows name the
+characterization test and target owner; superseded rows name the upstream
+commit; drop rows require a reason and explicit owner approval when the
+behavior was owner-requested; defer rows name the target slice. `OXE-0.9` and
+cutover both require zero unclassified rows. This is the fork-side counterpart
+to the machine-checked upstream baseline.
 
 ### Migration Slices
 
@@ -1272,11 +1286,11 @@ Implementation detail is developed incrementally in
 `openai_extension_miu_technical_design.md`. Its current revision decomposes
 Slice 0 and specifies the approved `OXE-0.1` pinned upstream-baseline
 verifier. The parent gate is not yet formally accepted. `OXE-0.1` exists on
-the upstream-first integration lineage as a review candidate. Its focused
-gates are green, but it is not cleared to land: the candidate precedes the
-required Orocsy-history merge, and the MIU trace records four unchanged
-pinned-upstream tests that block the exact full handoff command in this
-environment. No Orocsy runtime behavior or kernel hook has been introduced.
+the upstream-first integration lineage as a review-hardening candidate. The
+owner has blessed deferring the Orocsy-history merge to Slice 2. Its focused
+gates are green; the exact full handoff gate and final re-review still control
+whether OXE-0.1 is cleared to land. No Orocsy runtime behavior or kernel hook
+has been introduced.
 
 ## Approval Gate
 
