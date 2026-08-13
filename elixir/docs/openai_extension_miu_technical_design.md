@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared; OXE-1.1 red checkpoint created
+Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared; OXE-1.1 implementation gate-green and pending independent review
 
 Date: 2026-07-29
 
@@ -658,8 +658,14 @@ or Orocsy runtime code landed.
 The Slice 1 host trace is now recorded in
 [`openai_extension_oxe11_extension_host.md`](openai_extension_oxe11_extension_host.md).
 It decomposes the slice into four ordered MIUs and keeps `OXE-1.1` kernel-free:
-facade, immutable closed registry, four public interfaces, shared types, and
-neutral no-op adapters. Independent review corrected the startup-latch,
+facade, immutable closed registry, four public interfaces, shared failure types, and
+neutral no-op adapters. `OXE-1.1` concretizes the shared failure types; the
+hook-owned context, event, and decision structs remain in their owning MIUs.
+Independent review corrected the startup-latch,
 decoded-workflow-input, and test-isolation boundaries. The resulting focused
-11-test red checkpoint fails only because the generic host modules do not yet
-exist; no pinned kernel path changed.
+11-test red checkpoint at `45335b7` failed only because the generic host
+modules did not exist. The implementation is now gate-green: its focused suite
+passes 17 tests; exact `make all` passes 359 tests with six skipped, 100% total
+coverage, strict Credo clean, and zero Dialyzer errors. Both extension audits
+report zero changed kernel files and zero changed kernel lines. Independent
+implementation review is the remaining OXE-1.1 gate.

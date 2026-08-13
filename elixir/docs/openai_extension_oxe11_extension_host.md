@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: independent design review corrected; OXE-1.1 red checkpoint created
+Status: OXE-1.1 implementation gate-green; independent implementation review pending
 
 Date: 2026-08-13
 
@@ -65,7 +65,7 @@ schema. Both would violate the already-reviewed patch authority.
 
 | MIU | Owns | Kernel write scope | Mechanical proof |
 | --- | --- | --- | --- |
-| `OXE-1.1` | facade, registry, public interfaces, shared types, no-op adapters | none | interface tests and closed-registry tests |
+| `OXE-1.1` | facade, registry, public interfaces, shared failure types, no-op adapters | none | interface tests and closed-registry tests |
 | `OXE-1.2` | admission and workspace-ready delivery hooks | `orchestrator.ex`, `agent_runner.ex` | unchanged upstream core tests plus neutral-decision tests |
 | `OXE-1.3` | immutable turn context, authorization hook, observer hook | `codex/app_server.ex` | unchanged app-server tests plus recursive-context differential |
 | `OXE-1.4` | complete no-op conformance and manifest activation | manifest, audit fixtures, proof task, docs | all three registered files required; exact 40-line budget and full gate |
@@ -154,10 +154,13 @@ authority. Tests use it only for lifecycle isolation; they never read or
 replace registry storage directly.
 
 Workflow reload may change adapter options for future admissions and future
-Codex sessions. Each accepted admission/session snapshots normalized options
-and the registry revision. Changing an adapter selector after registry lock is
-a typed `:extension_registry_restart_required` failure; it never hot-swaps a
-module and never falls back to no-op.
+Codex sessions. `OXE-1.1` validates and returns a fresh options snapshot from
+each registry lock while keeping adapter selection immutable. `OXE-1.2` and
+`OXE-1.3` must carry that snapshot and the registry revision into their owning
+admission/session contexts once those concrete context types exist. Changing
+an adapter selector after registry lock is a typed
+`:extension_registry_restart_required` failure; it never hot-swaps a module
+and never falls back to no-op.
 
 Default raw configuration is equivalent to:
 
@@ -181,6 +184,13 @@ The four behavior modules are real seams because each is exercised by both its
 neutral production adapter and an in-memory fixture adapter through the facade
 in Slice 1. The later Orocsy adapters add the second production behavior
 without changing the interface.
+
+The target signatures below name the hook-owned structs. `OXE-1.1` implements
+the same callback names and return shapes, but deliberately leaves hook-owned
+input and decision payload positions as `term()` until `OXE-1.2` and `OXE-1.3`
+can derive their fields from the reviewed kernel call sites. The three failure
+structs are concrete now. This is type refinement across MIUs, not permission
+to pass an open policy map through the eventual kernel seam.
 
 ```elixir
 defmodule SymphonyElixir.Extensions.DispatchAdmission do
@@ -247,11 +257,17 @@ or telemetry. They are deterministic and allocation-bounded.
 | admission adapter error/raise/throw | fail closed before claim/workspace/model |
 | delivery adapter error/raise/throw | preserve workspace and park; do not launch model |
 | authorization adapter error/raise/throw | structured denial/error in the current turn; never auto-approve |
-| one observer error/raise/timeout | operator-visible log; other observers continue; controller result unchanged |
+| one observer error/raise/throw/exit | operator-visible log; other observers continue; controller result unchanged |
 | malformed adapter return | typed contract violation with adapter/interface/revision; no fallback |
 
 Decision-adapter failure never becomes `:kernel_default`. Observer failure
 never becomes a controller decision.
+
+`OXE-1.1` does not claim timeout containment: neither the reviewed architecture
+nor this host MIU defines an observer process boundary or timeout budget.
+`OXE-1.3` must either define and test that boundary before the observer hook
+lands or keep the callback synchronous and document the resulting operational
+limit. Inventing a duration in the generic host would create false precision.
 
 ## Kernel Hook Ownership
 
@@ -363,7 +379,8 @@ fail because the host modules do not exist.
 - Install the registry from `SymphonyElixir.Application`. That changes an
   unregistered pinned-kernel file and invalidates the measured budget.
 - Add selectors to `Config.Schema`. That also creates unregistered kernel
-  divergence; the generic host can own a strict decoder over raw workflow data.
+  divergence; the generic host can own a strict decoder over the decoded
+  workflow front-matter map.
 - Resolve adapter modules on every call. Workflow reload could replace an
   in-flight implementation.
 - Store arbitrary module names in YAML. It creates atoms and turns
@@ -376,6 +393,49 @@ fail because the host modules do not exist.
   they are hypothetical seams and shallow test-only surface.
 - Catch decision-adapter failure and continue upstream behavior. That converts
   uncertainty into permission.
+
+## OXE-1.1 Implementation Evidence
+
+The reviewed RED checkpoint is `45335b7`. Its focused command ran 11 tests and
+all 11 failed only because `SymphonyElixir.ExtensionRegistry`,
+`SymphonyElixir.Extensions`, the four behavior modules, and no-op adapters did
+not exist.
+
+The implementation then added only the generic host tree and test/build
+support:
+
+- `ExtensionRegistry.resolve/1` strictly decodes the closed catalog without
+  creating atoms, and `lock/1` latches only adapter selection while returning a
+  new validated options snapshot for each future admission; the owning hook
+  MIUs remain responsible for carrying that snapshot into their concrete
+  contexts;
+- the first admission call owns the latch; delivery and authorization fail
+  closed before that call, while observation logs a sanitized unavailable
+  class and retains no decision return path;
+- the facade normalizes raise, throw, exit, malformed returns, and typed adapter
+  failures, stamping the selected adapter and registry revision itself;
+- production contains only the four `noop` selectors. Fixture selectors and
+  `reset_for_test/0` are compile-time test-only; a production-mode compilation
+  independently proved the reset function is not exported;
+- the first GREEN run exposed an Elixir-specific guard error (`nil` satisfies
+  `is_atom/1`). The closed-catalog regression now rejects that case instead of
+  constructing a registry containing `nil`.
+
+Observed validation on 2026-08-13:
+
+| Proof | Result |
+| --- | --- |
+| Focused registry/facade suite | 17 tests, 0 failures |
+| Existing extension/audit suite before GREEN | 51 tests, 0 failures |
+| Full exact `make all` | passed |
+| Full suite under coverage | 359 tests, 0 failures, 6 skipped |
+| Coverage | 100.00% total, including registry and facade |
+| Strict Credo | no issues |
+| Dialyzer | 0 errors |
+| `mix specs.check` | all public functions covered |
+| Baseline and budget audits | pass; 0 changed kernel files, 0 changed kernel lines |
+| Production test-reset probe | `production_reset_exported: false` |
+| Pinned kernel files | unchanged from `f8e8b8a` |
 
 ## Strongest Surviving Attack
 
@@ -402,13 +462,12 @@ found three design-document gaps and corrected them before the red checkpoint:
    The production facade remains four operations with no injection argument;
    only the test build gets a closed fixture catalog and reset helper.
 
-No kernel path, runtime behavior, manifest requirement, or Orocsy adapter is
-cleared by this review.
+That design review did not by itself clear a kernel path, manifest requirement,
+or Orocsy adapter.
 
 ## Next Action
 
-Review the `OXE-1.1` red checkpoint, whose scope is limited to
-registry/facade/interface/no-op tests, the test-build fixture catalog, fixtures,
-and these reviewed docs. Its focused 11-test command fails only because the
-host modules do not exist. Once that checkpoint clears, implement the generic
-host without touching a pinned kernel file.
+Run an independent two-axis implementation review against RED checkpoint
+`45335b7`, this trace, and the parent architecture. If it clears, create the
+`OXE-1.2` admission/delivery RED checkpoint without absorbing authorization,
+observer, Orocsy policy, or manifest-finalization scope.

@@ -43,9 +43,11 @@ end
 defmodule SymphonyElixir.ExtensionHostFixtures.DeliveryObserver do
   @moduledoc false
 
+  alias SymphonyElixir.ExtensionHostFixtures.Action
+
   def record(event) do
     send(event.test_pid, {:delivery_observer, event})
-    :ok
+    Action.run(Map.get(event, :action), Map.get(event, :result, :ok))
   end
 end
 

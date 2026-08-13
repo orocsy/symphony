@@ -30,15 +30,19 @@ defmodule SymphonyElixir.ExtensionRegistryTest do
     invalid = [
       {%{"extensions" => %{"unknown" => "noop"}}, :unknown_key},
       {%{"extensions" => []}, :invalid_type},
+      {%{"extensions" => %{"delivery_controller" => 42}}, :invalid_type},
       {%{"extensions" => %{"observers" => "noop"}}, :invalid_type},
+      {%{"extensions" => %{"observers" => ["noop", 42]}}, :invalid_type},
+      {%{"extensions" => %{"options" => []}}, :invalid_type},
       {%{"extensions" => %{"dispatch_admission" => "not-installed"}}, :unknown_adapter},
+      {%{"extensions" => %{"observers" => ["not-installed"]}}, :unknown_adapter},
       {%{"extensions" => %{"observers" => ["noop", "noop"]}}, :duplicate_observer}
     ]
 
     for {config, code} <- invalid do
       assert {:error, failure} = resolve(config)
       assert failure.code == code
-      assert failure.interface in [nil, :dispatch_admission, :observers]
+      assert failure.interface in [nil, :dispatch_admission, :delivery_controller, :observers]
     end
   end
 
@@ -65,6 +69,15 @@ defmodule SymphonyElixir.ExtensionRegistryTest do
     assert {:error, failure} = lock(changed)
     assert failure.code == :extension_registry_restart_required
     assert failure.interface == :delivery_controller
+
+    ExtensionRegistry.reset_for_test()
+    assert {:ok, _, _} = lock(first)
+
+    observer_change = put_in(second, ["extensions", "observers"], ["noop"])
+    assert {:error, observer_failure} = lock(observer_change)
+    assert observer_failure.code == :extension_registry_restart_required
+    assert observer_failure.interface == :observers
+    assert observer_failure.adapter =~ "DeliveryObserver"
   end
 
   test "publishes the four exact adapter callback contracts" do
@@ -74,8 +87,8 @@ defmodule SymphonyElixir.ExtensionRegistryTest do
     end
   end
 
-  defp resolve(config), do: apply(ExtensionRegistry, :resolve, [config])
-  defp lock(config), do: apply(ExtensionRegistry, :lock, [config])
+  defp resolve(config), do: ExtensionRegistry.resolve(config)
+  defp lock(config), do: ExtensionRegistry.lock(config)
 
   defp fixture_config(options) do
     %{
@@ -92,7 +105,7 @@ defmodule SymphonyElixir.ExtensionRegistryTest do
   defp reset_registry_if_available do
     if Code.ensure_loaded?(ExtensionRegistry) and
          function_exported?(ExtensionRegistry, :reset_for_test, 0) do
-      apply(ExtensionRegistry, :reset_for_test, [])
+      ExtensionRegistry.reset_for_test()
     else
       :ok
     end
