@@ -224,7 +224,8 @@ defmodule SymphonyElixir.HandoffCertificate do
     end
   end
 
-  defp clean_worktree?(workspace), do: clean_worktree?(workspace, nil)
+  @spec clean_worktree?(String.t()) :: boolean()
+  def clean_worktree?(workspace), do: clean_worktree?(workspace, nil)
 
   defp clean_worktree?(workspace, worker_host) do
     case git(

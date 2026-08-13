@@ -286,6 +286,8 @@ defmodule SymphonyElixir.DispatchPreflight do
     unsafe_pending_miu? =
       unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"])
 
+    unsafe_final_miu_head? = unsafe_final_miu_head_state?(preflight)
+
     first_correction_blocking? =
       visible_corrections
       |> List.first()
@@ -293,7 +295,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     checkpoint_event =
       cond do
-        structured? and unsafe_pending_miu? ->
+        structured? and (unsafe_pending_miu? or unsafe_final_miu_head?) ->
           "runtime-contract-gate"
 
         first_correction_blocking? ->
@@ -319,7 +321,8 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     first_task =
       cond do
-        unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"]) ->
+        unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"]) or
+            unsafe_final_miu_head_state?(preflight) ->
           preflight["base_first_task"] || preflight["first_task"]
 
         corrections == [] ->
@@ -349,6 +352,14 @@ defmodule SymphonyElixir.DispatchPreflight do
        do: true
 
   defp unsafe_pending_miu_commit_state?(_pending_miu_commit_state), do: false
+
+  defp unsafe_final_miu_head_state?(%{
+         "pending_miu_commit_state" => %{"status" => "no_pending_miu"},
+         "final_miu_head_state" => state
+       }),
+       do: state != "certified"
+
+  defp unsafe_final_miu_head_state?(_preflight), do: false
 
   defp ensure_dirs(workspace) do
     File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
@@ -2201,6 +2212,14 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp structured_recovery_state_limit(%{
+         "final_miu_head_state" => state,
+         "pending_miu_commit_state" => %{"status" => "no_pending_miu"}
+       })
+       when state != "certified" do
+    "- Every MIU certificate remains valid, but the current workspace is not the exact clean final certified checkpoint. Do not edit, create a commit, append `handoff.requested`, or restart implementation. Stop for controller/operator reconstruction of the review-rework delta."
+  end
+
+  defp structured_recovery_state_limit(%{
          "open_corrections" => [
            %{
              "next_action" => next_action
@@ -2231,12 +2250,6 @@ defmodule SymphonyElixir.DispatchPreflight do
     "- Every MIU is already certified. Do not edit product files or create another MIU commit. Preserve the clean certified head and perform only the final push, PR, and `handoff.requested` sequence supplied by the gate."
   end
 
-  defp structured_recovery_state_limit(%{
-         "pending_miu_commit_state" => %{"status" => "no_pending_miu"}
-       }) do
-    "- Every MIU certificate remains valid, but current HEAD is not the final certified MIU head. Do not edit, create a commit, append `handoff.requested`, or restart implementation. Stop for controller/operator reconstruction of the review-rework delta."
-  end
-
   defp structured_recovery_state_limit(_preflight) do
     "- For an execution gate, run `git status --short --branch` and each `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as separate commands; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Inspect only that focused dirty diff and files named by the remaining MIU, complete that MIU, create its micro commit, append `miu.completion_requested`, and stop without pushing."
   end
@@ -2249,7 +2262,7 @@ defmodule SymphonyElixir.DispatchPreflight do
          {head, 0} <- git_command(workspace, ["rev-parse", "HEAD"]) do
       cond do
         String.trim(head) != certified_head -> "post_certification_delta"
-        clean_worktree?(workspace) -> "certified"
+        HandoffCertificate.clean_worktree?(workspace) -> "certified"
         true -> "dirty_post_certification_worktree"
       end
     else

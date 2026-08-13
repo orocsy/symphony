@@ -269,14 +269,6 @@ defmodule SymphonyElixir.PromptBuilder do
          _compiled,
          _issue,
          _workspace,
-         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
-       ),
-       do: ""
-
-  defp runtime_contract_guidance(
-         _compiled,
-         _issue,
-         _workspace,
          %{
            "mode" => "handoff_recovery",
            "pending_miu_commit_state" => %{"status" => "no_pending_miu"},
@@ -293,6 +285,14 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     |> String.trim()
   end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
+       ),
+       do: ""
 
   defp runtime_contract_guidance(
          compiled,

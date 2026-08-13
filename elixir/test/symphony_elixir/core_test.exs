@@ -9860,7 +9860,24 @@ defmodule SymphonyElixir.CoreTest do
       refute prompt =~ "Symphony fresh-MIU micro-worker"
       refute prompt =~ "miu.completion_requested"
 
-      File.write!(target, "test('certified', () => {})\n// dirty post-certification delta\n")
+      correction_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(correction_dir)
+
+      File.write!(
+        Path.join(correction_dir, "dirty-final-correction.json"),
+        Jason.encode!(%{
+          "correction_id" => "dirty-final-correction",
+          "status" => "open",
+          "next_action" => "retry",
+          "source" => "codex.review-rework",
+          "summary" => "Non-blocking review correction",
+          "findings" => ["tests/unit/certified.test.ts: preserve final behavior"]
+        })
+      )
+
+      orchestration_state = Path.join(workspace, ".codex/delivery/pending.json")
+      File.mkdir_p!(Path.dirname(orchestration_state))
+      File.write!(orchestration_state, "{}\n")
 
       assert {:ok, %{"mode" => "handoff_recovery"} = dirty_preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
@@ -9869,7 +9886,12 @@ defmodule SymphonyElixir.CoreTest do
                "dirty_post_certification_worktree"
 
       refute dirty_preflight["first_task"] =~ "append the exact handoff.requested event"
-      File.write!(target, "test('certified', () => {})\n")
+
+      dirty_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert dirty_prompt =~ "Runtime Contract post-certification evidence gate"
+      assert dirty_prompt =~ "Preserve the current workspace"
+      refute dirty_prompt =~ "Resolve the active correction"
+      refute dirty_prompt =~ "--type handoff.requested"
 
       File.write!(target, "test('certified', () => {})\n// post-certification review delta\n")
       {_output, 0} = System.cmd("git", ["add", "tests/unit/certified.test.ts"], cd: workspace)
