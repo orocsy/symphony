@@ -282,10 +282,15 @@ defmodule SymphonyElixir.DispatchPreflight do
     requirements = preflight["requirements"] || %{}
     visible_corrections = handoff_recovery_correction_summaries(corrections)
     structured? = requirements["runtime_contract_status"] == "structured"
+
+    unsafe_pending_miu? =
+      unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"])
+
     controller_owned? = corrections |> List.first() |> retryable_controller_validation_correction?()
 
     checkpoint_event =
       cond do
+        structured? and unsafe_pending_miu? -> "runtime-contract-gate"
         structured? and controller_owned? -> "runtime-contract-gate"
         visible_corrections != [] -> "correction-scoped-fix"
         structured? -> "runtime-contract-gate"

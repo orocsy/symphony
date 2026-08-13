@@ -9250,8 +9250,11 @@ defmodule SymphonyElixir.CoreTest do
       correction_dir = Path.join(workspace, ".orocsy/delivery/inbox")
       File.mkdir_p!(correction_dir)
 
+      correction_path =
+        Path.join(correction_dir, "correction_retryable_validation.json")
+
       File.write!(
-        Path.join(correction_dir, "correction_retryable_validation.json"),
+        correction_path,
         Jason.encode!(%{
           "correction_id" => "correction_retryable_validation",
           "source" => "symphony.runtime.validation-controller",
@@ -9282,6 +9285,21 @@ defmodule SymphonyElixir.CoreTest do
       refute invalid_prompt =~ "Resolve the active correction named above before requesting MIU certification"
       refute invalid_prompt =~ "create its micro commit"
       refute invalid_prompt =~ "After your focused implementation, create one clean local micro commit"
+
+      generic_correction = correction_path |> File.read!() |> Jason.decode!()
+      File.write!(correction_path, Jason.encode!(Map.put(generic_correction, "source", "orocsy.runtime.generic")))
+
+      assert {:ok, generic_refreshed_preflight} =
+               SymphonyElixir.DispatchPreflight.read_for_prompt(workspace)
+
+      assert generic_refreshed_preflight["checkpoint_event"] ==
+               "runtime-contract-gate"
+
+      generic_prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
+      assert generic_prompt =~ "Mode: structured handoff recovery"
+      assert generic_prompt =~ "Commit evidence is not safe for execution"
+      refute generic_prompt =~ "Dirty workspace recovery is the only task"
+      refute generic_prompt =~ "commit, push the current branch"
 
       preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
       tampered_preflight = preflight_path |> File.read!() |> Jason.decode!()
