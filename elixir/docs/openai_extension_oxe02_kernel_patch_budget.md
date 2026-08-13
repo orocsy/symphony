@@ -1,6 +1,6 @@
 # OXE-0.2 Kernel Patch-Budget Audit Technical Trace
 
-Status: trace ready for implementation review; production hook host not landed
+Status: implementation gate green; ready for independent review; production hook host not landed
 
 Date: 2026-08-13
 
@@ -357,11 +357,36 @@ reaches the facade after every recursive receive-loop hop.
 
 ## Validation
 
-Focused implementation validation:
+The red checkpoint is
+`1ec682d9c3ff8131d315a3fc4a6e32ef669d82cf`. It introduced the manifest,
+strict fixtures, and acceptance tests without production audit support; the
+focused run failed 12 tests because `verify_budget` and the task surface did
+not yet exist.
+
+The green implementation checkpoint is
+`ff7b98625e95e980b4e062f123a2ed06fec33e7b`. It adds the shared hardened Git
+runner, strict budget decoder and validator, pinned-tree evidence collector,
+deterministic findings and reports, task ordering, and hermetic boundary
+coverage. It does not add the facade, adapters, kernel hooks, or Orocsy runtime
+behavior.
+
+Observed validation at the green checkpoint:
+
+| Command | Outcome |
+| --- | --- |
+| focused baseline, budget, and task suites | pass, 43 tests |
+| `mix extensions.audit --only baseline` | pass with the pinned object, trees, and first-parent proof |
+| `mix extensions.audit --only budget` | pass with zero kernel divergence and a 40-line ceiling |
+| default `mix extensions.audit` | pass in baseline-then-budget order |
+| `mix format --check-formatted`, `mix specs.check`, strict Credo, and `git diff --check` | pass |
+| `make all` | pass; 339 tests, 6 skipped, 100% total coverage, Dialyzer zero errors |
+
+Reproduction commands:
 
 ```bash
 cd elixir
 mix test test/symphony_elixir/extensions_audit_budget_test.exs \
+  test/symphony_elixir/extensions_audit_test.exs \
   test/mix/tasks/extensions_audit_task_test.exs
 mix format --check-formatted
 mix specs.check
@@ -369,7 +394,7 @@ mix extensions.audit --only baseline
 mix extensions.audit --only budget
 ```
 
-Handoff validation remains:
+The exact handoff validation is:
 
 ```bash
 cd elixir
@@ -410,7 +435,8 @@ make all
 
 ## Next Action
 
-Review this trace against the parent architecture. If accepted, implement
-`OXE-0.2` red-first. The first implementation commit contains only failing
-manifest/evidence tests and the strict manifest fixture; production hook code
-remains absent.
+Run an independent two-axis review of the committed `OXE-0.2` delta against
+this trace and repository standards. If it clears, begin the Slice 1 technical
+trace for the production facade, interfaces, registry lifetime, no-op adapters,
+and differential equivalence proof. Production hook code remains absent until
+that next trace is reviewed.

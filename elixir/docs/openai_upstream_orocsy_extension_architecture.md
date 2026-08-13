@@ -1285,11 +1285,12 @@ justify moving policy back into kernel files.
 Implementation detail is developed incrementally in
 `openai_extension_miu_technical_design.md`. `OXE-0.1` and its test-only
 `OXE-0.1a` support unit are review-cleared on the upstream-first integration
-lineage. The measured `OXE-0.2` trace is recorded in
-`openai_extension_oxe02_kernel_patch_budget.md`: a throwaway no-op host
-prototype identified three kernel files, four named hook seams, and an exact
-40-changed-line ceiling. The prototype code was discarded. No Orocsy runtime
-behavior or production kernel hook has been introduced.
+lineage. The measured `OXE-0.2` trace and gate-green implementation are
+recorded in `openai_extension_oxe02_kernel_patch_budget.md`: a throwaway no-op
+host prototype identified three kernel files, four named hook seams, and an
+exact 40-changed-line ceiling. Its offline manifest audit passes the exact
+repository gate at checkpoint `ff7b986`; the prototype code was discarded. No
+Orocsy runtime behavior or production kernel hook has been introduced.
 
 ## Approval Gate
 
