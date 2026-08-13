@@ -4,7 +4,7 @@ Status: Proposed, revision 2 after architecture review
 
 Date: 2026-07-28
 
-Last revised: 2026-07-30 after OXE-0.1 technical review
+Last revised: 2026-08-13 for the OXE-1.1 neutral host contract
 
 ## Decision
 
@@ -312,9 +312,15 @@ claimed or a workspace is created.
 
 ```elixir
 @callback evaluate(Issue.t(), AdmissionContext.t()) ::
+  :kernel_default |
   {:admit, Admission.t()} |
-  {:reject, Rejection.t()}
+  {:reject, Rejection.t()} |
+  {:error, ExtensionFailure.t()}
 ```
+
+`:kernel_default` is the generic no-op result: the extension made no admission
+decision, so the kernel continues its existing eligibility path. Adapter
+failure is never converted to this result.
 
 `Admission` contains:
 
@@ -409,6 +415,7 @@ keeping decision logic and effects separated inside its implementation.
 
 ```elixir
 @callback handle(DeliveryEvent.t(), DeliveryContext.t()) ::
+  :kernel_default |
   {:ok, DeliveryDecision.t(), [DeliveryEvent.t()]} |
   {:error, ControllerFailure.t(), [DeliveryEvent.t()]}
 ```
@@ -624,10 +631,15 @@ intent inside the active Codex app-server turn.
 
 ```elixir
 @callback authorize(CommandIntent.t(), TurnContext.t()) ::
+  :kernel_default |
   :allow |
   {:allow_once, AuthorizationLease.t()} |
-  {:deny, AuthorizationDenial.t()}
+  {:deny, AuthorizationDenial.t()} |
+  {:error, ExtensionFailure.t()}
 ```
+
+`:kernel_default` preserves the pre-extension approval path. It is not an
+approval and must not be emitted by an Orocsy policy adapter.
 
 Rules:
 
@@ -668,10 +680,11 @@ test against the pinned OpenAI behavior.
 Purpose: record and summarize events for operators.
 
 ```elixir
-@callback record(DeliveryEvent.t()) :: :ok
+@callback record(DeliveryEvent.t()) :: :ok | {:error, ObserverFailure.t()}
 ```
 
-The observer has no decision return value.
+The observer has no decision return value. The facade contains observer errors
+and still returns `:ok` to the kernel after logging sanitized failure evidence.
 
 Observer requirements:
 
@@ -994,8 +1007,9 @@ to the machine-checked upstream baseline.
 - Add facade, registry, and four public interfaces.
 - Add no-op adapters.
 - Prove no-op mode matches upstream behavior.
-- Add private `DeliveryPolicy`, `DeliveryExecutor`, `PromptComposer`,
-  `ValidationRunner`, and `EvidenceNotary` role contracts.
+- Record the private `DeliveryPolicy`, `DeliveryExecutor`, `PromptComposer`,
+  `ValidationRunner`, and `EvidenceNotary` role contracts. Land code interfaces
+  only with the first real Orocsy adapter and its in-memory test adapter.
 - Do not port Orocsy behavior yet.
 
 #### Slice 2: Upstream Kernel
@@ -1294,6 +1308,13 @@ effective-worktree, staged-index, and committed-HEAD evidence; required-hook
 presence is worktree-authoritative and grouped aliases cannot hide a direct
 Orocsy dependency. The prototype code was discarded. No Orocsy runtime
 behavior or production kernel hook has been introduced.
+
+The next Slice 1 trace is
+`openai_extension_oxe11_extension_host.md`. It splits the host into four
+ordered MIUs and starts with a kernel-free facade, immutable closed registry,
+four public interfaces, and neutral no-op adapters. It also makes the neutral
+`:kernel_default` result explicit so no-op mode can preserve upstream mechanics
+without duplicating them inside adapters.
 
 ## Approval Gate
 

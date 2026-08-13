@@ -467,6 +467,7 @@ make all
 
 ## Next Action
 
-Begin the Slice 1 technical trace for the production facade, interfaces,
-registry lifetime, no-op adapters, and differential equivalence proof.
-Production hook code remains absent until that next trace is reviewed.
+Review the Slice 1 host trace in
+[`openai_extension_oxe11_extension_host.md`](openai_extension_oxe11_extension_host.md),
+then create its kernel-free `OXE-1.1` red checkpoint. Production hook code
+remains absent until the later hook MIU traces are reviewed.

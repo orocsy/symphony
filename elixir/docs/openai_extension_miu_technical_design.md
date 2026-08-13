@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared
+Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared; OXE-1.1 trace drafted
 
 Date: 2026-07-29
 
@@ -10,10 +10,11 @@ Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
 
 Scope: translate the approved migration direction into independently
-implementable technical units. This revision fully specifies the first Slice 0
-unit and links the measured `OXE-0.2` kernel patch-budget trace. Later units are
-named to make the dependency boundary explicit, but they are not
-implementation-ready until their own traces are added.
+implementable technical units. This revision specifies the first Slice 0 unit,
+links the measured `OXE-0.2` kernel patch-budget trace, and links the drafted
+`OXE-1.1` extension-host trace. Other later units are named to make the
+dependency boundary explicit, but they are not implementation-ready until
+their own traces are added.
 
 ## Decision
 
@@ -654,6 +655,9 @@ strict Credo, and exact `make all` gate pass; the full gate reports 342 tests,
 six skipped, 100% total coverage, and zero Dialyzer errors. No extension-host
 or Orocsy runtime code landed.
 
-Next, write the Slice 1 technical trace for the production facade, interfaces,
-registry, no-op adapters, and differential equivalence proof before changing
-kernel files.
+The Slice 1 host trace is now recorded in
+[`openai_extension_oxe11_extension_host.md`](openai_extension_oxe11_extension_host.md).
+It decomposes the slice into four ordered MIUs and keeps `OXE-1.1` kernel-free:
+facade, immutable closed registry, four public interfaces, shared types, and
+neutral no-op adapters. Next, independently review that trace before creating
+its red checkpoint.
