@@ -234,7 +234,9 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     end)
   end
 
-  defp scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+  @doc false
+  @spec scope_pattern_matches?(term(), term()) :: boolean()
+  def scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
     cond do
       scope == "" ->
         false
@@ -261,7 +263,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     _error -> false
   end
 
-  defp scope_pattern_matches?(_path, _scope), do: false
+  def scope_pattern_matches?(_path, _scope), do: false
 
   defp regular_workspace_file?(workspace, relative_path) do
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),

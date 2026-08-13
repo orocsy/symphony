@@ -4,6 +4,7 @@ defmodule SymphonyElixir.ValidationController do
   """
 
   alias SymphonyElixir.{ControllerEvidence, DispatchPreflight, Linear.Issue, RuntimeContract, RuntimeRequest, Workspace}
+  alias SymphonyElixir.ScopeAccess.Controller, as: ScopeAccessController
 
   @authority "symphony.runtime.validation-controller"
   @attempts_path ".orocsy/delivery/state/validation-attempts.jsonl"
@@ -592,30 +593,7 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp path_matches_scope?(path, scope) when is_binary(path) and is_binary(scope) do
-    cond do
-      scope == "" ->
-        false
-
-      String.ends_with?(scope, "/**") ->
-        prefix = String.trim_trailing(scope, "/**")
-        path == prefix or String.starts_with?(path, prefix <> "/")
-
-      String.ends_with?(scope, "/*") ->
-        prefix = String.trim_trailing(scope, "/*")
-        path == prefix or String.starts_with?(path, prefix <> "/")
-
-      String.contains?(scope, "*") ->
-        scope
-        |> Regex.escape()
-        |> String.replace("\\*", ".*")
-        |> then(&Regex.compile!("^#{&1}$"))
-        |> Regex.match?(path)
-
-      true ->
-        path == scope or String.starts_with?(path, scope <> "/")
-    end
-  rescue
-    _error -> false
+    ScopeAccessController.scope_pattern_matches?(path, scope)
   end
 
   defp path_matches_scope?(_path, _scope), do: false
