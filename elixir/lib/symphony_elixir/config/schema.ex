@@ -114,14 +114,20 @@ defmodule SymphonyElixir.Config.Schema do
       field(:states, {:array, :string}, default: ["Human Review", "In Review"])
       field(:rework_state, :string, default: "Rework")
       field(:request_stale_after_ms, :integer)
+      field(:request_timeout_ms, :integer, default: 30_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :provider, :repo, :states, :rework_state, :request_stale_after_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:enabled, :provider, :repo, :states, :rework_state, :request_stale_after_ms, :request_timeout_ms],
+        empty_values: []
+      )
       |> validate_inclusion(:provider, ["github"])
       |> validate_number(:request_stale_after_ms, greater_than: 0)
+      |> validate_number(:request_timeout_ms, greater_than: 0)
       |> validate_required_when_enabled()
     end
 

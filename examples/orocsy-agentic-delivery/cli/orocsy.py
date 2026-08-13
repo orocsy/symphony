@@ -29,6 +29,7 @@ LEGACY_MUTABLE_DELIVERY_PREFIX = ".codex/delivery"
 MUTABLE_DELIVERY_PREFIX = ".orocsy/delivery"
 TOKEN_TELEMETRY_ROOT = DELIVERY_ROOT / "token-telemetry"
 SCHEMA_VERSION = 1
+HEAD_BOUND_TRANSITION_EVENTS = {"miu.completion_requested", "handoff.requested"}
 
 DEFAULT_FORBIDDEN_TERMS: tuple[str, ...] = ()
 
@@ -429,9 +430,13 @@ def load_issue_requirements(path: Path) -> dict[str, Any]:
 
     return {
         "identifier": str(raw.get("identifier") or raw.get("issue") or raw.get("id") or "").strip(),
+        "issue_revision": str(raw.get("issue_revision") or "").strip(),
+        "contract_hash": str(raw.get("contract_hash") or "").strip(),
+        "runtime_contract_status": str(raw.get("runtime_contract_status") or "").strip(),
         "title": str(raw.get("title") or "").strip(),
         "state": str(raw.get("state") or raw.get("status") or "").strip(),
         "branch": str(raw.get("branch") or raw.get("branch_name") or raw.get("branchName") or "").strip(),
+        "integration_branch": str(raw.get("integration_branch") or "").strip(),
         "project": str(raw.get("project") or raw.get("project_slug") or "").strip(),
         "write_scope": normalize_mutable_delivery_paths(string_list(raw.get("write_scope") or raw.get("writeScope"))),
         "shared_files": normalize_mutable_delivery_paths(string_list(raw.get("shared_files") or raw.get("sharedFiles"))),
@@ -601,6 +606,14 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
     event.setdefault("ts", now)
     event.setdefault("run_id", state.get("run_id"))
     event.setdefault("goal_id", state.get("goal_id"))
+    if event.get("event") in HEAD_BOUND_TRANSITION_EVENTS:
+        event["head_sha"] = current_git_head(repo)
+        requirements = state.get("issue_requirements") or {}
+        if isinstance(requirements, dict):
+            for key in ("contract_hash", "issue_revision"):
+                value = str(requirements.get(key) or "").strip()
+                if value:
+                    event[key] = value
 
     with events_path(repo).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
@@ -613,6 +626,15 @@ def append_event(repo: Path, event: dict[str, Any]) -> dict[str, Any]:
         state["status"] = event["run_status"]
     write_json(current_state_path(repo), state)
     return event
+
+
+def current_git_head(repo: Path) -> str:
+    result = run_git(repo, ["rev-parse", "HEAD"])
+    head_sha = result.stdout.strip()
+    if result.returncode != 0 or not head_sha:
+        detail = result.stderr.strip() or "HEAD is unavailable"
+        raise SystemExit(f"cannot append a head-bound transition event: {detail}")
+    return head_sha
 
 
 def render_correction_markdown(correction: dict[str, Any]) -> str:
@@ -1675,6 +1697,8 @@ def command_event_append(args: argparse.Namespace) -> int:
         event["phase"] = args.phase
     if args.step:
         event["step"] = args.step
+        if args.type == "miu.completion_requested":
+            event["miu_id"] = args.step
     if args.tool:
         event["tool"] = args.tool
     if args.command:
@@ -2003,7 +2027,7 @@ def symphony_prelude(issue: str) -> list[str]:
         "Do not load global/plugin skill bodies during the first worker turn; this workflow and the workspace-local Orocsy CLI are the runtime instructions.",
         "Use the workspace-local .codex/delivery/bin/orocsy.py CLI for runtime gates and event evidence.",
         f"Read the assigned issue {issue_text}, including write scope, dependencies, validation, and out-of-scope notes.",
-        "Before optional skills, broad docs, or more than eight implementation files, record substantive progress: review-feedback-classified for review work, technical-miu-trace after the first scoped plan/edit for fresh work, or an inbox correction for a blocker. first-turn-miu-handoff alone is not substantive progress.",
+        "Before optional skills, broad docs, or more than eight implementation files, record substantive progress: a scoped edit, focused validation after a change, handoff proof, or an inbox correction for a blocker. review-feedback-classified, technical-miu-trace, and first-turn-miu-handoff are lifecycle context only.",
         "Confirm pre-change gates with `python3 .codex/delivery/bin/orocsy.py --repo . gate all --json`; the ledger is .orocsy/delivery/events/events.jsonl.",
         "Use `python3 .codex/delivery/bin/orocsy.py --repo . symphony clean-generated --record` for bounded ignored generated-artifact cleanup; do not run raw cleanup shell commands.",
         "Implement one MIU at a time and append tool/test/build/browser events.",

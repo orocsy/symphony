@@ -416,7 +416,12 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run broad rg, grep, find, ls, git ls-files, mutating gh api"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "bounded `rg -n"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "read-only GitHub PR/review inspection"
-      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "gh pr comment <pr-number> --body '@codex review'"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "do not post `@codex review` yourself"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "request final runtime certification"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "legacy issue with no Runtime Contract gate"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "structured-versus-legacy handoff rule"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "legacy direct review request"
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Run only validation commands declared"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "create that exact file"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "alternate app roots"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "colocated sibling tests"
@@ -536,6 +541,13 @@ defmodule SymphonyElixir.AppServerTest do
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Symphony fresh-MIU micro-worker"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ ".orocsy/delivery/issue-brief.md"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "technical-miu-trace"
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~
+               "Runtime Contract execution gate"
+
+      assert get_in(thread_start, ["params", "developerInstructions"]) =~
+               "append `miu.completion_requested`"
+
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Do not run `rg`, `grep`, `find`"
       assert get_in(thread_start, ["params", "developerInstructions"]) =~ "Never merge automatically"
 
@@ -552,6 +564,218 @@ defmodule SymphonyElixir.AppServerTest do
       refute Map.has_key?(get_in(thread_start, ["params", "config"]), "mcp_servers")
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server gives structured handoff recovery controller-owned validation instructions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-handoff-thread-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-STRUCTURED-HANDOFF")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-structured-handoff.trace")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "issue" => "MT-STRUCTURED-HANDOFF",
+          "checkpoint_event" => "runtime-contract-gate",
+          "requirements" => %{
+            "runtime_contract_status" => "structured",
+            "ticket_type" => "test-spec",
+            "write_scope" => ["tests/e2e/example.spec.ts"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-structured-handoff.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-structured-handoff"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-structured-handoff"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-structured-handoff",
+        identifier: "MT-STRUCTURED-HANDOFF",
+        title: "Structured handoff",
+        description: "Complete the remaining structured MIU",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-STRUCTURED-HANDOFF",
+        labels: []
+      }
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Runtime Contract execution gate: finish the MIU", issue)
+
+      thread_start =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["method"] == "thread/start"))
+
+      instructions = get_in(thread_start, ["params", "developerInstructions"])
+      assert instructions =~ "Symphony structured handoff-recovery micro-worker"
+      assert instructions =~ "replaces legacy worker-side validation"
+      assert instructions =~ "Do not run contract-declared validation inside the Codex worker sandbox"
+      assert instructions =~ "append the exact `miu.completion_requested` event"
+      assert instructions =~ "append the exact `handoff.requested` event"
+      assert instructions =~ "validation controller runs authoritative validation"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "structured generic correction recovery preserves correction-scoped instructions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-generic-correction-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-GENERIC-CORRECTION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(inbox_dir)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      File.write!(
+        Path.join(inbox_dir, "correction_generic.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction-generic",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Fix and resolve the generic correction"
+        })
+      )
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "correction-scoped-fix",
+          "first_task" => "Fix and resolve the generic correction",
+          "open_corrections" => [%{"correction_id" => "correction-generic"}],
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      prompt = SymphonyElixir.DispatchPreflight.prompt_context(workspace)
+      assert prompt =~ "`correction-scoped-fix`"
+      assert prompt =~ "open Orocsy correction"
+      refute prompt =~ "follow the active Runtime Contract gate"
+      refute prompt =~ "append only its exact event"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server applies scoped command guards to structured handoff recovery" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-structured-handoff-command-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "runtime-contract-gate",
+          "requirements" => %{"runtime_contract_status" => "structured"}
+        })
+      )
+
+      assert {:error, _command, pattern} =
+               AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "header" src))
+
+      assert pattern == "handoff_recovery_exact_read_scope"
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git status --short --branch")
+
+      base_params = %{
+        "baseInstructions" => "base instructions",
+        "developerInstructions" => "generic correction instructions",
+        "config" => %{}
+      }
+
+      runtime_gate_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert runtime_gate_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
+
+      File.write!(
+        Path.join(inbox_dir, "correction_live.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction-live",
+          "status" => "open",
+          "next_action" => "retry",
+          "source" => "symphony.review-rework-worker",
+          "summary" => "Resolve the live correction before handoff"
+        })
+      )
+
+      correction_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert correction_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
+      assert correction_params["developerInstructions"] =~ "correction is the first task"
+      refute correction_params["developerInstructions"] == "generic correction instructions"
+    after
       File.rm_rf(test_root)
     end
   end
@@ -639,6 +863,442 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "command guard emits scope access request events for exact denied reads" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-exact-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-READ",
+          "branch" => "orocsy/mt-scope-read",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "scope_bundle" => %{
+              "policy_hash" => "sha256:test-policy",
+              "write_scope" => [],
+              "read_context" => [],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-read",
+        identifier: "MT-SCOPE-READ",
+        title: "Scope access read",
+        description: "Denied exact reads should leave scope access events",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-READ",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Fix review feedback", issue)
+
+      assert command ==
+               "git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"
+
+      assert pattern =~ "git\\s+diff\\s+--stat"
+
+      events = delivery_events!(workspace)
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
+      decided = Enum.find(events, &(&1["event"] == "scope.access.decided"))
+
+      assert requested["operation"] == "read"
+      assert requested["paths"] == ["src/features/landing/GuestStartScreen.tsx"]
+      assert requested["command_class"] == "git_diff"
+      assert requested["broad"] == false
+      assert requested["policy_hash"] == "sha256:test-policy"
+      assert requested["dispatch_mode"] == "review_rework"
+
+      assert decided["decision"] == "block"
+      assert decided["reason_class"] == "not_safe_read_context"
+      assert get_in(decided, ["policy_patch", "target"]) == "read_context"
+      assert get_in(decided, ["policy_patch", "paths"]) == ["src/features/landing/GuestStartScreen.tsx"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "command guard allows controller-approved exact reads without restarting the app-server session" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-same-session-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-SAME-SESSION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      source_path = "src/features/landing/LandingExperience.tsx"
+      context_path = "tests/unit/desktop-guest-setup.test.tsx"
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(state_dir)
+      File.mkdir_p!(Path.join(workspace, Path.dirname(source_path)))
+      File.mkdir_p!(Path.join(workspace, Path.dirname(context_path)))
+
+      File.write!(
+        Path.join(workspace, source_path),
+        "import \"../../../tests/unit/desktop-guest-setup.test.tsx\";\n" <>
+          "export function LandingExperience() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, context_path), "export const expectedState = true;\n")
+
+      scope_bundle =
+        SymphonyElixir.IssueRequirements.refresh_scope_bundle_hash(%{
+          "issue" => "MT-SCOPE-SAME-SESSION",
+          "write_scope" => [
+            %{
+              "path" => source_path,
+              "source" => "test.write_scope",
+              "operation" => "write",
+              "expires" => "branch"
+            }
+          ],
+          "read_context" => [],
+          "conflict_scope" => [],
+          "denied_scope" => []
+        })
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-SAME-SESSION",
+          "branch" => "orocsy/mt-scope-same-session",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => [source_path],
+            "scope_bundle" => scope_bundle
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-same-session"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-same-session"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,80p tests/unit/desktop-guest-setup.test.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-same-session",
+        identifier: "MT-SCOPE-SAME-SESSION",
+        title: "Scope access same session",
+        description: "A proven exact read should not discard the active worker context.",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-SAME-SESSION",
+        labels: []
+      }
+
+      assert {:ok, result} = AppServer.run(workspace, "Continue the scoped fix", issue)
+      assert result.thread_id == "thread-scope-same-session"
+
+      events = delivery_events!(workspace)
+      assert Enum.count(events, &(&1["event"] == "scope.access.requested")) == 1
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
+
+      decisions = Enum.filter(events, &(&1["event"] == "scope.access.decided"))
+      assert length(decisions) == 1
+
+      assert Enum.all?(decisions, fn decided ->
+               decided["decision"] == "allow_once" and
+                 decided["status"] == "allowed" and
+                 decided["reason_class"] == "safe_read_context" and
+                 decided["paths"] == [context_path]
+             end)
+
+      refute Enum.any?(events, fn event ->
+               event["event"] == "scope.access.decided" and event["status"] == "blocked"
+             end)
+
+      [patch_path] = Path.wildcard(Path.join(workspace, ".orocsy/delivery/policy-patches/*.json"))
+      patch = patch_path |> File.read!() |> Jason.decode!()
+      assert patch["status"] == "active"
+      assert requested["policy_hash"] == patch["policy_hash_before"]
+      assert hd(decisions)["policy_hash"] == patch["policy_hash_before"]
+      assert requested["request_id"] == hd(decisions)["request_id"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows scope bundle read context paths in review rework implementation mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-bundle-read-context-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-BUNDLE-READ")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      context_path = "src/features/landing/GuestStartScreen.tsx"
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(Path.join(workspace, Path.dirname(context_path)))
+      File.write!(Path.join(workspace, context_path), "export type GuestPreferenceDraft = {};\n")
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-SCOPE-BUNDLE-READ",
+          "branch" => "orocsy/mt-scope-bundle-read",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"],
+            "scope_bundle" => %{
+              "policy_hash" => "sha256:test-policy",
+              "write_scope" => [],
+              "read_context" => [
+                %{
+                  "path" => context_path,
+                  "source" => "local_issue_brief.read_context",
+                  "operation" => "read",
+                  "expires" => "turn"
+                }
+              ],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-bundle-read"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-bundle-read"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"sed -n 1,160p src/features/landing/GuestStartScreen.tsx"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-bundle-read",
+        identifier: "MT-SCOPE-BUNDLE-READ",
+        title: "Scope bundle read context",
+        description: "Declared read context should not be blocked by review rework path guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-SCOPE-BUNDLE-READ",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Inspect setup handoff", issue)
+      refute File.exists?(Path.join(workspace, ".orocsy/delivery/events/events.jsonl"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "command guard classifies broad denied search as blocked scope drift" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-access-broad-search-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SCOPE-BROAD")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "issue" => "MT-SCOPE-BROAD",
+          "branch" => "orocsy/mt-scope-broad",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["src/features/swipe/SwipeExperience.tsx"]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-scope-broad"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-scope-broad"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"GuestPreferenceDraft\\" src"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-scope-broad",
+        identifier: "MT-SCOPE-BROAD",
+        title: "Scope access broad search",
+        description: "Broad denied searches should stay blocked",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SCOPE-BROAD",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Implement MIU", issue)
+
+      assert command == ~s(rg -n "GuestPreferenceDraft" src)
+      assert pattern == "(^|\\s|[\"'])rg(\\s|$)"
+
+      events = delivery_events!(workspace)
+      requested = Enum.find(events, &(&1["event"] == "scope.access.requested"))
+      decided = Enum.find(events, &(&1["event"] == "scope.access.decided"))
+
+      assert requested["operation"] == "search"
+      assert requested["paths"] == ["src"]
+      assert requested["broad"] == true
+
+      assert decided["decision"] == "block"
+      assert decided["reason_class"] == "broad_scope_drift"
+      refute Map.has_key?(decided, "policy_patch")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server blocks exec_command function calls in fresh implementation mode" do
     test_root =
       Path.join(
@@ -718,6 +1378,130 @@ defmodule SymphonyElixir.AppServerTest do
       assert pattern == "(^|\\s|[\"'])find(\\s|$)"
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "app server review command policy handles chains, focused diffs, and root docs" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-command-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["README.md", "src/main/Button.tsx"]
+          }
+        })
+      )
+
+      assert {:error, _command, "command_chain_operator_outside_quotes"} =
+               AppServer.command_policy_violation_for_test(workspace, "printf hi|cat")
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(workspace, "git diff main")
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --no-renames origin/main...HEAD"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "/bin/zsh -lc 'git log -4 --oneline'"
+               )
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "/bin/zsh -lc 'git log -5 --oneline --decorate'"
+               )
+
+      assert AppServer.bounded_git_log_exception_available_for_test(workspace, [])
+
+      refute AppServer.bounded_git_log_exception_available_for_test(
+               workspace,
+               ["(^|\\s|[\"'])git(\\s|$)"]
+             )
+
+      refute AppServer.bounded_git_log_exception_available_for_test(
+               workspace,
+               ["(^|\\s|[\"'])git\\s+log\\s+-5"]
+             )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log\\s+-5"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log\\s+-5"]
+               )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
+               )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log --oneline")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log -21 --oneline")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(workspace, "git log -4 --oneline --patch")
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -4 --oneline'' --patch"
+               )
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --patch origin/main...HEAD"
+               )
+
+      assert {:error, _command, "git_diff_base_branch_without_path_scope"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git diff --name-only --no-renames origin/other...HEAD"
+               )
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, "git diff -- src/main/Button.tsx")
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, ~s(rg -n "foo|bar" README.md))
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "fresh_implementation",
+          "requirements" => %{
+            "ticket_type" => "contract",
+            "write_scope" => ["README.md", "src/main/Button.tsx"]
+          }
+        })
+      )
+
+      assert {:error, _command, "(^|\\s|[\"'])git\\s+log(\\s|$)"} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 "git log -5 --oneline --decorate",
+                 ["(^|\\s|[\"'])git\\s+log(\\s|$)"]
+               )
+    after
+      File.rm_rf(workspace)
     end
   end
 
@@ -2075,7 +2859,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-gh-read"}}}'
-            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"gh api repos/orocsy/nutribuddy/pulls/27/reviews && printf '\\''\\\\n--- review comments ---\\\\n'\\'' && gh api repos/orocsy/nutribuddy/pulls/27/comments && printf '\\''\\\\n--- issue comments ---\\\\n'\\'' && gh api repos/orocsy/nutribuddy/issues/27/comments"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"gh api repos/orocsy/nutribuddy/pulls/27/reviews"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -2628,6 +3412,102 @@ defmodule SymphonyElixir.AppServerTest do
       assert command == "sed -n '1,260p' src/app/api/swipes/handler.ts"
       assert pattern =~ "sed"
       assert pattern =~ "SwipeDeck"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks implementation child imported-file reads in review rework mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-implementation-import-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        codex_forbidden_command_patterns: [
+          "sed -n ['\"]1,(1[6-9][0-9]|[2-9][0-9][0-9]|[1-9][0-9]{3,})p['\"] src/",
+          "sed -n ['\"]260,560p['\"] src/"
+        ]
+      )
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+      File.mkdir_p!(Path.join(workspace, "src/features/swipe"))
+      File.mkdir_p!(Path.join(workspace, "src/app/api/cards"))
+
+      File.write!(
+        Path.join(workspace, "src/features/swipe/SwipeExperience.tsx"),
+        "import { SwipeDeck } from './SwipeDeck';\nexport function SwipeExperience() { return SwipeDeck; }\n"
+      )
+
+      File.write!(
+        Path.join(workspace, "src/features/swipe/SwipeDeck.tsx"),
+        "export function SwipeDeck() { return null; }\n"
+      )
+
+      File.write!(Path.join(workspace, "src/app/api/cards/route.ts"), "export const GET = () => Response.json([]);\n")
+
+      File.write!(
+        Path.join(inbox_dir, "correction_20260706060118_guard.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260706060118_guard",
+          "status" => "resolved",
+          "source" => "symphony.runtime.command-guard-loop",
+          "resolved_at" => "2026-07-06T06:05:39Z",
+          "summary" => "Previous failed runtime guard mentioned src/app/api/cards/route.ts.",
+          "findings" => ["Worker read src/app/api/cards/route.ts before stopping."],
+          "required_corrections" => ["Validation failed before product progress."]
+        })
+      )
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-IMPLEMENTATION-IMPORT-READ",
+          "branch" => "orocsy/mt-review-implementation-import-read",
+          "requirements" => %{
+            "ticket_type" => "implementation",
+            "write_scope" => [
+              "src/features/swipe/SwipeExperience.tsx",
+              "tests/unit/swipe-experience-request.test.ts"
+            ],
+            "validation" => %{
+              "commands" => [
+                "pnpm exec vitest run --configLoader runner tests/unit/swipe-experience-request.test.ts"
+              ],
+              "files" => []
+            }
+          },
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/swipe/SwipeExperience.tsx", "line" => 105}
+            ]
+          }
+        })
+      )
+
+      patterns = AppServer.effective_forbidden_command_patterns_for(workspace)
+      joined = Enum.join(patterns, "\n")
+
+      assert joined =~ "SwipeExperience"
+      refute joined =~ "SwipeDeck"
+      refute joined =~ "route"
+
+      sideways_command = "sed -n 260,560p src/features/swipe/SwipeDeck.tsx"
+      leaked_route_command = "sed -n 1,220p src/app/api/cards/route.ts"
+      allowed_command = "sed -n 1,220p src/features/swipe/SwipeExperience.tsx"
+
+      assert Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), sideways_command))
+      assert Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), leaked_route_command))
+      refute Enum.any?(patterns, &Regex.match?(Regex.compile!(&1), allowed_command))
     after
       File.rm_rf(test_root)
     end
@@ -3700,7 +4580,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server blocks chrome-default playwright retry for browser launch corrections" do
+  test "app server routes playwright retries to the runtime controller after browser launch corrections" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -3796,7 +4676,419 @@ defmodule SymphonyElixir.AppServerTest do
       assert command ==
                "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false pnpm --config.verify-deps-before-run=false exec playwright test tests/e2e/ui-state-matrix.spec.ts"
 
-      assert pattern == "playwright_chrome_sandbox_correction_requires_chromium_channel"
+      assert pattern == "playwright_browser_correction_requires_runtime_controller_handoff"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote command guard reads browser corrections from the worker workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-playwright-correction-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REMOTE-PLAYWRIGHT-CORRECTION")
+      state_dir = Path.join(workspace, ".orocsy/delivery/state")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+
+      File.mkdir_p!(state_dir)
+
+      File.write!(
+        Path.join(state_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REMOTE-PLAYWRIGHT-CORRECTION",
+          "branch" => "orocsy/mt-remote-playwright-correction",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' 'Warning: Permanently added worker-a to the list of known hosts.' >&2
+      printf '%s%s\\0' '__SYMPHONY_CORRECTION__' '{"correction_id":"correction_remote_browser","status":"open","next_action":"retry","summary":"Focused Playwright validation could not launch Chrome","findings":["Chrome exited with SIGABRT in the worker sandbox."],"required_corrections":["Retry outside the worker sandbox."]}'
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      command =
+        "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
+
+      assert {:error, ^command, "playwright_browser_correction_requires_runtime_controller_handoff"} =
+               AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote command guard does not invent a browser correction when inspection fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-playwright-inspection-failure-#{System.unique_integer([:positive])}"
+      )
+
+    previous_ssh = System.get_env("SYMPHONY_SSH_EXECUTABLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_SSH_EXECUTABLE", previous_ssh)
+    end)
+
+    try do
+      workspace = Path.join(test_root, "MT-REMOTE-PLAYWRIGHT-INSPECTION-FAILURE")
+      fake_ssh = Path.join(test_root, "fake-ssh")
+      File.mkdir_p!(workspace)
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' 'remote correction lookup failed' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("SYMPHONY_SSH_EXECUTABLE", fake_ssh)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: test_root)
+
+      command =
+        "pnpm exec playwright test tests/e2e/desktop-guest-setup.spec.ts --workers=1"
+
+      assert :ok =
+               AppServer.command_policy_violation_for_test(workspace, command, [], "worker-a")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "hard command guards cannot be overridden by an embedded safe read" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hard-guard-scope-bypass-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "MT-HARD-GUARD")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
+
+      File.write!(
+        Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "requirements" => %{
+            "ticket_type" => "Implementation",
+            "write_scope" => ["tests/unit/named.test.ts"],
+            "scope_bundle" => %{
+              "write_scope" => [],
+              "read_context" => [
+                %{
+                  "path" => "tests/unit/named.test.ts",
+                  "operation" => "read",
+                  "source" => "local_issue_brief.read_context"
+                }
+              ],
+              "conflict_scope" => [],
+              "denied_scope" => []
+            }
+          }
+        })
+      )
+
+      hidden_operand_command = "rg token .env tests/unit/named.test.ts"
+
+      assert {:error, ^hidden_operand_command, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 hidden_operand_command,
+                 []
+               )
+
+      hidden_dash_operand_command = "rg token -- -secret tests/unit/named.test.ts"
+
+      assert {:error, ^hidden_dash_operand_command, _pattern} =
+               AppServer.command_policy_violation_for_test(
+                 workspace,
+                 hidden_dash_operand_command,
+                 []
+               )
+
+      command =
+        ~S|python3 .codex/delivery/bin/orocsy.py --repo . inbox create --summary "$(cat tests/unit/named.test.ts)"|
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 command,
+                 "delivery_inbox_metadata_command_substitution"
+               )
+
+      destructive_command = ~S|rm -f "$(cat tests/unit/named.test.ts)"|
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 destructive_command,
+                 "(^|\\s|[\"'])(rm|sudo|chmod|chown)(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "rg token tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])rg(\\s|$)",
+                 ["(^|\\s|[\"'])rg(\\s|$)"]
+               )
+
+      multiline_command = "rg token tests/unit/named.test.ts\nrm -rf ."
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 multiline_command,
+                 "(^|\\s|[\"'])rg(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n -i '1p' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "git diff --output=/tmp/diff.txt -- tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])git(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "sed -n '1p' -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])sed(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "rg --pre=rm token tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])rg(\\s|$)"
+               )
+
+      assert :defer =
+               AppServer.scope_access_resolution_for_test(
+                 workspace,
+                 "git diff --ext-diff -- tests/unit/named.test.ts",
+                 "(^|\\s|[\"'])git(\\s|$)"
+               )
+
+      refute AppServer.pure_scope_read_command_for_test("git diff --ext-diff -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git diff --textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --pre=rm token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --ignore-file=apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg -f /tmp/private-patterns tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --file=/tmp/private-patterns tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("rg --pretty --hyperlink-format=file://{host}{path} --hostname-bin=./scripts/helper token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("grep --file=apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("grep --exclude-from apps/private.ts token tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git diff -- tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("git diff --no-ext-diff --no-textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("git log -p -- tests/unit/named.test.ts")
+
+      assert AppServer.pure_scope_read_command_for_test("git log -p --no-ext-diff --no-textconv -- tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test("sed -n -e '1e touch /tmp/scope-bypass' tests/unit/named.test.ts")
+
+      refute AppServer.pure_scope_read_command_for_test(~S(rg 'x\' ; touch /tmp/pwn; echo '\' tests/unit/named.test.ts))
+
+      assert AppServer.pure_scope_read_command_for_test("sed -n '1,120p' tests/unit/named.test.ts")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows correction creation that quotes a blocked playwright command" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-playwright-correction-record-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      inbox_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+      File.mkdir_p!(inbox_dir)
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD",
+          "branch" => "orocsy/mt-review-playwright-correction-record",
+          "review" => %{"feedback" => []}
+        })
+      )
+
+      File.write!(
+        Path.join(inbox_dir, "correction_20260626160144_0a19a053.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_20260626160144_0a19a053",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Focused Playwright validation blocked by local Chrome launch sandbox",
+          "findings" => ["Google Chrome exited SIGABRT."],
+          "required_corrections" => ["Retry with the safe Chromium channel."]
+        })
+      )
+
+      quoted_correction_command =
+        ~S|/bin/zsh -lc "python3 .codex/delivery/bin/orocsy.py --repo . inbox create --source worker --status blocked --summary \"Browser blocked\" --finding \"Command: pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts --workers=1 failed with SIGABRT\" --required-correction \"Use the runtime controller\" --next-action escalate --json"|
+
+      quoted_correction_notification =
+        Jason.encode!(%{
+          "method" => "codex/event/exec_command_begin",
+          "params" => %{"msg" => %{"command" => quoted_correction_command}}
+        })
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-playwright-correction-record"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-playwright-correction-record"}}}'
+            printf '%s\\n' '#{quoted_correction_notification}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-playwright-correction-record",
+        identifier: "MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD",
+        title: "Review rework Playwright correction record",
+        description: "Correction prose must not be classified as command execution",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PLAYWRIGHT-CORRECTION-RECORD",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Record the concrete blocker", issue)
+      assert Workspace.blocking_correction_in_workspace?(workspace)
+
+      equals_correction_command =
+        ~S|python3 .codex/delivery/bin/orocsy.py --repo . inbox create --source=worker --status=blocked --summary="Browser blocked" --finding="Command: pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts --workers=1 failed with SIGABRT" --required-correction="Use the runtime controller" --next-action=escalate --json|
+
+      assert :ok = AppServer.command_policy_violation_for_test(workspace, equals_correction_command)
+
+      substitution_command =
+        ~S|/bin/zsh -lc "python3 .codex/delivery/bin/orocsy.py --repo . inbox create --source worker --status blocked --summary \"Browser blocked\" --finding \"$(pnpm exec playwright test tests/e2e/ui-state-matrix.spec.ts --workers=1)\" --required-correction \"Use the runtime controller\" --next-action escalate --json"|
+
+      substitution_notification =
+        Jason.encode!(%{
+          "method" => "codex/event/exec_command_begin",
+          "params" => %{"msg" => %{"command" => substitution_command}}
+        })
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-playwright-substitution"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-playwright-substitution"}}}'
+            printf '%s\\n' '#{substitution_notification}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      assert {:error, {:forbidden_command, ^substitution_command, pattern}} =
+               AppServer.run(workspace, "Attempt a substituted blocker", issue)
+
+      assert pattern == "delivery_inbox_metadata_command_substitution"
     after
       File.rm_rf(test_root)
     end
@@ -4867,6 +6159,7 @@ defmodule SymphonyElixir.AppServerTest do
             ]
           },
           "requirements" => %{
+            "ticket_type" => "implementation",
             "write_scope" => [
               "`src/app/api/swipes/handler.ts`"
             ],
@@ -5129,6 +6422,99 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows scoped rg against declared support path in implementation review rework" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-support-rg-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-SUPPORT-RG")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-SUPPORT-RG",
+          "branch" => "orocsy/mt-review-support-rg",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/swipe/SwipeExperience.tsx", "line" => 105}
+            ]
+          },
+          "requirements" => %{
+            "ticket_type" => "implementation",
+            "write_scope" => [
+              "`src/features/swipe/SwipeExperience.tsx`"
+            ],
+            "shared_files" => [
+              "Read-only route context: (src/app/(authenticated)/@modal/page.tsx) only for the existing modal contract. Do not edit."
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-support-rg"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-support-rg"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"/bin/zsh -lc '\\''rg -n \\"modal contract\\" \\"src/app/(authenticated)/@modal/page.tsx\\"'\\''"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_forbidden_command_patterns: [
+          "(^|\\s|[\"''])rg\\s+"
+        ]
+      )
+
+      issue = %Issue{
+        id: "issue-review-support-rg",
+        identifier: "MT-REVIEW-SUPPORT-RG",
+        title: "Review rework support rg",
+        description: "Exact read-only shared file rg should stay inside the implementation-child guard",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-SUPPORT-RG",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Fix review feedback", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server allows reads for line-ranged requirement paths in review rework mode" do
     test_root =
       Path.join(
@@ -5292,7 +6678,90 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Fix review feedback", issue)
 
       assert command == "ls src/lib/db && sed -n 1,340p src/lib/db/guest-session-store.ts"
-      assert pattern == "(^|\\s|[\"'])ls(\\s|$)"
+      assert pattern == "command_chain_operator_outside_quotes"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks chained commands even when first review rework search path is scoped" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-rework-piped-search-block-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-REVIEW-PIPED-SEARCH")
+      preflight_dir = Path.join(workspace, ".orocsy/delivery/state")
+      preflight_file = Path.join(preflight_dir, "dispatch-preflight.json")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(preflight_dir)
+
+      File.write!(
+        preflight_file,
+        Jason.encode!(%{
+          "mode" => "review_rework",
+          "issue" => "MT-REVIEW-PIPED-SEARCH",
+          "branch" => "orocsy/mt-review-piped-search",
+          "review" => %{
+            "feedback" => [
+              %{"path" => "src/features/swipe/SwipeExperience.tsx", "line" => 105}
+            ]
+          }
+        })
+      )
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-review-piped-search"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-piped-search"}}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"rg -n \\"GuestPreferenceDraft\\" src/features/swipe/SwipeExperience.tsx | cat src/app/api/cards/handler.ts"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-review-piped-search",
+        identifier: "MT-REVIEW-PIPED-SEARCH",
+        title: "Review rework piped search",
+        description: "Piped commands should be blocked before scoped search exceptions",
+        state: "Rework",
+        url: "https://example.org/issues/MT-REVIEW-PIPED-SEARCH",
+        labels: []
+      }
+
+      assert {:error, {:forbidden_command, command, pattern}} =
+               AppServer.run(workspace, "Fix review feedback", issue)
+
+      assert command =~ "SwipeExperience.tsx | cat"
+      assert pattern == "command_chain_operator_outside_quotes"
     after
       File.rm_rf(test_root)
     end
@@ -7015,5 +8484,13 @@ defmodule SymphonyElixir.AppServerTest do
     assert {_output, 0} = System.cmd("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cd: workspace, stderr_to_stdout: true)
 
     File.write!(full_path, "checkpoint\n")
+  end
+
+  defp delivery_events!(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/events/events.jsonl")
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
   end
 end

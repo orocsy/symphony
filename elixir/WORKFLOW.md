@@ -24,6 +24,7 @@ review_monitor:
   states:
     - Human Review
   rework_state: Rework
+  request_timeout_ms: 30000
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
@@ -38,6 +39,8 @@ agent:
 codex:
   # Dispatch preflight may start isolated fresh_implementation/review_rework sessions; in those modes
   # Symphony disables broad tools and rejects broad-discovery commands before Codex can run them.
+  # Review rework can admit only `git log -N --oneline [--decorate|--no-decorate]` for N=1..20
+  # when no earlier operator-configured forbidden pattern rejects that exact metadata-only command.
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
   thread_sandbox: workspace-write

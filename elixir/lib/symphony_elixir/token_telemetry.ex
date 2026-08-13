@@ -649,7 +649,7 @@ defmodule SymphonyElixir.TokenTelemetry do
   end
 
   defp command_files(command, workspace) do
-    ~r/(?:^|[\s"'=])((?:\.\/|\/)?[A-Za-z0-9_@~.\-\/\[\]]+\.(?:ex|exs|heex|ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss|html|txt))(?=$|[\s"',:])/
+    ~r/(?:^|[\s"'=(])((?:\.\/|\/)?[A-Za-z0-9_@~.+\-][A-Za-z0-9_@~.\-\/()\[\]+]*\.(?:ex|exs|heex|ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss|html|txt))(?=$|[\s"',:)])/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] -> [normalize_path(path, workspace)]
@@ -1133,7 +1133,11 @@ defmodule SymphonyElixir.TokenTelemetry do
 
   defp lifecycle_only_tool_finished?(event) when is_map(event) do
     event_name(event) == "tool.finished" and
-      Map.get(event, "tool") in ["first-turn-miu-handoff", "technical-miu-trace"]
+      Map.get(event, "tool") in [
+        "first-turn-miu-handoff",
+        "technical-miu-trace",
+        "review-feedback-classified"
+      ]
   end
 
   defp event_name(event) do

@@ -34,6 +34,25 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+### Hardened worker command policy
+
+The Elixir runtime can narrow fresh implementation and review rework workers with
+mode-specific command guards. Review rework may allow one local metadata-only checkpoint form,
+`git log -N --oneline [--decorate|--no-decorate]` for `N` from 1 through 20, when the effective
+operator-configured policy also admits it. Revision selectors, pathspecs, content-producing output,
+other flags, and unbounded history remain denied.
+
+Structured handoff recovery may read a file named directly by the active Runtime Contract's
+`write_scope` or `read_context`. The allowance is read-only and exact-path: every parsed operand
+must be declared, derived/imported context is not promoted, shell chains and substitutions remain
+denied, and an operator-configured command ban always takes precedence. When a denied compound
+read is recoverable, the worker is instructed to split it into separate single-purpose commands;
+the runtime never authorizes the compound command itself. In `handoff_recovery` only, the runtime
+may also admit the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
+`.codex/agentic/issue-briefs/<active-id>.md`. Explicit denied scope takes precedence, other issue
+briefs and dispatch modes receive no such authority, and the target is revalidated as a regular
+file inside the workspace immediately before execution.
+
 ---
 
 ## License

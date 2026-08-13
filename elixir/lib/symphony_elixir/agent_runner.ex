@@ -5,10 +5,27 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, DispatchPreflight, Linear.Issue, PromptBuilder, ReviewMonitor, Tracker, Workspace}
+
+  alias SymphonyElixir.{
+    Config,
+    DispatchPreflight,
+    HandoffCertificate,
+    HandoffController,
+    Linear.Issue,
+    PromptBuilder,
+    ReviewMonitor,
+    RuntimeContract,
+    RuntimeRequest,
+    ScopeAccess,
+    Tracker,
+    ValidationController,
+    Workspace
+  }
 
   @delivery_event_path ".orocsy/delivery/events/events.jsonl"
   @review_classification_path ".orocsy/delivery/state/review-feedback-classified.json"
+  @strict_review_rework_policy_violation_recoveries 1
+  @runtime_controller_handoff_policy_pattern "playwright_browser_correction_requires_runtime_controller_handoff"
 
   @type worker_host :: String.t() | nil
 
@@ -39,9 +56,19 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               {:ok, _preflight} <- maybe_prepare_dispatch_preflight(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+            case reconcile_pending_runtime_transition(workspace, issue, opts) do
+              {:stop, _transition_result} ->
+                :ok
+
+              {:continue, _transition_result} ->
+                with {:ok, _preflight} <- maybe_prepare_dispatch_preflight(workspace, issue, worker_host) do
+                  run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+                end
+
+              {:error, _reason} = error ->
+                error
+            end
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -80,8 +107,38 @@ defmodule SymphonyElixir.AgentRunner do
   if Mix.env() == :test do
     def remote_worker_review_feedback_for_test(issue), do: remote_worker_review_feedback?(issue)
     def selected_worker_host_for_test(issue, preferred_host), do: selected_worker_host_for_issue(issue, preferred_host, Config.settings!().worker.ssh_hosts)
-    def pushed_handoff_stop_for_test(workspace), do: pushed_handoff_stop?(workspace)
+    def pushed_handoff_stop_for_test(workspace, issue), do: pushed_handoff_stop?(workspace, issue)
     def review_classification_handoff_stop_for_test(workspace), do: review_classification_handoff_stop?(workspace)
+    def policy_violation_recovery_budget_for_test(workspace), do: policy_violation_recovery_budget(workspace)
+
+    def current_issue_for_runtime_transition_for_test(workspace, issue, fetcher),
+      do: current_issue_for_runtime_transition(workspace, issue, fetcher)
+
+    def reconcile_pending_runtime_transition_for_test(workspace, issue, opts),
+      do: reconcile_pending_runtime_transition(workspace, issue, opts)
+
+    def reconcile_controller_handoff_after_park_for_test(pattern, workspace, issue, opts),
+      do: reconcile_controller_handoff_after_park(pattern, workspace, issue, opts)
+
+    def policy_violation_recovery_action_for_test(
+          workspace,
+          issue,
+          command,
+          pattern,
+          recovery_count,
+          max_policy_recoveries,
+          worker_host \\ nil
+        ),
+        do:
+          policy_violation_recovery_action(
+            workspace,
+            issue,
+            command,
+            pattern,
+            recovery_count,
+            max_policy_recoveries,
+            worker_host
+          )
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -114,18 +171,337 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  @max_policy_violation_recoveries 2
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, 0)
+  end
+
+  # A denied command used to kill the whole run and park the issue behind a
+  # human-resolved correction, so the worker never learned which command was
+  # denied and every redispatch replayed the same violation. Recover in-run
+  # instead: restart the worker with an explicit policy-violation prelude naming
+  # the denied command, bounded by @max_policy_violation_recoveries before the
+  # existing parking path takes over.
+  defp run_codex_turns_with_policy_recovery(workspace, issue, codex_update_recipient, opts, worker_host, recovery_count) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    max_policy_recoveries = policy_violation_recovery_budget(workspace)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, worker_host)
-      after
-        AppServer.stop_session(session)
+    result =
+      with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+        try do
+          do_run_codex_turns(
+            session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            opts,
+            issue_state_fetcher,
+            1,
+            max_turns,
+            worker_host
+          )
+        after
+          AppServer.stop_session(session)
+          consume_turn_policy_patches(workspace)
+        end
       end
+
+    case result do
+      {:error, {:forbidden_command, command, pattern}} ->
+        case policy_violation_recovery_action(
+               workspace,
+               issue,
+               command,
+               pattern,
+               recovery_count,
+               max_policy_recoveries,
+               worker_host
+             ) do
+          {:retry, attempt, scope_access} ->
+            Logger.warning("Recovering denied-command policy violation for #{issue_context(issue)} attempt=#{attempt}/#{max_policy_recoveries} command=#{inspect(command)} pattern=#{inspect(pattern)}")
+
+            record_policy_violation_event(workspace, issue, command, pattern, attempt, scope_access, worker_host)
+
+            send_codex_update(codex_update_recipient, issue, %{
+              event: :policy_violation_recovery,
+              command: command,
+              pattern: pattern,
+              attempt: attempt,
+              max_attempts: max_policy_recoveries,
+              scope_access: scope_access,
+              timestamp: DateTime.utc_now()
+            })
+
+            opts =
+              Keyword.put(opts, :policy_violation, %{
+                command: command,
+                pattern: pattern,
+                attempt: attempt,
+                max_attempts: max_policy_recoveries,
+                scope_access: scope_access
+              })
+
+            run_codex_turns_with_policy_recovery(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host,
+              attempt
+            )
+
+          {:parked, scope_access} ->
+            record_policy_violation_event(
+              workspace,
+              issue,
+              command,
+              pattern,
+              recovery_count + 1,
+              scope_access,
+              worker_host
+            )
+
+            reconcile_controller_handoff_after_park(pattern, workspace, issue, opts)
+
+          :stop ->
+            result
+        end
+
+      other ->
+        other
     end
   end
+
+  defp policy_violation_recovery_budget(workspace) do
+    if strict_review_rework_implementation_child?(workspace) do
+      @strict_review_rework_policy_violation_recoveries
+    else
+      @max_policy_violation_recoveries
+    end
+  end
+
+  defp reconcile_controller_handoff_after_park(
+         @runtime_controller_handoff_policy_pattern,
+         workspace,
+         %Issue{} = issue,
+         opts
+       )
+       when is_binary(workspace) and is_list(opts) do
+    case reconcile_pending_runtime_transition(workspace, issue, opts) do
+      {:error, _reason} = error -> error
+      _transition_result -> :ok
+    end
+  end
+
+  defp reconcile_controller_handoff_after_park(_pattern, _workspace, _issue, _opts),
+    do: :ok
+
+  defp consume_turn_policy_patches(workspace) when is_binary(workspace) do
+    DispatchPreflight.consume_turn_policy_patches(workspace)
+  rescue
+    _error -> :ok
+  end
+
+  defp consume_turn_policy_patches(_workspace), do: :ok
+
+  defp strict_review_rework_implementation_child?(workspace) when is_binary(workspace) do
+    with {:ok, %{"mode" => "review_rework"} = preflight} <- DispatchPreflight.read(workspace),
+         ticket_type when is_binary(ticket_type) <- get_in(preflight, ["requirements", "ticket_type"]),
+         true <- String.downcase(String.trim(ticket_type)) == "implementation" do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp strict_review_rework_implementation_child?(_workspace), do: false
+
+  defp policy_violation_recovery_action(
+         _workspace,
+         _issue,
+         _command,
+         @runtime_controller_handoff_policy_pattern,
+         _recovery_count,
+         _max_policy_recoveries,
+         _worker_host
+       ),
+       do: {:parked, nil}
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, max_policy_recoveries, _worker_host)
+       when recovery_count >= max_policy_recoveries,
+       do: :stop
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, worker_host)
+       when is_binary(worker_host),
+       do: {:retry, recovery_count + 1, nil}
+
+  defp policy_violation_recovery_action(workspace, issue, command, pattern, recovery_count, _max_policy_recoveries, nil)
+       when is_binary(workspace) and is_binary(command) do
+    attempt = recovery_count + 1
+    policy = policy_violation_policy(workspace)
+
+    case ScopeAccess.classify_command(command, policy) do
+      %{} = request ->
+        case ScopeAccess.Controller.decide(request, policy, workspace) do
+          {:allow_once, patch} ->
+            case ScopeAccess.Controller.write_policy_patch(workspace, patch) do
+              {:ok, written_patch} ->
+                {:retry, attempt, scope_access_with_decision(request, written_patch)}
+
+              {:error, reason} ->
+                Logger.warning("Failed to write scope access policy patch for #{issue_context(issue)} reason=#{inspect(reason)}")
+                {:retry, attempt, scope_access_with_decision(request, ScopeAccess.decision_for(request) || %{})}
+            end
+
+          {decision, correction_attrs} when decision in [:block, :escalate] ->
+            correction_attrs = put_scope_access_retry_fingerprint(correction_attrs, issue, request, policy)
+            scope_access = scope_access_with_decision(request, correction_attrs)
+
+            case Workspace.create_correction_in_workspace(workspace, issue, correction_attrs) do
+              {:ok, _correction} ->
+                Logger.warning("Parking #{issue_context(issue)} after denied #{request["operation"] || "unknown"} scope access command=#{inspect(command)} pattern=#{inspect(pattern)}")
+                {:parked, scope_access}
+
+              {:error, reason} ->
+                Logger.warning("Failed to create scope access correction for #{issue_context(issue)} reason=#{inspect(reason)}")
+                {:retry, attempt, scope_access}
+            end
+        end
+
+      _ ->
+        {:retry, attempt, nil}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to decide scope access recovery for #{issue_context(issue)} error=#{Exception.message(error)}")
+      {:retry, recovery_count + 1, nil}
+  end
+
+  defp policy_violation_recovery_action(_workspace, _issue, _command, _pattern, recovery_count, _max_policy_recoveries, _worker_host) do
+    {:retry, recovery_count + 1, nil}
+  end
+
+  defp policy_violation_policy(workspace) when is_binary(workspace) do
+    case DispatchPreflight.read(workspace) do
+      {:ok, preflight} when is_map(preflight) -> preflight
+      _ -> %{}
+    end
+  rescue
+    _error -> %{}
+  end
+
+  defp policy_violation_policy(_workspace), do: %{}
+
+  defp put_scope_access_retry_fingerprint(correction_attrs, %Issue{} = issue, %{} = request, %{} = policy)
+       when is_map(correction_attrs) do
+    fingerprint =
+      %{
+        "issue" => issue.identifier,
+        "issue_id" => issue.id,
+        "source" => correction_source(correction_attrs),
+        "head_sha" => policy_head_sha(policy),
+        "policy_hash" => policy_hash(policy),
+        "operation" => request["operation"],
+        "paths" => request["paths"],
+        "command_fingerprint" => request["command_fingerprint"]
+      }
+      |> Enum.reject(fn {_key, value} -> value in [nil, "", []] end)
+      |> Map.new()
+
+    if fingerprint == %{} do
+      correction_attrs
+    else
+      guard =
+        correction_attrs
+        |> Map.get(:guard, %{})
+        |> stringify_scope_access_decision()
+        |> Map.put("retry_fingerprint", fingerprint)
+
+      Map.put(correction_attrs, :guard, guard)
+    end
+  end
+
+  defp put_scope_access_retry_fingerprint(correction_attrs, _issue, _request, _policy), do: correction_attrs
+
+  defp correction_source(%{source: source}) when is_binary(source), do: source
+  defp correction_source(%{"source" => source}) when is_binary(source), do: source
+  defp correction_source(_correction_attrs), do: "symphony.runtime.scope-access"
+
+  defp policy_head_sha(policy) when is_map(policy) do
+    Map.get(policy, "head_sha") ||
+      get_in(policy, ["review", "head_sha"]) ||
+      get_in(policy, ["review", "head"])
+  end
+
+  defp policy_head_sha(_policy), do: nil
+
+  defp policy_hash(policy) when is_map(policy) do
+    Map.get(policy, "policy_hash") ||
+      get_in(policy, ["requirements", "scope_bundle", "policy_hash"]) ||
+      get_in(policy, ["scope_bundle", "policy_hash"])
+  end
+
+  defp policy_hash(_policy), do: nil
+
+  defp scope_access_with_decision(%{} = request, %{} = decision) do
+    decision_payload =
+      decision
+      |> stringify_scope_access_decision()
+      |> Map.take([
+        "decision",
+        "decision_class",
+        "reason_class",
+        "status",
+        "requires_policy_patch",
+        "patch_id",
+        "path",
+        "target"
+      ])
+
+    Map.merge(request, decision_payload)
+  end
+
+  defp stringify_scope_access_decision(decision) when is_map(decision) do
+    Map.new(decision, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {key, value}
+    end)
+  end
+
+  defp record_policy_violation_event(workspace, %Issue{identifier: identifier}, command, pattern, attempt, scope_access, nil)
+       when is_binary(workspace) do
+    event =
+      %{
+        "event" => "runtime.command-policy-violation",
+        "status" => "warn",
+        "tool" => "command-guard",
+        "ts" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+        "issue" => identifier,
+        "command" => command,
+        "pattern" => pattern,
+        "recovery_attempt" => attempt,
+        "source" => "symphony.runtime.command-guard",
+        "schema_version" => 1
+      }
+      |> put_if_present("scope_access", scope_access)
+
+    path = Path.join(workspace, @delivery_event_path)
+    File.write!(path, Jason.encode!(event) <> "\n", [:append])
+    :ok
+  rescue
+    error ->
+      Logger.warning("Failed to record command policy violation event: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp record_policy_violation_event(_workspace, _issue, _command, _pattern, _attempt, _scope_access, _worker_host), do: :ok
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, worker_host) do
     prompt = build_turn_prompt(issue, opts, workspace, turn_number, max_turns)
@@ -139,41 +515,54 @@ defmodule SymphonyElixir.AgentRunner do
              on_message: codex_message_handler(codex_update_recipient, issue),
              turn_number: turn_number
            ) do
+      consume_turn_policy_patches(workspace)
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      if fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) do
-        Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
-        :ok
-      else
-        next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
+      case process_runtime_transition_requests(workspace, issue, issue_state_fetcher) do
+        {:error, _reason} = error ->
+          error
 
-        case next_action do
-          {:continue, refreshed_issue} when turn_number < max_turns ->
-            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+        transition_result ->
+          cond do
+            runtime_transition_stop?(transition_result) ->
+              Logger.info("Stopping agent run for #{issue_context(issue)} after runtime transition certification; returning control to orchestrator")
+              :ok
 
-            do_run_codex_turns(
-              app_session,
-              workspace,
-              refreshed_issue,
-              codex_update_recipient,
-              opts,
-              issue_state_fetcher,
-              turn_number + 1,
-              max_turns,
-              worker_host
-            )
+            fresh_checkpoint_stop_completed?(turn_session, workspace, checkpoint_present_at_turn_start) ->
+              Logger.info("Stopping agent run for #{issue_context(issue)} after fresh implementation checkpoint; returning control to orchestrator")
+              :ok
 
-          {:continue, refreshed_issue} ->
-            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+            true ->
+              next_action = post_turn_next_action(workspace, issue, issue_state_fetcher, worker_host)
 
-            :ok
+              case next_action do
+                {:continue, refreshed_issue} when turn_number < max_turns ->
+                  Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-          {:done, _refreshed_issue} ->
-            :ok
+                  do_run_codex_turns(
+                    app_session,
+                    workspace,
+                    refreshed_issue,
+                    codex_update_recipient,
+                    opts,
+                    issue_state_fetcher,
+                    turn_number + 1,
+                    max_turns,
+                    worker_host
+                  )
 
-          {:error, reason} ->
-            {:error, reason}
-        end
+                {:continue, refreshed_issue} ->
+                  Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+                  :ok
+
+                {:done, _refreshed_issue} ->
+                  :ok
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
+          end
       end
     end
   end
@@ -192,7 +581,7 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Stopping agent run for #{issue_context(issue)} after open Orocsy blocking correction; returning control to orchestrator")
         {:done, issue}
 
-      pushed_handoff_stop?(workspace) ->
+      pushed_handoff_stop?(workspace, issue) ->
         Logger.info("Stopping agent run for #{issue_context(issue)} after pushed validated handoff; returning control to orchestrator")
         {:done, issue}
 
@@ -205,17 +594,17 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp pushed_handoff_stop?(workspace) do
+  defp pushed_handoff_stop?(workspace, %Issue{} = issue) do
     case DispatchPreflight.read(workspace) do
       {:ok, %{"mode" => mode}} when mode in ["review_rework", "integration_check", "handoff_recovery"] ->
-        workspace
-        |> PromptBuilder.workspace_recovery_checkpoint()
-        |> String.starts_with?("Pushed validated handoff checkpoint:")
+        match?({:ok, _certificate}, HandoffCertificate.current(issue, workspace))
 
       _ ->
         false
     end
   end
+
+  defp pushed_handoff_stop?(_workspace, _issue), do: false
 
   defp review_classification_handoff_stop?(workspace) when is_binary(workspace) do
     with {:ok, %{"mode" => "review_rework"}} <- DispatchPreflight.read(workspace),
@@ -333,7 +722,8 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp fresh_implementation_checkpoint_present?(workspace) when is_binary(workspace) do
-    with {:ok, %{"mode" => "fresh_implementation"}} <- DispatchPreflight.read(workspace) do
+    with {:ok, %{"mode" => "fresh_implementation"} = preflight} <- DispatchPreflight.read(workspace),
+         false <- structured_runtime_contract?(preflight) do
       technical_miu_trace_event?(workspace) and meaningful_git_progress?(workspace)
     else
       _ -> false
@@ -343,6 +733,112 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp fresh_implementation_checkpoint_present?(_workspace), do: false
+
+  defp structured_runtime_contract?(preflight) when is_map(preflight) do
+    get_in(preflight, ["requirements", "runtime_contract_status"]) == "structured"
+  end
+
+  defp structured_runtime_contract?(_preflight), do: false
+
+  defp process_runtime_transition_requests(workspace, %Issue{} = issue, issue_state_fetcher) do
+    with {:ok, current_issue} <- current_issue_for_runtime_transition(workspace, issue, issue_state_fetcher) do
+      validation_result = ValidationController.process_requests(current_issue, workspace)
+      handoff_result = HandoffController.process_requests(current_issue, workspace)
+
+      maybe_record_controller_block(workspace, current_issue, "validation", validation_result)
+      maybe_record_controller_block(workspace, current_issue, "handoff", handoff_result)
+
+      Logger.info("Processed runtime transition requests for #{issue_context(current_issue)} validation=#{inspect(validation_result)} handoff=#{inspect(handoff_result)}")
+
+      {validation_result, handoff_result}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to process runtime transition requests for #{issue_context(issue)} error=#{Exception.message(error)}")
+
+      {:error, {:runtime_transition_failed, Exception.message(error)}}
+  end
+
+  defp reconcile_pending_runtime_transition(workspace, %Issue{} = issue, opts)
+       when is_binary(workspace) and is_list(opts) do
+    if RuntimeRequest.pending?(workspace, ["miu.completion_requested", "handoff.requested"]) do
+      issue_state_fetcher =
+        Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+
+      transition_processor =
+        Keyword.get(opts, :runtime_transition_processor, &process_runtime_transition_requests/3)
+
+      case transition_processor.(workspace, issue, issue_state_fetcher) do
+        {:error, _reason} = error ->
+          error
+
+        transition_result ->
+          if runtime_transition_stop?(transition_result),
+            do: {:stop, transition_result},
+            else: {:continue, transition_result}
+      end
+    else
+      {:continue, :none}
+    end
+  rescue
+    error -> {:error, {:runtime_transition_reconciliation_failed, Exception.message(error)}}
+  end
+
+  defp current_issue_for_runtime_transition(workspace, %Issue{} = issue, issue_state_fetcher) do
+    if RuntimeRequest.pending?(workspace, ["miu.completion_requested", "handoff.requested"]) do
+      refresh_runtime_transition_issue(issue, issue_state_fetcher)
+    else
+      {:ok, issue}
+    end
+  end
+
+  defp refresh_runtime_transition_issue(%Issue{id: issue_id}, issue_state_fetcher)
+       when is_binary(issue_id) and is_function(issue_state_fetcher, 1) do
+    case issue_state_fetcher.([issue_id]) do
+      {:ok, [%Issue{} = current_issue | _]} ->
+        if active_issue_state?(current_issue.state) do
+          {:ok, current_issue}
+        else
+          {:error, {:runtime_transition_issue_inactive, current_issue.state}}
+        end
+
+      {:ok, []} ->
+        {:error, :runtime_transition_issue_unavailable}
+
+      {:error, reason} ->
+        {:error, {:runtime_transition_issue_refresh_failed, reason}}
+    end
+  end
+
+  defp refresh_runtime_transition_issue(_issue, _issue_state_fetcher),
+    do: {:error, :runtime_transition_issue_unavailable}
+
+  defp runtime_transition_stop?({{:ok, certificate}, _handoff_result}) when is_map(certificate), do: true
+  defp runtime_transition_stop?({_validation_result, {:ok, certificate}}) when is_map(certificate), do: true
+  defp runtime_transition_stop?({{:error, _reason}, _handoff_result}), do: true
+  defp runtime_transition_stop?({_validation_result, {:error, _reason}}), do: true
+  defp runtime_transition_stop?({{:blocked, _reason}, _handoff_result}), do: true
+  defp runtime_transition_stop?({_validation_result, {:blocked, _reason}}), do: true
+  defp runtime_transition_stop?(_result), do: false
+
+  defp maybe_record_controller_block(workspace, issue, controller, {:blocked, reason}) do
+    _ =
+      Workspace.create_correction_in_workspace(workspace, issue, %{
+        source: "symphony.runtime.#{controller}-controller",
+        source_status: "blocked",
+        summary: "#{String.capitalize(controller)} controller requires operator action",
+        findings: [inspect(reason)],
+        required_corrections: [
+          "Inspect the persisted controller evidence and choose a contract revision, explicit operator reset, or cancellation."
+        ],
+        next_action: "escalate",
+        guard: %{"controller" => controller, "reason" => inspect(reason)}
+      })
+
+    :ok
+  end
+
+  defp maybe_record_controller_block(_workspace, _issue, _controller, _result), do: :ok
 
   defp technical_miu_trace_event?(workspace) when is_binary(workspace) do
     workspace
@@ -447,7 +943,7 @@ defmodule SymphonyElixir.AgentRunner do
       - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
       - Resume from the current workspace and workpad state instead of restarting from scratch.
       - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run only `git status --short --branch`, `git diff --stat`, and a focused `git diff -- <dirty-file>` read before handoff. Do not rerun the same validation command before committing when the checkpoint already lists passed `gate.post-miu`/`tool.finished` evidence for the dirty files and the diff has not changed since that evidence; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
+      - If the workspace is dirty or ahead and recent validation/gate events passed, treat that as a dirty handoff checkpoint. Run `git status --short --branch` and each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as separate single-purpose commands before handoff; never join them with `&&`, `||`, `;`, or pipes. Do not run `git log` or `git diff --stat` — the runtime denies them and the checkpoint context above already lists commit/diffstat state. Do not rerun the same validation command before committing when the checkpoint already lists passed `gate.post-miu`/`tool.finished` evidence for the dirty files and the diff has not changed since that evidence; use the recorded evidence and proceed to commit, push, and review request. Rerun focused validation only when the evidence is missing, stale, or the focused diff is incomplete/invalid.
       - If no unmerged files remain and a dirty diff already exists, validation comes before more code changes. Only edit again when that focused validation fails and names the exact broken path or assertion.
       - After focused validation passes, immediately stage, commit, push the existing branch, and request/update PR review.
       - If the previous turn already produced validated local commits and only an external handoff step failed, such as git push, PR review comment, or Linear update, do not redo product code or broad implementation checks. Retry the pending handoff step once with bounded commands; if the network or provider is still unavailable, record an Orocsy correction/blocker with next action retry and stop.
@@ -509,13 +1005,25 @@ defmodule SymphonyElixir.AgentRunner do
   defp selected_worker_host_for_issue(issue, preferred_host, configured_hosts) do
     worker_host = selected_worker_host(preferred_host, configured_hosts)
 
-    if is_binary(worker_host) and review_feedback_requires_local_worker?(issue) do
-      Logger.info("Routing #{issue_context(issue)} to local worker because current review feedback requires dispatch preflight")
-      nil
-    else
-      worker_host
+    cond do
+      is_binary(worker_host) and structured_runtime_contract_issue?(issue) ->
+        Logger.info("Routing #{issue_context(issue)} to local worker because structured runtime contracts require local controller certification")
+        nil
+
+      is_binary(worker_host) and review_feedback_requires_local_worker?(issue) ->
+        Logger.info("Routing #{issue_context(issue)} to local worker because current review feedback requires dispatch preflight")
+        nil
+
+      true ->
+        worker_host
     end
   end
+
+  defp structured_runtime_contract_issue?(%Issue{description: description}) when is_binary(description) do
+    match?({:ok, _compiled}, RuntimeContract.compile(description))
+  end
+
+  defp structured_runtime_contract_issue?(_issue), do: false
 
   defp review_feedback_requires_local_worker?(issue) do
     case remote_worker_review_feedback?(issue) do

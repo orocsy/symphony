@@ -41,6 +41,39 @@ Important boundary:
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
 
+Implementation-defined delivery controllers MAY add a stricter structured issue
+contract. The Elixir implementation supports runtime-owned MIU and handoff
+certificates, bounded validation, and opt-in automatic PR merge. These
+controller decisions must be based on durable issue/workspace/GitHub evidence;
+telemetry and dashboard projections remain observation-only and cannot by
+themselves authorize a retry, handoff, or merge. Implementations that certify
+MIU commit ranges SHOULD persist the pre-dispatch branch head as signed
+controller evidence bound to the current issue, branch, and contract so a push
+cannot erase the audit baseline and a workspace edit cannot narrow it. A
+recovery contract MAY declare an exact immutable `certification_base_sha` when
+no prior signed baseline exists. A signed same-issue, same-branch baseline takes
+precedence over later contract input. Invalid signed evidence or unsigned legacy
+preflight without an explicit migration baseline MUST fail closed. Local
+workspace `HEAD` alone MUST NOT establish that baseline.
+
+A runtime MAY certify commits after the last MIU checkpoint only for an
+authoritative, signed review-rework dispatch bound to the same issue, branch,
+contract hash, and issue revision. Its review base MUST equal the last certified
+MIU head for the first review round, or the latest signed handoff head for a
+later round. Every path touched by any commit from that base to the proposed
+handoff head MUST stay inside declared MIU write scope and outside denied scope; a later revert does not erase the audit record. The runtime MUST
+run the affected MIU validations and final validations at that exact head before
+issuing handoff evidence. Stale review dispatches and other post-MIU commits
+remain uncertified and MUST block handoff.
+
+When a current PR head already has a clean exact-head review but its most recent
+signed handoff names an ancestor, the runtime MAY reconstruct a signed
+review-rework preflight without a model worker. This recovery MUST preserve that
+signed handoff head as the review-delta base, require the current local and
+remote PR head to match, and apply the same all-commit path audit and affected
+MIU plus final validations. A clean review without a valid same-issue,
+same-branch, same-contract ancestor certificate MUST NOT authorize this path.
+
 ## 2. Goals and Non-Goals
 
 ### 2.1 Goals
@@ -639,6 +672,9 @@ Important nuance:
   such as `blocked_no_durable_progress`, the orchestrator MUST classify that guard before scheduling
   the continuation retry. Validation failures remain the most actionable retryable class, then
   first-durable-event budget failures, then no-durable-progress or handoff-recovery handling.
+- Consecutive no-progress token accounting MUST restart after a matching worker summary records
+  durable progress (a current-turn durable event, dirty file, or new commit). Spend from before that
+  progress boundary MUST NOT be combined with later no-progress spend to park a normal completion.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -980,7 +1016,13 @@ Mode-specific startup policy:
   commands against both command event payloads and function-call command payloads accepted by the
   targeted app-server protocol.
 - Mode-specific restrictions MUST fail the worker attempt with an observable error instead of
-  silently allowing a disallowed command.
+  silently allowing a disallowed command, except when all of the following hold:
+  - the violation is an exact-path read denied only by the active scope policy;
+  - a controller-owned scope resolver authenticates an auditable, request-bound, policy-bound
+    allow-once decision; and
+  - semantic, destructive, executable-option, command-chain, substitution, and redirection guards
+    still reject the command before any scope decision can run.
+- A scope resolver MUST NOT override any non-scope command guard.
 
 ### 10.3 Streaming Turn Processing
 

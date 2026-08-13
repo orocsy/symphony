@@ -28,7 +28,88 @@ Codex with a narrower thread configuration. These mode-specific sessions disable
 plugins, apps, and tool search, and the app-server client enforces broad-discovery command bans such
 as `rg`, `grep`, `find`, `git ls-files`, and `gh api`. Fresh implementation mode is intended for
 one small MIU with an explicit issue brief; review rework mode is intended for already-collected PR
-feedback.
+feedback. Review rework permits one bounded local checkpoint command,
+`git log -N --oneline [--decorate|--no-decorate]` for `N` from 1 through 20. Other `git log`
+forms, including revision/path selection and content-producing output, remain denied.
+
+During structured handoff recovery, the command guard may admit a single pure read only when every
+parsed file operand is named directly by the active Runtime Contract's `write_scope` or
+`read_context`. The runtime rejects derived/imported context, absolute paths, wildcard operands,
+workspace symlink escapes, unsafe file-fed search options, shell composition, and substitutions.
+Configured operator bans always take precedence. A recoverable compound read is split into separate
+commands by the worker; the compound command itself is never authorized. In `handoff_recovery`
+only, the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
+`.codex/agentic/issue-briefs/<active-id>.md` may receive the same one-read authority. Explicit
+denied scope wins, no other issue brief or dispatch mode is included, and the app-server
+canonicalizes and verifies the target as a regular workspace file immediately before execution.
+
+### Structured Runtime Contracts
+
+Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
+contract is the sole authority for branch, write scope, MIUs, validation, and
+review behavior. The runtime certifies one clean MIU checkpoint at a time; a
+checkpoint may contain multiple focused microcommits. Dispatch preflight
+persists the issue branch's certification baseline in HMAC-signed controller
+evidence bound to the current issue, branch, contract, and issue revision. A
+recovery contract may declare an exact `certification_base_sha` when migrating
+work that predates signed preflight evidence. Existing signed evidence takes
+precedence, and invalid signed evidence or an unsigned legacy preflight without
+an explicit migration baseline blocks certification instead of choosing a
+different range. The runtime never seeds this value from a clean-but-ahead local
+`HEAD`. It executes declared validation itself, and issues
+`handoff.ready` only after all
+MIU certificates and final validations match the current issue revision and
+pushed head, and an open pull request connects the canonical integration branch
+to the contract base. Worker-authored generic gate events cannot imply completion.
+Authority-bearing MIU, handoff, processed-request, and merge evidence is HMAC
+signed with a runtime key stored outside the issue workspace. Override its
+location with `SYMPHONY_CONTROLLER_EVIDENCE_KEY_PATH`; keep that file unreadable
+from worker sandboxes.
+
+When a signed dispatch preflight is specifically in `review_rework` mode, the
+runtime may certify a pushed delta after the last MIU checkpoint without
+rewriting the MIU history. The first review round must start at that MIU head;
+later rounds must start at the latest signed `handoff.ready` head. Every changed
+path touched by any commit in the delta must remain inside the union of the
+contract's MIU write scopes and outside denied scope. Symphony reruns the affected MIU validations plus final
+validations at the exact new head before issuing `handoff.ready`. Stale review
+preflight evidence and post-MIU commits in any other dispatch mode remain
+uncertified and block handoff.
+
+If a review-fix delta was pushed and received a clean current-head Codex review
+before the runtime restarted, Symphony may reconstruct `review_rework` from the
+latest signed same-issue handoff instead of starting a model worker. The signed
+handoff remains the immutable delta base; the reviewed PR head remains the
+proposed handoff head. The same all-commit path audit and exact-head validations
+run before a replacement `handoff.ready` certificate is issued. Missing,
+invalid, non-ancestor, cross-issue, or cross-contract evidence fails closed.
+
+Validation commands have a bounded `validation_timeout_ms` (default 15
+minutes, maximum 30 minutes). A failed validation fingerprint runs once;
+changed code may receive at most two product-fix cycles before operator
+escalation.
+
+Schema-v1 contracts retain manual review handoff unless they explicitly set:
+
+```yaml
+merge:
+  automatic: true
+  method: squash
+  require_ci_checks: true
+  completed_state: Done
+```
+
+Before an automatic merge, the merge controller independently rechecks the
+current runtime certificate, PR head/base/branch, raw unresolved review
+threads, CI checks, clean current-head GitHub Codex review, open corrections,
+and GitHub mergeability. Any unavailable or stale input fails closed.
+
+GitHub review-monitor REST, GraphQL, and comment commands are bounded by
+`review_monitor.request_timeout_ms` (default 30 seconds). A timed-out command
+is terminated and reaped; dispatch preflight records review inspection as
+unavailable and continues without treating unknown review state as clean.
+Increase the value in `WORKFLOW.md` only for environments where a normal
+GitHub request reliably needs longer.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.

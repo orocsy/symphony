@@ -20,6 +20,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     "continuation-review-rework",
     "review-rework-continuation"
   ]
+  @code_change_verbs ~r/\b(add|delete|edit|fix|change|modify|remove|rename|replace|update|implement)\b/
+  @code_or_test_path ~r{(?:\b(?:design|agents|readme)\.md\b|\b(?:package\.json|tsconfig\.json|mix\.exs|mix\.lock|opennext\.js|open-next\.config\.(?:ts|js|mjs)|next\.config\.(?:ts|js|mjs)|wrangler\.(?:toml|json|jsonc)|vitest\.config\.[a-z0-9]+)\b|\b(?:src|app|apps|packages|lib|elixir|tests|docs|design|skills|scripts|bin)/[a-z0-9_\-./ ()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|ex|exs|py|sh|css|scss|json|md|yml|yaml|toml|html|svg|png)\b|\.codex/agentic/issue-briefs/[a-z0-9_\-./]+\.md\b)}
   @worker_prompt_fix_version "runtime-preflight-worker-progress-contract-v19"
 
   @spec run_once([Issue.t()]) :: {:ok, MapSet.t(String.t())}
@@ -44,6 +46,9 @@ defmodule SymphonyElixir.RescueSupervisor do
 
         runtime_dispatch_config_correction?(corrections) ->
           handle_worker_prompt_defect_corrections(issue, workspace, corrections)
+
+        corrections != [] and provider_usage_limit_correction?(corrections) ->
+          keep_provider_usage_limit_corrections_parked(issue)
 
         corrections != [] and pending_codex_review_correction?(corrections) ->
           handle_pending_codex_review_corrections(issue, workspace, corrections)
@@ -1149,6 +1154,27 @@ defmodule SymphonyElixir.RescueSupervisor do
 
   defp validation_blocker_correction?(_correction), do: false
 
+  defp provider_usage_limit_correction?(corrections) when is_list(corrections) do
+    Enum.any?(corrections, &provider_usage_limit_correction?/1)
+  end
+
+  defp provider_usage_limit_correction?(%{} = correction) do
+    source = correction["source"] || ""
+    summary = correction["summary"] || ""
+    findings = correction["findings"] |> string_values() |> Enum.join(" ")
+
+    String.contains?(source, "provider-usage-limit") or
+      String.contains?(summary, "usageLimitExceeded") or
+      String.contains?(findings, "usageLimitExceeded")
+  end
+
+  defp provider_usage_limit_correction?(_correction), do: false
+
+  defp keep_provider_usage_limit_corrections_parked(%Issue{} = issue) do
+    Logger.warning("Rescue supervisor kept #{issue.identifier} parked because Codex provider usage limit is still recorded as an open correction")
+    [issue.id]
+  end
+
   defp validation_failure_text?(text) when is_binary(text) do
     String.match?(text, ~r/\b(fail(?:ed|s|ure)?|error|blocked|invalid|not handoff-ready)\b/i)
   end
@@ -1254,7 +1280,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp read_only_search_command?(_command), do: false
 
   defp search_command_file_paths(command) when is_binary(command) do
-    ~r{(?:^|[\s"'])(\.?/?(?:src|app|apps|packages|lib|tests)/[A-Za-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
+    ~r{(?:^|[\s"'])(\.?/?(?:src|app|apps|packages|lib|tests)/[A-Za-z0-9_\-./()\[\]@+]+\.(?:ts|tsx|js|jsx|mjs|cjs|md|json|yml|yaml|css|scss))}
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_permission_path(path)]
@@ -1266,7 +1292,7 @@ defmodule SymphonyElixir.RescueSupervisor do
   defp search_command_file_paths(_command), do: []
 
   defp broad_search_directory_token?(command) when is_binary(command) do
-    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.\[\]]+)*)/
+    ~r/(?:^|[\s"'])(\.?\/?(?:src|app|apps|packages|lib|tests)(?:\/[A-Za-z0-9_\-.()\[\]@+]+)*)/
     |> Regex.scan(command, capture: :all_but_first)
     |> Enum.flat_map(fn
       [path] when is_binary(path) -> [normalize_permission_path(path)]
@@ -1324,7 +1350,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     findings = correction["findings"] |> string_values() |> Enum.join(" ")
     required = correction["required_corrections"] |> string_values() |> Enum.join(" ")
 
-    source in @pending_codex_review_correction_sources or
+    (source in @pending_codex_review_correction_sources and
+       not explicit_structured_code_change_request?(correction)) or
       (next_action == "retry" and not actionable_code_or_test_correction?(correction) and
          (String.contains?(summary, "Codex review") or
             String.contains?(findings, "Codex review") or
@@ -1337,7 +1364,8 @@ defmodule SymphonyElixir.RescueSupervisor do
     Enum.filter(corrections, &pending_codex_review_correction?/1)
   end
 
-  defp actionable_code_or_test_correction?(%{} = correction) do
+  @spec actionable_code_or_test_correction?(map()) :: boolean()
+  def actionable_code_or_test_correction?(%{} = correction) do
     text =
       [
         correction["summary"],
@@ -1348,11 +1376,38 @@ defmodule SymphonyElixir.RescueSupervisor do
       |> Enum.join(" ")
       |> String.downcase()
 
-    Regex.match?(~r{\b(?:src|app|apps|packages|lib|tests)/[a-z0-9_\-./\[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|json|md)\b}, text) and
-      Regex.match?(~r/\b(edit|fix|change|modify|update|implement|rerun|run|test|validation|failure|failed|error)\b/, text)
+    code_or_test_path_mentioned?(text) and
+      (Regex.match?(@code_change_verbs, text) or
+         Regex.match?(~r/\b(rerun|run|test|validation|failure|failed|error)\b/, text))
   end
 
-  defp actionable_code_or_test_correction?(_correction), do: false
+  def actionable_code_or_test_correction?(_correction), do: false
+
+  defp explicit_structured_code_change_request?(%{"required_corrections" => required_corrections}) do
+    required_corrections
+    |> string_values()
+    |> Enum.any?(fn instruction ->
+      normalized = String.downcase(instruction)
+
+      code_or_test_path_mentioned?(normalized) and
+        not Regex.match?(
+          ~r/\b(wait|monitor|pending|review result|review response|request(?: a| the)? (?:fresh )?(?:codex )?review|ask for (?:a )?(?:codex )?review)\b/,
+          normalized
+        )
+    end)
+  end
+
+  defp explicit_structured_code_change_request?(_correction), do: false
+
+  defp code_or_test_path_mentioned?(text) when is_binary(text),
+    do: Regex.match?(@code_or_test_path, text)
+
+  defp code_or_test_path_mentioned?(_text), do: false
+
+  if Mix.env() == :test do
+    def explicit_structured_code_change_request_for_test(correction),
+      do: explicit_structured_code_change_request?(correction)
+  end
 
   defp runtime_progress_correction?(corrections) do
     Enum.any?(corrections, fn correction ->
