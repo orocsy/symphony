@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implemented and gate-green for review
+Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared
 
 Date: 2026-07-29
 
@@ -644,14 +644,16 @@ prototype exposed and corrected an immutable-turn-context recursion hazard;
 its code was discarded, and production host work remains Slice 1 scope.
 
 `OXE-0.2` was implemented red-first at checkpoints `1ec682d` and `ff7b986`.
-Implementation review found and closed a staged-index bypass at `de41f63`: the
-audit now checks baseline-to-index and baseline-to-worktree candidates
-independently. Its focused 44-test suite, three real audit modes, formatter,
-specs, strict Credo, and exact `make all` gate pass; the full gate reports 340
-tests, six skipped, 100% total coverage, and zero Dialyzer errors. No
-extension-host or Orocsy runtime code landed.
+Implementation review found and closed a staged-index bypass at `de41f63`.
+Independent review then found three remaining source-authority gaps, closed at
+`e490387`: the audit now checks baseline-to-worktree, baseline-to-index, and
+baseline-to-HEAD candidates independently; required-hook presence follows
+effective worktree content only; and direct-Orocsy rejection includes grouped
+aliases. Its focused 46-test suite, three real audit modes, formatter, specs,
+strict Credo, and exact `make all` gate pass; the full gate reports 342 tests,
+six skipped, 100% total coverage, and zero Dialyzer errors. No extension-host
+or Orocsy runtime code landed.
 
-Next, independently review the `OXE-0.2` implementation. If it clears, write
-the Slice 1 technical trace for the production facade, interfaces, registry,
-no-op adapters, and differential equivalence proof before changing kernel
-files.
+Next, write the Slice 1 technical trace for the production facade, interfaces,
+registry, no-op adapters, and differential equivalence proof before changing
+kernel files.

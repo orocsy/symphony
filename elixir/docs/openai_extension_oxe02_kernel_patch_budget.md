@@ -1,6 +1,6 @@
 # OXE-0.2 Kernel Patch-Budget Audit Technical Trace
 
-Status: implementation gate green; ready for independent review; production hook host not landed
+Status: implementation and independent review cleared; production hook host not landed
 
 Date: 2026-08-13
 
@@ -197,8 +197,9 @@ Consequences:
   Slice 1 checks.
 
 Changed kernel lines may reference only the generic
-`SymphonyElixir.Extensions` facade. Any added line containing a direct
-`SymphonyElixir.Orocsy` dependency fails even if a manifest fingerprint was
+`SymphonyElixir.Extensions` facade. Any added line containing an `Orocsy`
+module token fails even when it enters through a grouped alias such as
+`SymphonyElixir.{Orocsy.Policy}`, and even if a manifest fingerprint was
 mistakenly updated.
 
 ## Deterministic Fingerprint
@@ -211,16 +212,22 @@ git -C <root> diff --no-ext-diff --no-textconv --no-renames --no-color --full-in
   <baseline_commit> -- <registered_path>
 git -C <root> diff --no-ext-diff --no-textconv --no-renames --no-color --cached \
   --full-index --unified=3 <baseline_commit> -- <registered_path>
+git -C <root> diff --no-ext-diff --no-textconv --no-renames --no-color --full-index --unified=3 \
+  <baseline_commit> <head_commit> -- <registered_path>
 ```
 
 The expected fingerprint is lowercase SHA-256 of the exact stdout bytes. The
-first command compares the pinned baseline with worktree content; the second
-compares it independently with staged index content. Results for the same path
-are merged without double-counting. Consequently, neither an unstaged edit nor
-a staged patch hidden by restoring baseline worktree bytes can bypass the
-audit. On a clean integration or CI checkout both are byte-identical to
-comparing the baseline with `HEAD`. The baseline is immutable, full object IDs
-remove abbreviation variance, the path is validated and separated by `--`,
+first command compares the pinned baseline with effective worktree content,
+the second compares it independently with staged index content, and the third
+compares it independently with the resolved `HEAD` commit. Results for the
+same path are merged without double-counting. Consequently, neither an
+unstaged edit, a staged patch hidden by restoring baseline worktree bytes, nor
+a committed patch hidden by staging baseline bytes can bypass the audit.
+Required-hook presence follows only effective worktree content; historical
+HEAD or index candidates can produce findings but cannot make an absent runtime
+hook appear present. On a clean integration or CI checkout all three sources
+are byte-identical. The baseline and HEAD are full object IDs, the path is
+validated and separated by `--`,
 external diff drivers, text-conversion filters, and rename heuristics are
 disabled, and Git configuration is isolated by the existing audit environment.
 
@@ -333,10 +340,13 @@ ExtensionsAuditBudgetTest:
   rejects an over-budget registered patch
   rejects a fingerprint mismatch below the line ceiling
   rejects direct SymphonyElixir.Orocsy dependency lines
+  rejects grouped-alias Orocsy module tokens
   rejects an uncommitted change to a registered or unregistered pinned kernel file
   rejects a staged kernel patch hidden by baseline worktree content
+  rejects a committed kernel patch hidden by baseline index and worktree content
   allows absent optional Slice 0 hooks
   rejects an absent required Slice 1 hook
+  requires Slice 1 hooks in effective worktree content, not historical HEAD or index content
   accepts the exact measured prototype patches
   invokes only rev-parse, cat-file, ls-tree, and diff for budget evidence
 
@@ -383,16 +393,25 @@ The regression failed at `ff7b986`, proving the bypass. Checkpoint
 and worktree candidates independently and merging duplicate safe path evidence
 without double-counting.
 
+Independent review then attacked the remaining source-authority boundaries.
+It proved that a committed kernel patch could be hidden from both worktree and
+index evidence, that a required hook could be falsely satisfied by the union
+of historical sources, and that grouped aliases could evade the direct-Orocsy
+token check. The three regressions failed against `de41f63`. Checkpoint
+`e4903872d695f9ed2aed7ee87e3dcf8f33537c57` closes them with an independent
+baseline-to-HEAD channel, effective-worktree-only required-hook authority, and
+module-token detection that includes grouped aliases.
+
 Observed validation at the hardened checkpoint:
 
 | Command | Outcome |
 | --- | --- |
-| focused baseline, budget, and task suites | pass, 44 tests |
+| focused baseline, budget, and task suites | pass, 46 tests |
 | `mix extensions.audit --only baseline` | pass with the pinned object, trees, and first-parent proof |
 | `mix extensions.audit --only budget` | pass with zero kernel divergence and a 40-line ceiling |
 | default `mix extensions.audit` | pass in baseline-then-budget order |
 | `mix format --check-formatted`, `mix specs.check`, strict Credo, and `git diff --check` | pass |
-| `make all` | pass; 340 tests, 6 skipped, 100% total coverage, Dialyzer zero errors |
+| `make all` | pass; 342 tests, 6 skipped, 100% total coverage, Dialyzer zero errors |
 
 Reproduction commands:
 
@@ -423,8 +442,8 @@ make all
 5. A byte-exact patch above either its file or total ceiling fails.
 6. Kernel deletion, rename, binary patch, malformed Git evidence, and missing
    history fail closed.
-7. Added direct Orocsy dependencies in kernel files fail independently of the
-   fingerprint.
+7. Added direct Orocsy dependencies, including grouped aliases, fail
+   independently of the fingerprint.
 8. Default task execution never evaluates budget against an unverified
    baseline.
 9. The implementation mutates no file, object, ref, index, worktree, config, or
@@ -448,8 +467,6 @@ make all
 
 ## Next Action
 
-Run an independent two-axis review of the committed `OXE-0.2` delta against
-this trace and repository standards. If it clears, begin the Slice 1 technical
-trace for the production facade, interfaces, registry lifetime, no-op adapters,
-and differential equivalence proof. Production hook code remains absent until
-that next trace is reviewed.
+Begin the Slice 1 technical trace for the production facade, interfaces,
+registry lifetime, no-op adapters, and differential equivalence proof.
+Production hook code remains absent until that next trace is reviewed.

@@ -1289,9 +1289,11 @@ lineage. The measured `OXE-0.2` trace and gate-green implementation are
 recorded in `openai_extension_oxe02_kernel_patch_budget.md`: a throwaway no-op
 host prototype identified three kernel files, four named hook seams, and an
 exact 40-changed-line ceiling. Its offline manifest audit passes the exact
-repository gate at hardened checkpoint `de41f63`, including independent staged
-index and worktree evidence; the prototype code was discarded. No Orocsy
-runtime behavior or production kernel hook has been introduced.
+repository gate at independent-review checkpoint `e490387`, including separate
+effective-worktree, staged-index, and committed-HEAD evidence; required-hook
+presence is worktree-authoritative and grouped aliases cannot hide a direct
+Orocsy dependency. The prototype code was discarded. No Orocsy runtime
+behavior or production kernel hook has been introduced.
 
 ## Approval Gate
 
