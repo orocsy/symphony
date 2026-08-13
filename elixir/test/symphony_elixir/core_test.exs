@@ -9859,6 +9859,31 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "handoff.requested"
       refute prompt =~ "Symphony fresh-MIU micro-worker"
       refute prompt =~ "miu.completion_requested"
+
+      File.write!(target, "test('certified', () => {})\n// post-certification review delta\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/certified.test.ts"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add review delta"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["push", "origin", branch], cd: workspace)
+
+      File.rm_rf!(workspace)
+
+      {_output, 0} =
+        System.cmd("git", ["clone", "--branch", branch, origin, workspace], stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = blocked_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert blocked_preflight["final_miu_head_state"] == "post_certification_delta"
+      assert blocked_preflight["first_task"] =~ "does not equal the final MIU certificate"
+      refute blocked_preflight["first_task"] =~ "append the exact handoff.requested event"
+
+      blocked_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert blocked_prompt =~ "Runtime Contract post-certification evidence gate"
+      refute blocked_prompt =~ "Runtime Contract final handoff gate"
+      refute blocked_prompt =~ "--type handoff.requested"
+      refute blocked_prompt =~ "Request final runtime certification exactly once"
     after
       File.rm_rf(test_root)
     end

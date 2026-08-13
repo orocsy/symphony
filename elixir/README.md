@@ -123,9 +123,12 @@ boundaries to survive workspace recreation. Override that state root with
 outside every issue workspace. Terminal workspace cleanup removes the matching
 hashed evidence directory; nonterminal workspace recreation preserves it. A
 recreated workspace whose durable chain already certifies every MIU enters
-structured final-handoff recovery even when its local preflight and PR evidence
-are absent. That recovery permits only clean push/PR/`handoff.requested` work,
-not fresh implementation or another MIU commit.
+structured final-handoff recovery when current `HEAD` exactly equals the final
+MIU certificate, even when its local preflight and PR evidence are absent. That
+recovery permits only clean push/PR/`handoff.requested` work, not fresh
+implementation or another MIU commit. If `HEAD` is newer, the runtime fails
+closed for controller/operator reconstruction of an authorized review-rework
+delta instead of issuing an invalid final-handoff request.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes

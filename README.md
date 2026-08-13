@@ -95,9 +95,11 @@ issue workspace and restored after workspace recreation; set
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
 issue workspace to override that state root. Nonterminal recreation preserves this evidence;
 terminal workspace cleanup removes that workspace's hashed durable evidence directory. When the
-restored chain already certifies every MIU, dispatch enters structured final-handoff recovery even
-without workspace-local preflight or PR evidence; it authorizes only the clean push, PR, and
-`handoff.requested` sequence, never fresh implementation or another MIU commit.
+restored chain already certifies every MIU and current `HEAD` exactly equals the final MIU
+certificate, dispatch enters structured final-handoff recovery even without workspace-local
+preflight or PR evidence; it authorizes only the clean push, PR, and `handoff.requested` sequence,
+never fresh implementation or another MIU commit. A newer post-certification `HEAD` fails closed
+for controller/operator reconstruction of an authorized review-rework delta.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive

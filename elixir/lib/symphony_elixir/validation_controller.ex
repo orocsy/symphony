@@ -250,6 +250,23 @@ defmodule SymphonyElixir.ValidationController do
 
   def certified_miu_ids(_issue, _workspace), do: []
 
+  @spec final_miu_certificate_head(Issue.t(), String.t()) :: {:ok, String.t()} | :not_ready
+  def final_miu_certificate_head(%Issue{} = issue, workspace) when is_binary(workspace) do
+    with {:ok, compiled} <- structured_contract(issue),
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         final_miu_id when is_binary(final_miu_id) <- List.last(compiled.miu_ids),
+         %{"head_sha" => certified_head} when is_binary(certified_head) <-
+           issue
+           |> valid_miu_certificates(workspace, compiled, head_sha)
+           |> Enum.find(&(&1["miu_id"] == final_miu_id)) do
+      {:ok, certified_head}
+    else
+      _ -> :not_ready
+    end
+  end
+
+  def final_miu_certificate_head(_issue, _workspace), do: :not_ready
+
   @type pending_miu_commit_state ::
           :no_pending_miu
           | {:no_committed_delta, map()}

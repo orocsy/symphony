@@ -152,7 +152,8 @@ transition.
 | R1 | clean branch, MIU 1 certified, MIU 2 remaining, local commits | `fresh_implementation` for MIU 2 |
 | R2 | same as R1, MIU 2 target absent | prompt says create target; no dirty-diff instruction |
 | R2a | current pending MIU already has a committed delta after its certification base | `handoff_recovery`; do not reimplement the MIU |
-| R3 | all MIUs certified, clean local commits, including a recreated workspace with only durable certificates | `handoff_recovery` with the final handoff gate; never fresh implementation |
+| R3 | all MIUs certified, clean `HEAD` exactly equals the final MIU certificate, including after recreation with only durable certificates | `handoff_recovery` with the final handoff gate; never fresh implementation |
+| R3a | all MIU certificates remain valid but `HEAD` is newer than the final MIU certificate | fail-closed post-certification evidence gate; no edit, commit, or `handoff.requested` command until review-delta authority is reconstructed |
 | R4 | current MIU has a dirty declared target | focused recovery for that MIU |
 | R5 | read context overlaps denied read scope | contract rejected before dispatch |
 | R6 | MIU reads its own write target | allowed without scope patch |
@@ -256,10 +257,13 @@ redispatched:
   recreation can restore completed MIUs and
   select the actual later pending MIU. Terminal workspace cleanup removes the
   matching hashed durable namespace; nonterminal recreation preserves it. If
-  every MIU is already certified, a recreated workspace routes directly to
-  structured final-handoff recovery. Its prompt permits only the clean
+  every MIU is already certified and current `HEAD` exactly equals the final
+  MIU certificate, a recreated workspace routes directly to structured
+  final-handoff recovery. Its prompt permits only the clean
   push/PR/`handoff.requested` sequence and never commands another MIU edit or
-  microcommit.
+  microcommit. A newer `HEAD` instead receives a fail-closed post-certification
+  evidence gate so an authorized review-rework base/mode must be reconstructed
+  before final certification.
 - Fresh structured preflight names the exact next MIU and first write target,
   then requires its clean micro commit plus `miu.completion_requested`; it no
   longer advertises the legacy `technical-miu-trace` stop boundary.

@@ -674,10 +674,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       match?({:unknown, _reason}, pending_miu_commit_state) ->
         "handoff_recovery"
 
-      requirements["runtime_contract_status"] == "structured" and
-          pending_miu_commit_state == :no_pending_miu ->
-        "handoff_recovery"
-
       match?({:no_committed_delta, _snapshot}, pending_miu_commit_state) and
           clean_worktree?(workspace) ->
         "fresh_implementation"
@@ -687,6 +683,10 @@ defmodule SymphonyElixir.DispatchPreflight do
 
       retryable_review_rework_validation_correction?(workspace) ->
         "review_rework"
+
+      requirements["runtime_contract_status"] == "structured" and
+          pending_miu_commit_state == :no_pending_miu ->
+        "handoff_recovery"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
         "fresh_implementation"
@@ -1414,6 +1414,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     open_corrections = handoff_recovery_correction_summaries(all_open_corrections)
     correction_active? = open_corrections != []
     structured_contract? = requirements["runtime_contract_status"] == "structured"
+    final_miu_head_state = final_miu_head_state(workspace, issue, pending_miu_commit_state)
 
     first_correction_blocking? =
       open_corrections
@@ -1425,6 +1426,10 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     first_task =
       cond do
+        structured_contract? and pending_miu_commit_state == :no_pending_miu and
+            final_miu_head_state != "certified" ->
+          base_first_task
+
         unsafe_pending_miu_commit_state?(pending_miu_commit_state) ->
           base_first_task
 
@@ -1471,6 +1476,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         end,
       "first_task" => first_task,
       "base_first_task" => base_first_task,
+      "final_miu_head_state" => final_miu_head_state,
       "pending_miu_commit_state" => pending_miu_commit_state_payload(pending_miu_commit_state),
       "open_corrections" => open_corrections,
       "requirements" => compact_requirements(requirements),
@@ -1512,11 +1518,17 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_first_task(
          [],
          %{"runtime_contract_status" => "structured"},
-         _workspace,
-         _issue,
+         workspace,
+         issue,
          :no_pending_miu
        ) do
-    "Recover final handoff for the fully certified Runtime Contract. Do not edit product files or create another MIU commit. Keep the worktree clean, push the canonical integration branch, verify local HEAD matches its upstream, ensure the PR exists against the declared base branch, append the exact handoff.requested event from the Runtime Contract final handoff gate, and stop so Symphony can run final validation."
+    case final_miu_head_state(workspace, issue, :no_pending_miu) do
+      "certified" ->
+        "Recover final handoff for the fully certified Runtime Contract. Do not edit product files or create another MIU commit. Keep the worktree clean, push the canonical integration branch, verify local HEAD matches its upstream, ensure the PR exists against the declared base branch, append the exact handoff.requested event from the Runtime Contract final handoff gate, and stop so Symphony can run final validation."
+
+      _other ->
+        "Stop at the post-certification evidence gate. Current HEAD does not equal the final MIU certificate, so do not edit product files, create a commit, append handoff.requested, or start fresh implementation. Preserve the clean pushed head for controller/operator reconstruction of an authorized review-rework delta."
+    end
   end
 
   defp handoff_recovery_first_task(
@@ -2213,14 +2225,38 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp structured_recovery_state_limit(%{
+         "final_miu_head_state" => "certified",
          "pending_miu_commit_state" => %{"status" => "no_pending_miu"}
        }) do
     "- Every MIU is already certified. Do not edit product files or create another MIU commit. Preserve the clean certified head and perform only the final push, PR, and `handoff.requested` sequence supplied by the gate."
   end
 
+  defp structured_recovery_state_limit(%{
+         "pending_miu_commit_state" => %{"status" => "no_pending_miu"}
+       }) do
+    "- Every MIU certificate remains valid, but current HEAD is not the final certified MIU head. Do not edit, create a commit, append `handoff.requested`, or restart implementation. Stop for controller/operator reconstruction of the review-rework delta."
+  end
+
   defp structured_recovery_state_limit(_preflight) do
     "- For an execution gate, run `git status --short --branch` and each `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as separate commands; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Inspect only that focused dirty diff and files named by the remaining MIU, complete that MIU, create its micro commit, append `miu.completion_requested`, and stop without pushing."
   end
+
+  defp final_miu_head_state(workspace, issue, :no_pending_miu)
+       when is_binary(workspace) do
+    with %Issue{} = issue <- struct_issue(issue),
+         {:ok, certified_head} <-
+           ValidationController.final_miu_certificate_head(issue, workspace),
+         {head, 0} <- git_command(workspace, ["rev-parse", "HEAD"]) do
+      if String.trim(head) == certified_head,
+        do: "certified",
+        else: "post_certification_delta"
+    else
+      _ -> "unknown"
+    end
+  end
+
+  defp final_miu_head_state(_workspace, _issue, _pending_miu_commit_state),
+    do: "not_applicable"
 
   defp handoff_recovery_checkpoint_guidance(checkpoint_event, true) do
     "`#{checkpoint_event}` after making or explicitly blocking the scoped correction fix. Do not use older handoff evidence while any open correction remains."

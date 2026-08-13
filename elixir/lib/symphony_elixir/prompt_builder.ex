@@ -274,6 +274,27 @@ defmodule SymphonyElixir.PromptBuilder do
        do: ""
 
   defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{
+           "mode" => "handoff_recovery",
+           "pending_miu_commit_state" => %{"status" => "no_pending_miu"},
+           "final_miu_head_state" => state
+         }
+       )
+       when state != "certified" do
+    """
+    Runtime Contract post-certification evidence gate:
+
+    - Every MIU certificate remains valid, but current HEAD does not equal the final MIU certificate.
+    - Fail closed. Do not edit product files, create a commit, append a runtime request, push, or restart implementation.
+    - Preserve the current head and stop for controller/operator reconstruction of an authorized review-rework delta.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
          compiled,
          _issue,
          _workspace,
