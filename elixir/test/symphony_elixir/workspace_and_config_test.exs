@@ -1226,6 +1226,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              SymphonyElixir.RuntimeContract.compile(plain_directory_description)
 
     assert "read_context_denied:COD-276-MIU-1:src/features/discover/DiscoverWorkspace.tsx" in plain_errors
+
+    internal_wildcard_description =
+      issue.description
+      |> String.replace("src/**", "src/private/*.ts")
+      |> String.replace("src/features/discover/**", "src/private/config.ts")
+
+    assert {:error, internal_wildcard_errors} =
+             SymphonyElixir.RuntimeContract.compile(internal_wildcard_description)
+
+    assert "read_context_denied:COD-276-MIU-1:src/private/config.ts" in internal_wildcard_errors
   end
 
   test "runtime contract rejects glob metacharacters the scope matcher does not implement" do

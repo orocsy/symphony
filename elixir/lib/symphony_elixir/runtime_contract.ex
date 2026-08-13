@@ -260,6 +260,9 @@ defmodule SymphonyElixir.RuntimeContract do
       String.ends_with?(denied_pattern, "/*") ->
         scope_has_prefix?(authorized_pattern, String.trim_trailing(denied_pattern, "/*"))
 
+      String.contains?(denied_pattern, "*") ->
+        wildcard_scope_matches?(authorized_pattern, denied_pattern)
+
       true ->
         scope_has_prefix?(authorized_pattern, denied_pattern)
     end
@@ -269,6 +272,14 @@ defmodule SymphonyElixir.RuntimeContract do
 
   defp scope_has_prefix?(path, prefix) do
     path == prefix or String.starts_with?(path, prefix <> "/")
+  end
+
+  defp wildcard_scope_matches?(path, scope) do
+    scope
+    |> Regex.escape()
+    |> String.replace("\\*", ".*")
+    |> then(&Regex.compile!("^#{&1}$"))
+    |> Regex.match?(path)
   end
 
   defp validate_scope_list(errors, map, key, id) do

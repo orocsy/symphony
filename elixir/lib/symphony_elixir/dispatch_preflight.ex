@@ -55,6 +55,9 @@ defmodule SymphonyElixir.DispatchPreflight do
     do: {:error, :invalid_review_delta_recovery}
 
   defp prepare_with_inspection(workspace, issue, requirements, inspection, review_delta_recovery?) do
+    pre_sync_head_sha =
+      authoritative_local_head_sha(workspace, requirements, inspection)
+
     with :ok <-
            maybe_sync_authoritative_branch(
              workspace,
@@ -63,7 +66,8 @@ defmodule SymphonyElixir.DispatchPreflight do
              review_delta_recovery?
            ),
          :ok <- verify_review_delta_head(workspace, inspection, review_delta_recovery?),
-         pending_miu_commit_state <- pending_miu_commit_state(workspace, issue, requirements),
+         pending_miu_commit_state <-
+           pending_miu_commit_state(workspace, issue, requirements, pre_sync_head_sha),
          mode <-
            if(review_delta_recovery?,
              do: "review_rework",
@@ -77,7 +81,14 @@ defmodule SymphonyElixir.DispatchPreflight do
                )
            ),
          {:ok, certification_base_sha} <-
-           certification_base_sha(workspace, issue, requirements, inspection, mode) do
+           certification_base_sha(
+             workspace,
+             issue,
+             requirements,
+             inspection,
+             mode,
+             pre_sync_head_sha
+           ) do
       preflight =
         case mode do
           "handoff_recovery" ->
@@ -635,9 +646,9 @@ defmodule SymphonyElixir.DispatchPreflight do
     end
   end
 
-  defp pending_miu_commit_state(workspace, issue, requirements) do
+  defp pending_miu_commit_state(workspace, issue, requirements, pre_sync_head_sha) do
     if requirements["runtime_contract_status"] == "structured" do
-      ValidationController.pending_miu_commit_state(struct_issue(issue), workspace)
+      ValidationController.pending_miu_commit_state(struct_issue(issue), workspace, fallback_base_sha: pre_sync_head_sha)
     else
       :no_pending_miu
     end
@@ -1336,9 +1347,14 @@ defmodule SymphonyElixir.DispatchPreflight do
       handoff_recovery_first_task([], requirements, workspace, issue, pending_miu_commit_state)
 
     first_task =
-      if all_open_corrections == [],
-        do: base_first_task,
-        else:
+      cond do
+        unsafe_pending_miu_commit_state?(pending_miu_commit_state) ->
+          base_first_task
+
+        all_open_corrections == [] ->
+          base_first_task
+
+        true ->
           handoff_recovery_first_task(
             all_open_corrections,
             requirements,
@@ -1346,6 +1362,7 @@ defmodule SymphonyElixir.DispatchPreflight do
             issue,
             pending_miu_commit_state
           )
+      end
 
     %{
       "schema_version" => 1,
@@ -1357,10 +1374,20 @@ defmodule SymphonyElixir.DispatchPreflight do
       "policy_hash" => policy_hash(requirements),
       "checkpoint_event" =>
         cond do
-          structured_contract? and first_correction_controller_owned? -> "runtime-contract-gate"
-          correction_active? -> "correction-scoped-fix"
-          structured_contract? -> "runtime-contract-gate"
-          true -> "gate.post-miu"
+          structured_contract? and unsafe_pending_miu_commit_state?(pending_miu_commit_state) ->
+            "runtime-contract-gate"
+
+          structured_contract? and first_correction_controller_owned? ->
+            "runtime-contract-gate"
+
+          correction_active? ->
+            "correction-scoped-fix"
+
+          structured_contract? ->
+            "runtime-contract-gate"
+
+          true ->
+            "gate.post-miu"
         end,
       "first_task" => first_task,
       "base_first_task" => base_first_task,
@@ -1381,6 +1408,12 @@ defmodule SymphonyElixir.DispatchPreflight do
       }
     }
   end
+
+  defp unsafe_pending_miu_commit_state?({status, _evidence})
+       when status in [:invalid_delta, :unknown],
+       do: true
+
+  defp unsafe_pending_miu_commit_state?(_pending_miu_commit_state), do: false
 
   defp handoff_recovery_first_task(
          [correction | _],
@@ -1614,17 +1647,32 @@ defmodule SymphonyElixir.DispatchPreflight do
       issue_value(issue, :branch_name)
   end
 
-  defp certification_base_sha(workspace, issue, requirements, inspection, mode) do
+  defp certification_base_sha(
+         workspace,
+         issue,
+         requirements,
+         inspection,
+         mode,
+         pre_sync_head_sha
+       ) do
     issue_identifier = issue_value(issue, :identifier)
     branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name)
     explicit_base_sha = get_in(requirements, ["runtime_contract", "certification_base_sha"])
 
+    fallback_base_sha =
+      explicit_base_sha ||
+        review_rework_head_sha(inspection, mode) ||
+        structured_pre_sync_base_sha(requirements, pre_sync_head_sha)
+
     case preserved_certification_base_sha(workspace, issue_identifier, branch) do
-      {:ok, base_sha} ->
+      {:ok, base_sha} when is_binary(base_sha) and base_sha != "" ->
         {:ok, base_sha}
 
+      {:ok, nil} ->
+        {:ok, fallback_base_sha}
+
       :none ->
-        {:ok, explicit_base_sha || review_rework_head_sha(inspection, mode)}
+        {:ok, fallback_base_sha}
 
       {:error, :missing_controller_signature} when is_binary(explicit_base_sha) ->
         {:ok, explicit_base_sha}
@@ -1634,8 +1682,38 @@ defmodule SymphonyElixir.DispatchPreflight do
     end
   end
 
+  defp structured_pre_sync_base_sha(
+         %{"runtime_contract_status" => "structured"},
+         pre_sync_head_sha
+       )
+       when is_binary(pre_sync_head_sha) and pre_sync_head_sha != "",
+       do: pre_sync_head_sha
+
+  defp structured_pre_sync_base_sha(_requirements, _pre_sync_head_sha), do: nil
+
   defp review_rework_head_sha(inspection, "review_rework"), do: Map.get(inspection, :head_sha)
   defp review_rework_head_sha(_inspection, _mode), do: nil
+
+  defp authoritative_local_head_sha(workspace, requirements, inspection) do
+    branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref)
+
+    if safe_branch_name?(branch) do
+      local_branch_head_sha(workspace, branch)
+    end
+  end
+
+  defp local_branch_head_sha(workspace, branch) do
+    case git_command(workspace, ["rev-parse", "--verify", "refs/heads/#{branch}"]) do
+      {head_sha, 0} ->
+        case String.trim(head_sha) do
+          "" -> nil
+          sha -> sha
+        end
+
+      _ ->
+        nil
+    end
+  end
 
   defp preserved_certification_base_sha(workspace, issue_identifier, branch) do
     with {:ok, previous} <- read_authoritative(workspace),

@@ -202,7 +202,12 @@ defmodule SymphonyElixir.ValidationController do
           | {:unknown, term()}
 
   @spec pending_miu_commit_state(Issue.t(), String.t()) :: pending_miu_commit_state()
-  def pending_miu_commit_state(%Issue{} = issue, workspace) when is_binary(workspace) do
+  def pending_miu_commit_state(issue, workspace),
+    do: pending_miu_commit_state(issue, workspace, [])
+
+  @spec pending_miu_commit_state(Issue.t(), String.t(), keyword()) :: pending_miu_commit_state()
+  def pending_miu_commit_state(%Issue{} = issue, workspace, opts)
+      when is_binary(workspace) and is_list(opts) do
     with {:ok, compiled} <- structured_contract(issue),
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          completed_ids <- valid_certified_miu_ids(issue, workspace, compiled, head_sha) |> MapSet.new(),
@@ -210,7 +215,7 @@ defmodule SymphonyElixir.ValidationController do
            Enum.find(compiled.miu_ids, &(not MapSet.member?(completed_ids, &1))),
          %{} = miu <- Enum.find(compiled.contract["mius"], &(&1["id"] == miu_id)),
          {:ok, base_head_sha} <-
-           pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id),
+           pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id, opts),
          {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha) do
       {in_scope_paths, out_of_scope_paths} =
         Enum.split_with(changed_paths, fn path ->
@@ -243,7 +248,8 @@ defmodule SymphonyElixir.ValidationController do
     error -> {:unknown, {:pending_miu_state_exception, Exception.message(error)}}
   end
 
-  def pending_miu_commit_state(_issue, _workspace), do: {:unknown, :invalid_pending_miu_state_request}
+  def pending_miu_commit_state(_issue, _workspace, _opts),
+    do: {:unknown, :invalid_pending_miu_state_request}
 
   @spec pending_miu_committed_delta?(Issue.t(), String.t()) :: boolean()
   def pending_miu_committed_delta?(%Issue{} = issue, workspace) when is_binary(workspace) do
@@ -252,15 +258,15 @@ defmodule SymphonyElixir.ValidationController do
 
   def pending_miu_committed_delta?(_issue, _workspace), do: false
 
-  defp pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id) do
+  defp pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id, opts) do
     if List.first(compiled.miu_ids) == miu_id do
-      first_pending_miu_base_sha(issue, workspace, compiled, head_sha)
+      first_pending_miu_base_sha(issue, workspace, compiled, head_sha, opts)
     else
       certification_base_sha(issue, workspace, compiled, head_sha, miu_id)
     end
   end
 
-  defp first_pending_miu_base_sha(issue, workspace, compiled, head_sha) do
+  defp first_pending_miu_base_sha(issue, workspace, compiled, head_sha, opts) do
     case dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
       {:ok, base_head_sha} ->
         {:ok, base_head_sha}
@@ -270,11 +276,25 @@ defmodule SymphonyElixir.ValidationController do
           workspace,
           compiled,
           head_sha,
-          integration_certification_base_sha(workspace, compiled, head_sha)
+          pending_miu_fallback_base_sha(workspace, compiled, head_sha, opts)
         )
 
       {:error, _reason} = error ->
         explicit_pending_miu_base_sha(workspace, compiled, head_sha, error)
+    end
+  end
+
+  defp pending_miu_fallback_base_sha(workspace, compiled, head_sha, opts) do
+    case Keyword.get(opts, :fallback_base_sha) do
+      fallback_base_sha when is_binary(fallback_base_sha) and fallback_base_sha != "" ->
+        if git_ancestor?(workspace, fallback_base_sha, head_sha) do
+          {:ok, fallback_base_sha}
+        else
+          integration_certification_base_sha(workspace, compiled, head_sha)
+        end
+
+      _ ->
+        integration_certification_base_sha(workspace, compiled, head_sha)
     end
   end
 

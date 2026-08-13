@@ -154,40 +154,6 @@ defmodule SymphonyElixir.PromptBuilder do
          _compiled,
          _issue,
          _workspace,
-         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
-       ),
-       do: ""
-
-  defp runtime_contract_guidance(
-         compiled,
-         _issue,
-         _workspace,
-         %{
-           "mode" => "handoff_recovery",
-           "pending_miu_commit_state" => %{"status" => "committed_delta"} = state
-         }
-       ) do
-    changed_paths = Enum.map_join(state["in_scope_paths"] || [], ", ", &"`#{&1}`")
-
-    """
-    Runtime Contract committed-MIU recovery gate:
-
-    - Current contract: `#{compiled.contract_hash}`.
-    - Recover the committed but uncertified MIU `#{state["miu_id"]}`; do not restart it.
-    - Existing committed in-scope path(s): #{changed_paths}.
-    - Compare the existing delta with the MIU acceptance requirements and edit only missing in-scope behavior.
-    - If the committed delta already satisfies the MIU, do not create another commit or make an empty commit.
-    - Request runtime certification exactly once:
-      `python3 .codex/delivery/bin/orocsy.py --repo . event append --type miu.completion_requested --status requested --step #{state["miu_id"]}`
-    - End the turn after the request. Symphony runs authoritative validation and issues `miu.completed`.
-    """
-    |> String.trim()
-  end
-
-  defp runtime_contract_guidance(
-         _compiled,
-         _issue,
-         _workspace,
          %{
            "mode" => "handoff_recovery",
            "pending_miu_commit_state" => %{"status" => "unknown", "reason" => reason}
@@ -220,6 +186,40 @@ defmodule SymphonyElixir.PromptBuilder do
     - The committed range for pending MIU `#{state["miu_id"]}` includes undeclared path(s): #{paths}.
     - Fail closed. Do not restart implementation, edit product files, or create another commit.
     - Record the undeclared-write blocker and stop for controller recovery.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
+       ),
+       do: ""
+
+  defp runtime_contract_guidance(
+         compiled,
+         _issue,
+         _workspace,
+         %{
+           "mode" => "handoff_recovery",
+           "pending_miu_commit_state" => %{"status" => "committed_delta"} = state
+         }
+       ) do
+    changed_paths = Enum.map_join(state["in_scope_paths"] || [], ", ", &"`#{&1}`")
+
+    """
+    Runtime Contract committed-MIU recovery gate:
+
+    - Current contract: `#{compiled.contract_hash}`.
+    - Recover the committed but uncertified MIU `#{state["miu_id"]}`; do not restart it.
+    - Existing committed in-scope path(s): #{changed_paths}.
+    - Compare the existing delta with the MIU acceptance requirements and edit only missing in-scope behavior.
+    - If the committed delta already satisfies the MIU, do not create another commit or make an empty commit.
+    - Request runtime certification exactly once:
+      `python3 .codex/delivery/bin/orocsy.py --repo . event append --type miu.completion_requested --status requested --step #{state["miu_id"]}`
+    - End the turn after the request. Symphony runs authoritative validation and issues `miu.completed`.
     """
     |> String.trim()
   end

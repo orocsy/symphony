@@ -51,16 +51,18 @@ canonicalizes and verifies the target as a regular workspace file immediately be
 Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
 contract is the sole authority for branch, write scope, MIUs, validation, and
 review behavior. Contract compilation rejects malformed `mius` values and any
-MIU read/write scope fully covered by denied scope, using the same directory
-descendant semantics as command enforcement. The runtime certifies one clean MIU checkpoint at a time; a
+MIU read/write scope fully covered by denied scope, using the same directory,
+glob, and descendant semantics as command enforcement. The runtime certifies one clean MIU checkpoint at a time; a
 checkpoint may contain multiple focused microcommits. Dispatch preflight
 persists the issue branch's certification baseline in HMAC-signed controller
 evidence bound to the current issue, branch, contract, and issue revision. A
 recovery contract may declare an exact `certification_base_sha` when migrating
-work that predates signed preflight evidence. Existing signed evidence takes
-precedence, and invalid signed evidence or an unsigned legacy preflight without
-an explicit migration baseline blocks certification instead of choosing a
-different range. The runtime never seeds this value from a clean-but-ahead local
+work that predates signed preflight evidence. Existing signed non-empty evidence
+takes precedence. A signed empty baseline remains absence of evidence and is
+replaced by an explicit migration base or the pre-synchronization branch head;
+invalid signed evidence or an unsigned legacy preflight without an explicit
+migration baseline blocks certification instead of choosing a different range.
+The runtime never seeds this value from an already-synchronized clean-but-ahead
 `HEAD`. It executes declared validation itself, and issues
 `handoff.ready` only after all
 MIU certificates and final validations match the current issue revision and
@@ -77,10 +79,12 @@ while their own MIU is pending. For other structured contracts, a clean pending
 MIU starts `fresh_implementation` only when `HEAD` has no committed delta after
 the MIU certification base. A committed but uncertified delta stays in
 `handoff_recovery`, allowing validation and certification without reimplementing
-the same MIU. The lifecycle snapshot is computed after branch synchronization and
-binds the pending MIU, scope, base SHA, head SHA, and concrete paths for both mode
-and prompt generation. Evidence failures and undeclared committed paths fail
-closed; committed recovery names an actual in-scope path rather than a wildcard.
+the same MIU. Branch synchronization records the pre-sync branch head before it
+computes the lifecycle snapshot, preserving the first pending MIU's pushed delta.
+The post-sync snapshot binds the pending MIU, scope, base SHA, head SHA, and
+concrete paths for both mode and prompt generation. Evidence failures and
+undeclared committed paths fail closed ahead of ordinary correction recovery;
+committed recovery names an actual in-scope path rather than a wildcard.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes
