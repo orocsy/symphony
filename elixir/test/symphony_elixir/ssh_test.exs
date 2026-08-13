@@ -125,7 +125,7 @@ defmodule SymphonyElixir.SSHTest do
 
     assert {:ok, port} = SSH.start_port("localhost", "printf ok")
     assert is_port(port)
-    wait_for_trace!(trace_file)
+    assert_port_exits_normally!(port)
 
     trace = File.read!(trace_file)
     assert trace =~ "-T localhost bash -lc"
@@ -151,7 +151,7 @@ defmodule SymphonyElixir.SSHTest do
 
     assert {:ok, port} = SSH.start_port("localhost:2222", "printf ok", line: 256)
     assert is_port(port)
-    wait_for_trace!(trace_file)
+    assert_port_exits_normally!(port)
 
     trace = File.read!(trace_file)
     assert trace =~ "-T -p 2222 localhost bash -lc"
@@ -182,15 +182,15 @@ defmodule SymphonyElixir.SSHTest do
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
 
-  defp wait_for_trace!(trace_file, attempts \\ 20)
-  defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
+  defp assert_port_exits_normally!(port) when is_port(port) do
+    receive do
+      {^port, {:exit_status, 0}} ->
+        :ok
 
-  defp wait_for_trace!(trace_file, attempts) do
-    if File.exists?(trace_file) and File.read!(trace_file) != "" do
-      :ok
-    else
-      Process.sleep(25)
-      wait_for_trace!(trace_file, attempts - 1)
+      {^port, {:exit_status, status}} ->
+        flunk("fake ssh exited with status #{status}")
+    after
+      5_000 -> flunk("timed out waiting for fake ssh port to exit")
     end
   end
 

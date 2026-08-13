@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-hardening candidate; unchanged upstream-suite blocker prevents landing
+Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate
 
 Date: 2026-07-29
 
@@ -167,7 +167,7 @@ Out of scope:
 
 ### Implementation Progress
 
-Observed through 2026-08-13:
+Observed at the pre-OXE-0.1a checkpoint on 2026-08-13:
 
 | Item | Evidence |
 | --- | --- |
@@ -179,9 +179,9 @@ Observed through 2026-08-13:
 | Topology boundary | temporary local repository tests accept an OpenAI-first-parent merge and reject the same baseline when it is reachable only through the second parent |
 | Focused tests | 28 tests green across `extensions_audit_test.exs` and `extensions_audit_task_test.exs` |
 | Hermeticity | task success/default-root tests and Git topology tests use temporary repositories; no test requires the ambient checkout to contain the pinned object |
-| Current gate | focused suite, formatter, specs, Credo, build, Dialyzer, direct audit, and 100% total coverage pass after Round 2 hardening |
-| Handoff blocker | four consecutive exact `make all` runs stop on timing-sensitive pinned-upstream SSH/retry tests; the candidate does not modify those paths |
-| Remaining gate | final implementation review and an owner-approved fix or waiver for the unchanged upstream-suite blocker |
+| Candidate gate | focused suite, formatter, specs, Credo, build, Dialyzer, direct audit, and 100% total coverage pass after Round 2 hardening |
+| Handoff blocker at that checkpoint | four consecutive exact `make all` runs stopped on timing-sensitive pinned-upstream SSH/retry tests; the candidate did not modify those paths |
+| Remaining gate at that checkpoint | final implementation review and an owner-approved fix or waiver for the unchanged upstream-suite blocker; OXE-0.1a later supplied the fix |
 
 The current integration checkpoint contains the approved design history plus
 the `OXE-0.1` candidate, not the Orocsy runtime merge. That deferred merge is
@@ -208,8 +208,9 @@ The four `make all` failures are the two fake-SSH port trace waits at
 bounds at `core_test.exs:1022` and `core_test.exs:1062`. They reproduce when
 run alone. `git diff f8e8b8a --` over those test files and their SSH/orchestrator
 implementations is empty, so this implementation does not alter their code.
-They remain a pinned-upstream/environment handoff blocker rather than being
-silently widened into OXE-0.1 scope.
+At that checkpoint they remained a pinned-upstream/environment handoff blocker
+rather than being silently widened into OXE-0.1 scope. OXE-0.1a later fixed
+their test-observation races as a separate support MIU.
 
 Review-hardening evidence on 2026-08-13 supersedes the counts, but not the
 classification, above:
@@ -226,10 +227,10 @@ classification, above:
 | `mix help extensions.audit` | pass; task usage and offline contract are discoverable |
 | `mix dialyzer --format short` | pass, zero errors |
 
-The varying failure subset is stronger evidence of timing sensitivity, but it
-does not make the full gate green. Repository policy still blocks landing
-until those unchanged failures are fixed or formally waived. No SSH,
-orchestrator, retry, or corresponding test file is changed by this MIU.
+The varying failure subset was stronger evidence of timing sensitivity, but at
+that checkpoint it did not make the full gate green. Repository policy blocked
+landing until OXE-0.1a fixed those unchanged test failures. No SSH,
+orchestrator, retry, or corresponding test file was changed by OXE-0.1 itself.
 
 ### Implementation Review Disposition
 
@@ -244,10 +245,11 @@ issues and four standards/smell issues. The candidate was hardened as follows:
 | README run instructions were missing | Fixed in the repository and Elixir READMEs, including manifest authority, command usage, offline behavior, and failure handling. |
 | Repeated fake-Git command switches | Hardened: common successful command evidence and per-test overrides now share one scripted adapter; topology tests use real Git. |
 | Candidate changed the approved branch sequence without explicit owner approval | Resolved after this review: the owner's 2026-07-30 ruling blesses upstream-only Slice 0 checkpoints and leaves the merge in Slice 2. |
-| Exact `make all` is not green | Open: the four reproducible unchanged upstream failures above block landing unless fixed or formally waived. |
+| Exact `make all` was not green at this checkpoint | Superseded by OXE-0.1a: the test-only stabilization fixes the observation races and the exact gate is green. |
 
-The implementation review therefore improved the candidate materially but did
-not clear it to land.
+At that checkpoint, the implementation review improved the candidate
+materially but did not clear it to land. OXE-0.1a later cleared the remaining
+repository gate.
 
 The final independent re-review of checkpoint `603f952` found no new issues.
 The spec axis confirmed that the promisor lazy-fetch and hermetic wrong-parent
@@ -255,13 +257,14 @@ findings are resolved; its surviving findings are the owner-controlled
 branch-sequence decision (`P1`) and exact handoff validation (`P2`). The
 standards axis confirmed that the cleanup, README, and duplicate-fixture
 findings are resolved; its sole surviving finding is the exact `make all`
-landing blocker (`P1`). Those findings are represented by the two open rows
-above.
+landing blocker (`P1`). At that checkpoint, those findings were represented by
+the then-open rows above.
 
 That checkpoint review was superseded by the authoritative review of `8b652b3`
 recorded in `openai_extension_oxe01_implementation_review.md`. Round 2 found
 three P1 and eight P2 issues. The 2026-08-13 hardening candidate disposes them
-as follows; final status remains subject to the full gate and re-review:
+as follows; that candidate's status remained subject to the full gate and
+re-review:
 
 | Round 2 finding | Candidate disposition |
 | --- | --- |
@@ -280,8 +283,10 @@ as follows; final status remains subject to the full gate and re-review:
 
 Final two-axis re-review of committed candidate `9994f23` found no surviving
 or new spec findings and no in-scope standards or smell findings. The sole
-surviving `P1` is the repository-level exact-`make all` blocker recorded in the
-validation table; it is not an OXE-0.1 implementation defect and is not waived.
+surviving `P1` at that checkpoint was the repository-level exact-`make all`
+blocker recorded in the validation table; it was not an OXE-0.1 implementation
+defect. OXE-0.1a later fixed that test-observation blocker rather than waiving
+it.
 
 ### Data Shape
 
@@ -620,6 +625,14 @@ Acceptance conditions:
 7. No extension interface or Orocsy runtime behavior is introduced.
 
 ## Next Design Action
+
+The repository-gate blocker was resolved by the separate support MIU
+[`openai_extension_oxe01a_gate_stabilization.md`](openai_extension_oxe01a_gate_stabilization.md).
+It keeps the baseline verifier scope closed and changes only how the pinned
+upstream SSH/retry tests observe asynchronous completion and retry scheduling.
+Its one-scheduler red baseline failed on the first iteration before the change;
+after the test-only fix, 100 repeated focused iterations and the exact
+`make all` gate are green. The gate is fixed rather than waived.
 
 `OXE-0.1` is approved, conditional on the parent architecture approval gate.
 Next, write the `OXE-0.2` trace. It must derive its initial allowed kernel

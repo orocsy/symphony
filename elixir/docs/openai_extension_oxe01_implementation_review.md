@@ -1,7 +1,7 @@
 # Review: OXE-0.1 Implementation (extensions.audit baseline verifier)
 
-Status: **Round 2 — implementation findings cleared. Landing remains blocked
-only by the required full handoff gate.**
+Status: **Round 2 — implementation findings cleared. OXE-0.1a subsequently
+cleared the required full handoff gate.**
 
 Date: 2026-07-30
 
@@ -155,7 +155,7 @@ Independent final review results:
 | --- | --- |
 | Spec | No surviving or new findings. All Round 1 and Round 2 adversarial cases are resolved. |
 | Standards | No surviving code, test, documentation, or smell findings. Shared fixture cleanup is centralized and the deliberately independent Git environment is documented. |
-| Repository gate | `P1` remains: exact `make all` is non-green on unchanged timing-sensitive pinned-upstream SSH/retry tests. |
+| Repository gate | Cleared by the separate test-only OXE-0.1a support MIU; exact `make all` is green. |
 
 Validation at final committed candidate `9994f23`:
 
@@ -168,5 +168,8 @@ Validation at final committed candidate `9994f23`:
   retry lower-bound assertion at `core_test.exs:1062` (6 skipped, 100% total
   coverage).
 
-The implementation itself is review-cleared. Repository policy still forbids
-landing until the unchanged full-suite failures are fixed or formally waived.
+The implementation itself is review-cleared. OXE-0.1a subsequently fixed the
+unchanged test observation races without changing production behavior: the
+one-scheduler focused loop passed 100 iterations and exact `make all` passed
+324 tests with 0 failures, 6 skipped, 100% coverage, and zero Dialyzer errors.
+The repository landing gate is therefore cleared rather than waived.
