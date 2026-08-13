@@ -66,7 +66,11 @@ the integration branch's merge base with the declared base branch, so a pushed c
 its own delta. The immutable snapshot binds the pending MIU, base and head commits, and concrete
 paths; undeclared or explicitly denied committed paths also fail closed. That unsafe evidence keeps
 priority when live corrections refresh a prompt, so correction text cannot restore edit or commit
-authority. Recovery prompts name an actual committed path, never a wildcard scope.
+authority. A structured pending-MIU lifecycle state also precedes premature PR feedback; legacy
+review rework keeps its best-effort branch refresh when the remote is temporarily unavailable.
+Recovery prompts name an actual committed path, never a wildcard scope. When that committed delta
+needs a missing in-scope fix, the worker creates one conditional follow-up micro commit before
+requesting certification; an already-complete delta receives no duplicate or empty commit.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive

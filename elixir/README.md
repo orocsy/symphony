@@ -91,7 +91,11 @@ and concrete paths for both mode and prompt generation. Evidence failures and
 undeclared or explicitly denied committed paths fail closed ahead of ordinary
 correction recovery. Live-correction prompt refresh preserves that unsafe-state
 priority and cannot restore edit or commit authority; committed recovery names
-an actual in-scope path rather than a wildcard.
+an actual in-scope path rather than a wildcard. Structured pending-MIU states
+also precede premature PR review rework. Missing in-scope behavior is committed
+once in a conditional follow-up micro commit before certification; a complete
+existing delta gets no duplicate or empty commit. Legacy review branch refresh
+remains best effort when its configured remote is temporarily unavailable.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes

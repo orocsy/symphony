@@ -456,16 +456,7 @@ defmodule SymphonyElixir.DispatchPreflight do
           else: :ok
 
       true ->
-        case fetch_authoritative_branch(workspace, branch) do
-          :ok ->
-            sync_local_authoritative_branch(workspace, branch)
-
-          :remote_branch_absent ->
-            require_git_success(workspace, ["switch", branch], :authoritative_branch_switch_failed)
-
-          {:error, _reason} = error ->
-            error
-        end
+        sync_authoritative_remote_branch(workspace, branch, structured?)
     end
   end
 
@@ -510,6 +501,22 @@ defmodule SymphonyElixir.DispatchPreflight do
           {:error, {:authoritative_branch_fetch_failed, exit_code, String.trim(output)}}
         end
     end
+  end
+
+  defp sync_authoritative_remote_branch(workspace, branch, structured?) do
+    result =
+      case fetch_authoritative_branch(workspace, branch) do
+        :ok ->
+          sync_local_authoritative_branch(workspace, branch)
+
+        :remote_branch_absent ->
+          require_git_success(workspace, ["switch", branch], :authoritative_branch_switch_failed)
+
+        {:error, _reason} = error ->
+          error
+      end
+
+    if structured?, do: result, else: :ok
   end
 
   defp sync_local_authoritative_branch(workspace, branch) do
@@ -631,12 +638,6 @@ defmodule SymphonyElixir.DispatchPreflight do
       handoff_recovery_checkpoint?(workspace) and dirty_handoff?(workspace) ->
         "handoff_recovery"
 
-      scoped_review_feedback?(inspection, requirements) ->
-        "review_rework"
-
-      retryable_review_rework_validation_correction?(workspace) ->
-        "review_rework"
-
       explicit_integration_check_requirements?(requirements) ->
         "integration_check"
 
@@ -652,6 +653,12 @@ defmodule SymphonyElixir.DispatchPreflight do
       match?({:no_committed_delta, _snapshot}, pending_miu_commit_state) and
           clean_worktree?(workspace) ->
         "fresh_implementation"
+
+      scoped_review_feedback?(inspection, requirements) ->
+        "review_rework"
+
+      retryable_review_rework_validation_correction?(workspace) ->
+        "review_rework"
 
       in_progress_implementation_continuation?(workspace, requirements) ->
         "fresh_implementation"
@@ -1508,7 +1515,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp committed_pending_miu_recovery_task(snapshot) do
     changed_path = List.first(snapshot.in_scope_paths)
 
-    "Continue the committed but uncertified MIU `#{snapshot.miu_id}` on the clean canonical branch. Inspect the committed in-scope path `#{changed_path}` and compare the existing implementation with that MIU's acceptance requirements. Edit only missing in-scope behavior; if the committed delta already satisfies the MIU, do not recreate it or make an empty commit. Append the exact `miu.completion_requested` event from the Runtime Contract gate and stop so Symphony can validate and certify the existing delta."
+    "Continue the committed but uncertified MIU `#{snapshot.miu_id}` on the clean canonical branch. Inspect the committed in-scope path `#{changed_path}` and compare the existing implementation with that MIU's acceptance requirements. If missing in-scope behavior requires edits, create one clean follow-up micro commit containing only those edits before appending the certification event. If the committed delta already satisfies the MIU, do not recreate it or make an empty commit. Append the exact `miu.completion_requested` event from the Runtime Contract gate and stop so Symphony can validate and certify the resulting committed delta."
   end
 
   defp invalid_pending_miu_recovery_task(snapshot) do
@@ -2013,7 +2020,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp structured_recovery_state_limit(%{
          "pending_miu_commit_state" => %{"status" => "committed_delta"}
        }) do
-    "- The pending MIU already has a committed delta. Inspect only the concrete paths named above. If that delta satisfies acceptance, do not create another commit; append `miu.completion_requested` and stop without pushing."
+    "- The pending MIU already has a committed delta. Inspect only the concrete paths named above. If missing in-scope behavior requires edits, create one clean follow-up micro commit containing only those edits. If the existing delta satisfies acceptance, do not create another or empty commit. Append `miu.completion_requested` only after the resulting delta is committed, then stop without pushing."
   end
 
   defp structured_recovery_state_limit(_preflight) do

@@ -9178,6 +9178,101 @@ defmodule SymphonyElixir.CoreTest do
       {_output, 0} = System.cmd("git", ["add", "tests/unit/pending.test.ts"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["commit", "-m", "Implement pending MIU"], cd: workspace, stderr_to_stdout: true)
 
+      {committed_head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      committed_head_sha = String.trim(committed_head_sha)
+
+      current_head_sha = fn ->
+        {head_sha, 0} =
+          System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+        String.trim(head_sha)
+      end
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: true,
+        review_monitor_repo: "acme/nutribuddy"
+      )
+
+      Application.put_env(:symphony_elixir, :github_api_runner, fn endpoint ->
+        decoded = URI.decode(endpoint)
+
+        cond do
+          String.starts_with?(decoded, "repos/acme/nutribuddy/pulls?") ->
+            {:ok,
+             [
+               %{
+                 "number" => 74,
+                 "html_url" => "https://github.com/acme/nutribuddy/pull/74",
+                 "head" => %{"sha" => current_head_sha.(), "ref" => issue.branch_name}
+               }
+             ]}
+
+          decoded == "repos/acme/nutribuddy/pulls/74" ->
+            {:ok,
+             %{
+               "number" => 74,
+               "html_url" => "https://github.com/acme/nutribuddy/pull/74",
+               "head" => %{"sha" => current_head_sha.(), "ref" => issue.branch_name},
+               "mergeable" => true,
+               "mergeable_state" => "clean"
+             }}
+
+          decoded in [
+            "repos/acme/nutribuddy/pulls/74/comments",
+            "repos/acme/nutribuddy/pulls/74/reviews",
+            "repos/acme/nutribuddy/issues/74/comments"
+          ] ->
+            {:ok, []}
+
+          true ->
+            {:error, {:unexpected_endpoint, endpoint}}
+        end
+      end)
+
+      Application.put_env(:symphony_elixir, :github_graphql_runner, fn _query, _variables ->
+        {:ok,
+         %{
+           "data" => %{
+             "repository" => %{
+               "pullRequest" => %{
+                 "headRefOid" => current_head_sha.(),
+                 "reviewThreads" => %{
+                   "nodes" => [
+                     %{
+                       "isResolved" => false,
+                       "isOutdated" => false,
+                       "comments" => %{
+                         "nodes" => [
+                           %{
+                             "author" => %{"login" => "codex"},
+                             "body" => "Premature review feedback must not replace MIU certification.",
+                             "path" => "tests/unit/pending.test.ts",
+                             "line" => 1,
+                             "originalLine" => 1,
+                             "createdAt" => "2026-08-13T00:00:00Z",
+                             "outdated" => false,
+                             "url" => "https://github.com/acme/nutribuddy/pull/74#discussion"
+                           }
+                         ]
+                       }
+                     }
+                   ],
+                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                 }
+               }
+             }
+           }
+         }}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :github_api_runner)
+        Application.delete_env(:symphony_elixir, :github_graphql_runner)
+      end)
+
       assert SymphonyElixir.ValidationController.pending_miu_committed_delta?(revised_issue, workspace)
 
       assert {:ok, %{"mode" => "handoff_recovery"} = pushed_preflight} =
@@ -9191,16 +9286,14 @@ defmodule SymphonyElixir.CoreTest do
       assert get_in(pushed_preflight, ["pending_miu_commit_state", "miu_id"]) ==
                "COD-PENDING-MIU-1"
 
-      {committed_head_sha, 0} =
-        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
-
       assert get_in(pushed_preflight, ["pending_miu_commit_state", "head_sha"]) ==
-               String.trim(committed_head_sha)
+               committed_head_sha
 
       prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
       assert prompt =~ "Local handoff recovery checkpoint"
       refute prompt =~ "Mode: fresh implementation"
       assert prompt =~ "committed but uncertified MIU `COD-PENDING-MIU-1`"
+      assert prompt =~ "If missing in-scope behavior requires edits, create one clean follow-up micro commit"
       refute prompt =~ "After your focused implementation, create one clean local micro commit"
       refute prompt =~ "create its micro commit"
 
@@ -9285,6 +9378,14 @@ defmodule SymphonyElixir.CoreTest do
       refute invalid_prompt =~ "Resolve the active correction named above before requesting MIU certification"
       refute invalid_prompt =~ "create its micro commit"
       refute invalid_prompt =~ "After your focused implementation, create one clean local micro commit"
+
+      Application.delete_env(:symphony_elixir, :github_api_runner)
+      Application.delete_env(:symphony_elixir, :github_graphql_runner)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
 
       generic_correction = correction_path |> File.read!() |> Jason.decode!()
       File.write!(correction_path, Jason.encode!(Map.put(generic_correction, "source", "orocsy.runtime.generic")))
@@ -10363,6 +10464,14 @@ defmodule SymphonyElixir.CoreTest do
       assert PromptBuilder.workspace_recovery_checkpoint(workspace) =~
                "Local handoff recovery checkpoint:"
 
+      missing_origin = Path.join(test_root, "missing-origin.git")
+
+      assert {_output, 0} =
+               System.cmd("git", ["remote", "set-url", "origin", missing_origin],
+                 cd: workspace,
+                 stderr_to_stdout: true
+               )
+
       assert {:ok, %{"mode" => "review_rework"} = preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
@@ -10379,7 +10488,7 @@ defmodule SymphonyElixir.CoreTest do
                  stderr_to_stdout: true
                )
 
-      assert String.trim(current_branch) == "orocsy/feature-analytics-observability-integration"
+      assert String.trim(current_branch) == issue.branch_name
     after
       File.rm_rf(test_root)
     end

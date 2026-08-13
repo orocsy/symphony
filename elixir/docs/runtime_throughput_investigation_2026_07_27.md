@@ -233,6 +233,11 @@ redispatched:
   evidence. Invalid or unknown evidence fails closed instead of granting
   permission to restart, even when a live correction refreshes the prompt.
   Recovery prompts use a concrete in-scope committed path, including glob scopes.
+  Every structured pending-MIU state precedes premature PR feedback. If committed
+  recovery finds missing in-scope behavior, it creates one conditional follow-up
+  micro commit before certification; a complete delta gets no empty or duplicate
+  commit. Legacy review branch refresh remains best effort across temporary remote
+  failures.
 - Fresh preflight names the exact next MIU and its first write target.
 - Contract compilation rejects MIU read or write scopes fully covered by
   `denied_scope`, before a worker starts. It returns validation errors for

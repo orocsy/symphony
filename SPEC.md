@@ -64,7 +64,13 @@ Pending-MIU delta classification MUST treat paths covered by `denied_scope` as
 invalid even when a broader MIU write scope also matches them. Unsafe or unknown
 commit evidence MUST retain priority when live corrections refresh the worker
 prompt; a correction cannot restore permission to edit, commit, or request MIU
-certification.
+certification. While a structured MIU remains pending, its post-sync lifecycle
+state MUST take precedence over current-head PR feedback so premature review
+cannot bypass implementation or certification. A committed recovery that needs
+additional in-scope edits MUST commit those edits before requesting
+certification; an already-satisfying delta MUST NOT receive an empty or duplicate
+commit. Legacy review-head refresh remains best effort and MUST NOT make a
+temporary remote failure a new dispatch blocker.
 
 A runtime MAY certify commits after the last MIU checkpoint only for an
 authoritative, signed review-rework dispatch bound to the same issue, branch,
