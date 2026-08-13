@@ -115,18 +115,18 @@ defmodule SymphonyElixir.TestSupport.ExtensionsAuditFixture do
           hooks:
             - id: delivery.workspace_ready_before_model
               max_changed_lines: 8
-              prototype_patch_sha256: #{String.duplicate("1", 64)}
+              prototype_patch_sha256: #{String.duplicate("a", 64)}
         - path: elixir/lib/symphony_elixir/codex/app_server.ex
           max_changed_lines: 25
           required: false
-          expected_patch_sha256: #{String.duplicate("2", 64)}
+          expected_patch_sha256: #{String.duplicate("b", 64)}
           hooks:
             - id: authorization.immutable_turn_context
               max_changed_lines: 24
-              prototype_patch_sha256: #{String.duplicate("3", 64)}
+              prototype_patch_sha256: #{String.duplicate("c", 64)}
             - id: observer.after_event_assembly
               max_changed_lines: 1
-              prototype_patch_sha256: #{String.duplicate("4", 64)}
+              prototype_patch_sha256: #{String.duplicate("a", 64)}
       """
 
     manifest =
@@ -139,20 +139,32 @@ defmodule SymphonyElixir.TestSupport.ExtensionsAuditFixture do
   end
 
   def patch_sha256!(root, path) do
-    patch =
-      git!(root, [
-        "diff",
-        "--no-ext-diff",
-        "--no-renames",
-        "--no-color",
-        "--full-index",
-        "--unified=3",
-        git!(root, ["rev-list", "--max-parents=0", "HEAD"]),
-        "--",
-        path
-      ])
+    baseline = git!(root, ["rev-list", "--max-parents=0", "HEAD"])
 
-    :crypto.hash(:sha256, patch <> if(patch == "", do: "", else: "\n"))
+    command =
+      @git_config ++
+        [
+          "-C",
+          root,
+          "diff",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          "--no-color",
+          "--full-index",
+          "--unified=3",
+          baseline,
+          "--",
+          path
+        ]
+
+    patch =
+      case System.cmd("git", command, stderr_to_stdout: true, env: @git_env) do
+        {output, 0} -> output
+        {output, status} -> flunk("git diff failed with #{status}: #{output}")
+      end
+
+    :crypto.hash(:sha256, patch)
     |> Base.encode16(case: :lower)
   end
 

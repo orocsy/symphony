@@ -206,7 +206,7 @@ mistakenly updated.
 For each registered file, the audit runs the equivalent argument-list command:
 
 ```text
-git -C <root> diff --no-ext-diff --no-renames --no-color --full-index --unified=3 \
+git -C <root> diff --no-ext-diff --no-textconv --no-renames --no-color --full-index --unified=3 \
   <baseline_commit> -- <registered_path>
 ```
 
@@ -216,8 +216,8 @@ complete index-plus-worktree checkout, so an uncommitted kernel edit cannot
 bypass the audit. On a clean integration or CI checkout this is byte-identical
 to comparing the baseline with `HEAD`. The baseline is immutable, full object
 IDs remove abbreviation variance, the path is validated and separated by `--`,
-external diff drivers and rename heuristics are disabled, and Git configuration
-is isolated by the existing audit environment.
+external diff drivers, text-conversion filters, and rename heuristics are
+disabled, and Git configuration is isolated by the existing audit environment.
 
 Changed lines are additions plus deletions from `--numstat`. A binary marker,
 malformed row, duplicate row, unexpected path, non-zero Git status, or output

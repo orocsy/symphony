@@ -32,7 +32,9 @@ defmodule SymphonyElixir.ExtensionsAuditBudgetTest do
       String.replace(
         valid,
         "hooks:\n",
-        "hooks:\n            - id: duplicate\n              id: duplicate\n              max_changed_lines: 1\n              prototype_patch_sha256: #{String.duplicate("a", 64)}\n", global: false),
+        "hooks:\n            - id: duplicate\n              id: duplicate\n              max_changed_lines: 1\n              prototype_patch_sha256: #{String.duplicate("a", 64)}\n",
+        global: false
+      ),
       String.replace(valid, "kernel_root: elixir/lib/symphony_elixir", "kernel_root: ../outside"),
       String.replace(valid, "path: #{@orchestrator}", "path: /tmp/orchestrator.ex"),
       String.replace(valid, "prototype_checkpoint: #{String.duplicate("b", 40)}", "prototype_checkpoint: HEAD"),
@@ -53,6 +55,53 @@ defmodule SymphonyElixir.ExtensionsAuditBudgetTest do
                :budget_manifest_field_invalid
              ]
     end)
+  end
+
+  test "returns typed findings for manifest boundary shapes and unreadable files" do
+    %{root: root} = create_budget_fixture!()
+    path = Path.join(root, "UPSTREAM_PATCH_BUDGET.yml")
+    valid = File.read!(path)
+    header = valid |> String.split("files:\n", parts: 2) |> hd()
+
+    hook_block =
+      ~r/    hooks:\n      - id: dispatch\.admission_before_worker_selection\n        max_changed_lines: 7\n        prototype_patch_sha256: [0-9a-f]{64}/
+
+    invalid_sources = [
+      {:top_sequence, "- baseline\n", :budget_manifest_invalid_yaml},
+      {:multiple_documents, "---\n{}\n---\n{}\n", :budget_manifest_invalid_yaml},
+      {:empty_sequence, "[]\n", :budget_manifest_invalid_yaml},
+      {:missing_schema, String.replace(valid, "schema_version: 1\n", ""), :budget_manifest_field_invalid},
+      {:unsupported_schema, String.replace(valid, "schema_version: 1", "schema_version: 2"), :budget_manifest_schema_unsupported},
+      {:files_not_list, header <> "files: invalid\n", :budget_manifest_field_invalid},
+      {:file_not_mapping, header <> "files:\n  - invalid\n", :budget_manifest_field_invalid},
+      {:file_path_not_string, String.replace(valid, "path: #{@orchestrator}", "path: 1", global: false), :budget_manifest_field_invalid},
+      {:hooks_not_list, Regex.replace(hook_block, valid, "    hooks: invalid", global: false), :budget_manifest_field_invalid},
+      {:hook_not_mapping, Regex.replace(hook_block, valid, "    hooks:\n      - invalid", global: false), :budget_manifest_field_invalid},
+      {:invalid_hook_field, String.replace(valid, "      - id: dispatch.admission_before_worker_selection", "      - id: ''"), :budget_manifest_field_invalid},
+      {:non_string_duplicate_key,
+       String.replace(
+         valid,
+         "files:\n  - path: #{@orchestrator}",
+         "files:\n  - 1: value\n    1: duplicate\n  - path: #{@orchestrator}"
+       ), :budget_manifest_invalid_yaml}
+    ]
+
+    Enum.each(invalid_sources, fn {label, source, expected_code} ->
+      File.write!(path, source)
+
+      assert {:error, [%Finding{code: ^expected_code} | _]} = ExtensionsAudit.verify_budget(root),
+             "unexpected result for #{label}"
+    end)
+
+    File.rm!(path)
+    assert {:error, [%Finding{code: :budget_manifest_missing}]} = ExtensionsAudit.verify_budget(root)
+
+    File.mkdir!(path)
+
+    assert {:error, [%Finding{code: :budget_manifest_unreadable, detail: detail}]} =
+             ExtensionsAudit.verify_budget(root)
+
+    assert is_binary(detail)
   end
 
   test "rejects a budget baseline that differs from UPSTREAM_BASE" do
@@ -160,6 +209,101 @@ defmodule SymphonyElixir.ExtensionsAuditBudgetTest do
              ExtensionsAudit.verify_budget(root, git: failing_git)
 
     refute detail =~ "/private/operator/repo"
+  end
+
+  test "fails closed on mismatched, unavailable, and malformed Git evidence" do
+    %{root: root} = create_budget_fixture!()
+
+    wrong_root_git = fn executable, args, opts ->
+      if Enum.take(args, -2) == ["rev-parse", "--show-toplevel"] do
+        {"/different/repository\n", 0}
+      else
+        System.cmd(executable, args, opts)
+      end
+    end
+
+    assert {:error, [%Finding{code: :budget_git_unavailable}]} =
+             ExtensionsAudit.verify_budget(root, git: wrong_root_git)
+
+    missing_git = fn _executable, _args, _opts -> :erlang.error(:enoent) end
+
+    assert {:error, [%Finding{code: :budget_git_unavailable, detail: "git executable not found on PATH"}]} =
+             ExtensionsAudit.verify_budget(root, git: missing_git)
+
+    for output <- [
+          "R100\told.ex\tnew.ex\n",
+          "M\t#{@orchestrator}\nM\t#{@orchestrator}\n"
+        ] do
+      malformed_git = fn executable, args, opts ->
+        if "--name-status" in args do
+          {output, 0}
+        else
+          System.cmd(executable, args, opts)
+        end
+      end
+
+      assert {:error, [%Finding{code: :budget_git_unavailable}]} =
+               ExtensionsAudit.verify_budget(root, git: malformed_git)
+    end
+  end
+
+  test "rejects registered paths absent from the pinned kernel tree" do
+    %{root: root, baseline: baseline} = create_budget_fixture!()
+    missing = "elixir/lib/symphony_elixir/missing.ex"
+    write_budget_manifest!(root, baseline, %{@orchestrator => missing})
+
+    assert {:error, findings} = ExtensionsAudit.verify_budget(root)
+    assert Enum.any?(findings, &match?(%Finding{code: :budget_manifest_field_invalid, field: ^missing}, &1))
+  end
+
+  test "rejects binary and malformed numstat evidence without reading a patch" do
+    %{root: root} = create_budget_fixture!()
+    target = Path.join(root, @orchestrator)
+    File.write!(target, <<0, 1, 2, 3>>)
+
+    for numstat <- [
+          "-\t-\t#{@orchestrator}\n",
+          "1\tbogus\t#{@orchestrator}\n",
+          "1\t0\twrong.ex\n",
+          "",
+          "1\t0\t#{@orchestrator}\n1\t0\t#{@orchestrator}\n"
+        ] do
+      git = fn executable, args, opts ->
+        if "--numstat" in args do
+          {numstat, 0}
+        else
+          System.cmd(executable, args, opts)
+        end
+      end
+
+      assert {:error, findings} = ExtensionsAudit.verify_budget(root, git: git)
+
+      if String.starts_with?(numstat, "-\t-") do
+        assert [%Finding{code: :kernel_patch_binary, field: @orchestrator}] = findings
+      else
+        assert [%Finding{code: :budget_git_unavailable, field: "git"}] = findings
+      end
+    end
+  end
+
+  test "rejects duplicate file paths and hook IDs before invoking Git" do
+    %{root: root} = create_budget_fixture!()
+    source = File.read!(Path.join(root, "UPSTREAM_PATCH_BUDGET.yml"))
+    duplicate_path = String.replace(source, "path: elixir/lib/symphony_elixir/agent_runner.ex", "path: #{@orchestrator}")
+
+    duplicate_hook =
+      String.replace(
+        source,
+        "id: delivery.workspace_ready_before_model",
+        "id: dispatch.admission_before_worker_selection"
+      )
+
+    Enum.each([duplicate_path, duplicate_hook], fn invalid ->
+      File.write!(Path.join(root, "UPSTREAM_PATCH_BUDGET.yml"), invalid)
+
+      assert {:error, [%Finding{code: :budget_manifest_field_invalid} | _]} =
+               ExtensionsAudit.verify_budget(root, git: fn _, _, _ -> flunk("duplicates reached Git") end)
+    end)
   end
 
   defp collect_invocations(acc) do

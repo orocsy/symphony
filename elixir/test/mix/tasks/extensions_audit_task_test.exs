@@ -135,5 +135,11 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
     assert_raise Mix.Error, ~r/invalid extensions.audit arguments/, fn ->
       Audit.run(["--unknown"])
     end
+
+    Mix.Task.reenable("extensions.audit")
+
+    assert_raise Mix.Error, ~r/extensions.audit --only accepts baseline or budget/, fn ->
+      Audit.run(["--only", "unknown"])
+    end
   end
 end
