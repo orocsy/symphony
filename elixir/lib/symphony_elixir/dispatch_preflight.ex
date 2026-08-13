@@ -674,6 +674,10 @@ defmodule SymphonyElixir.DispatchPreflight do
       match?({:unknown, _reason}, pending_miu_commit_state) ->
         "handoff_recovery"
 
+      requirements["runtime_contract_status"] == "structured" and
+          pending_miu_commit_state == :no_pending_miu ->
+        "handoff_recovery"
+
       match?({:no_committed_delta, _snapshot}, pending_miu_commit_state) and
           clean_worktree?(workspace) ->
         "fresh_implementation"
@@ -1506,6 +1510,16 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_first_task(
+         [],
+         %{"runtime_contract_status" => "structured"},
+         _workspace,
+         _issue,
+         :no_pending_miu
+       ) do
+    "Recover final handoff for the fully certified Runtime Contract. Do not edit product files or create another MIU commit. Keep the worktree clean, push the canonical integration branch, verify local HEAD matches its upstream, ensure the PR exists against the declared base branch, append the exact handoff.requested event from the Runtime Contract final handoff gate, and stop so Symphony can run final validation."
+  end
+
+  defp handoff_recovery_first_task(
          _open_corrections,
          requirements,
          workspace,
@@ -2111,7 +2125,7 @@ defmodule SymphonyElixir.DispatchPreflight do
       - Preflight file: `#{@preflight_path}`
       - Branch: `#{preflight["branch"] || "unknown"}`
       - PR: #{review["pr_url"] || review["pr_number"] || "unknown"}
-      - Worker-required checkpoint: follow the active Runtime Contract gate and append only its exact event (`miu.completion_requested` for a remaining MIU or `handoff.requested` after all MIUs are certified).
+      - Worker-required checkpoint: follow the active Runtime Contract gate and append only its exact event.
       - Runtime preflight is not worker progress and is not proof that certification, push, or review handoff is complete.
       - First task: #{preflight["first_task"]}
       - Open Orocsy corrections: #{format_corrections(open_corrections)}
@@ -2196,6 +2210,12 @@ defmodule SymphonyElixir.DispatchPreflight do
          "pending_miu_commit_state" => %{"status" => "committed_delta"}
        }) do
     "- The pending MIU already has a committed delta. Inspect only the concrete paths named above. If missing in-scope behavior requires edits, create one clean follow-up micro commit containing only those edits. If the existing delta satisfies acceptance, do not create another or empty commit. Append `miu.completion_requested` only after the resulting delta is committed, then stop without pushing."
+  end
+
+  defp structured_recovery_state_limit(%{
+         "pending_miu_commit_state" => %{"status" => "no_pending_miu"}
+       }) do
+    "- Every MIU is already certified. Do not edit product files or create another MIU commit. Preserve the clean certified head and perform only the final push, PR, and `handoff.requested` sequence supplied by the gate."
   end
 
   defp structured_recovery_state_limit(_preflight) do

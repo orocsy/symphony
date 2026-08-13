@@ -9758,6 +9758,112 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight routes fully certified workspace recreation to final handoff" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-certified-recreated-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      origin = Path.join(test_root, "origin.git")
+      workspace = Path.join(test_root, "workspace")
+      branch = "orocsy/cod-certified-recreated"
+
+      {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["init", "-b", "main", workspace], stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+      {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace)
+      target = Path.join(workspace, "tests/unit/certified.test.ts")
+      File.mkdir_p!(Path.dirname(target))
+      File.write!(target, "test('certified', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/certified.test.ts"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Implement certified MIU"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: workspace)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      issue = %Issue{
+        id: "issue-cod-certified-recreated",
+        identifier: "COD-CERTIFIED-RECREATED",
+        title: "Recover fully certified handoff",
+        state: "In Progress",
+        branch_name: branch,
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: #{branch}
+        dependencies: []
+        mius:
+          - id: COD-CERTIFIED-RECREATED-MIU-1
+            write_scope:
+              - tests/unit/**
+            validations:
+              - git diff --check
+        final_validations:
+          - git diff --check
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, %{"mode" => "handoff_recovery"}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert {:ok, certificate} =
+               SymphonyElixir.ValidationController.certify_miu(
+                 issue,
+                 workspace,
+                 "COD-CERTIFIED-RECREATED-MIU-1"
+               )
+
+      certified_head = certificate["head_sha"]
+      assert [_] = SymphonyElixir.ValidationController.certified_miu_ids(issue, workspace)
+
+      File.rm_rf!(workspace)
+
+      {_output, 0} =
+        System.cmd("git", ["clone", "--branch", branch, origin, workspace], stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+      refute File.exists?(Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json"))
+
+      assert ["COD-CERTIFIED-RECREATED-MIU-1"] ==
+               SymphonyElixir.ValidationController.certified_miu_ids(issue, workspace)
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "no_pending_miu"
+      assert preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert preflight["certification_base_sha"] == certified_head
+      assert preflight["first_task"] =~ "Recover final handoff"
+      assert preflight["first_task"] =~ "handoff.requested"
+      assert preflight["first_task"] =~ "Do not edit product files or create another MIU commit"
+      refute preflight["first_task"] =~ "create one clean local micro commit"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Runtime Contract final handoff gate"
+      assert prompt =~ "Mode: structured handoff recovery"
+      assert prompt =~ "handoff.requested"
+      refute prompt =~ "Symphony fresh-MIU micro-worker"
+      refute prompt =~ "miu.completion_requested"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight reuses a signed baseline after a contract revision" do
     test_root =
       Path.join(

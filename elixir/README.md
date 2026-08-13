@@ -121,7 +121,11 @@ controller-owned state outside each issue workspace, allowing later-MIU
 boundaries to survive workspace recreation. Override that state root with
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR`, pointing it to an operator-owned path
 outside every issue workspace. Terminal workspace cleanup removes the matching
-hashed evidence directory; nonterminal workspace recreation preserves it.
+hashed evidence directory; nonterminal workspace recreation preserves it. A
+recreated workspace whose durable chain already certifies every MIU enters
+structured final-handoff recovery even when its local preflight and PR evidence
+are absent. That recovery permits only clean push/PR/`handoff.requested` work,
+not fresh implementation or another MIU commit.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes
