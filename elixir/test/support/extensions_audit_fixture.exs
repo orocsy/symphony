@@ -65,6 +65,97 @@ defmodule SymphonyElixir.TestSupport.ExtensionsAuditFixture do
     %{root: root, baseline: baseline, head: baseline}
   end
 
+  def create_budget_fixture! do
+    root = create_git_repo!()
+
+    files = %{
+      "elixir/lib/symphony_elixir/orchestrator.ex" => "defmodule Fixture.Orchestrator do\nend\n",
+      "elixir/lib/symphony_elixir/agent_runner.ex" => "defmodule Fixture.AgentRunner do\nend\n",
+      "elixir/lib/symphony_elixir/codex/app_server.ex" => "defmodule Fixture.AppServer do\nend\n",
+      "elixir/lib/symphony_elixir/unregistered.ex" => "defmodule Fixture.Unregistered do\nend\n"
+    }
+
+    Enum.each(files, fn {path, body} ->
+      target = Path.join(root, path)
+      File.mkdir_p!(Path.dirname(target))
+      File.write!(target, body)
+    end)
+
+    git!(root, ["add", "elixir/lib/symphony_elixir"])
+    git!(root, ["commit", "-m", "upstream kernel baseline"])
+    baseline = git!(root, ["rev-parse", "HEAD"])
+    write_manifest!(root, baseline)
+    write_budget_manifest!(root, baseline)
+
+    %{root: root, baseline: baseline, head: baseline, files: files}
+  end
+
+  def write_budget_manifest!(root, baseline, replacements \\ %{}) do
+    manifest =
+      """
+      schema_version: 1
+      baseline_commit: #{baseline}
+      kernel_root: elixir/lib/symphony_elixir
+      prototype_checkpoint: #{String.duplicate("b", 40)}
+      prototype_total_patch_sha256: #{String.duplicate("c", 64)}
+      total_max_changed_lines: 40
+      files:
+        - path: elixir/lib/symphony_elixir/orchestrator.ex
+          max_changed_lines: 7
+          required: false
+          expected_patch_sha256: #{String.duplicate("d", 64)}
+          hooks:
+            - id: dispatch.admission_before_worker_selection
+              max_changed_lines: 7
+              prototype_patch_sha256: #{String.duplicate("e", 64)}
+        - path: elixir/lib/symphony_elixir/agent_runner.ex
+          max_changed_lines: 8
+          required: false
+          expected_patch_sha256: #{String.duplicate("f", 64)}
+          hooks:
+            - id: delivery.workspace_ready_before_model
+              max_changed_lines: 8
+              prototype_patch_sha256: #{String.duplicate("1", 64)}
+        - path: elixir/lib/symphony_elixir/codex/app_server.ex
+          max_changed_lines: 25
+          required: false
+          expected_patch_sha256: #{String.duplicate("2", 64)}
+          hooks:
+            - id: authorization.immutable_turn_context
+              max_changed_lines: 24
+              prototype_patch_sha256: #{String.duplicate("3", 64)}
+            - id: observer.after_event_assembly
+              max_changed_lines: 1
+              prototype_patch_sha256: #{String.duplicate("4", 64)}
+      """
+
+    manifest =
+      Enum.reduce(replacements, manifest, fn {needle, replacement}, source ->
+        String.replace(source, needle, replacement)
+      end)
+
+    File.write!(Path.join(root, "UPSTREAM_PATCH_BUDGET.yml"), manifest)
+    manifest
+  end
+
+  def patch_sha256!(root, path) do
+    patch =
+      git!(root, [
+        "diff",
+        "--no-ext-diff",
+        "--no-renames",
+        "--no-color",
+        "--full-index",
+        "--unified=3",
+        git!(root, ["rev-list", "--max-parents=0", "HEAD"]),
+        "--",
+        path
+      ])
+
+    :crypto.hash(:sha256, patch <> if(patch == "", do: "", else: "\n"))
+    |> Base.encode16(case: :lower)
+  end
+
   def create_merge_fixture!(first_parent) when first_parent in [:openai, :orocsy] do
     root = create_git_repo!()
     baseline = commit_baseline!(root)

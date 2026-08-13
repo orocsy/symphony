@@ -16,10 +16,11 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
     :ok
   end
 
-  test "runs the baseline check by default and prints stable success output" do
-    %{root: root, baseline: baseline} = create_baseline_fixture!()
+  test "runs baseline then budget by default and prints stable success output" do
+    %{root: root, baseline: baseline} = create_budget_fixture!()
     tree = git!(root, ["rev-parse", "#{baseline}^{tree}"])
     elixir_tree = git!(root, ["rev-parse", "#{baseline}:elixir"])
+    head = git!(root, ["rev-parse", "HEAD"])
 
     output =
       capture_io(fn ->
@@ -27,11 +28,12 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
       end)
 
     assert output ==
-             "extensions.audit baseline: ok commit=#{baseline} tree=#{tree} elixir_tree=#{elixir_tree} first_parent=true\n"
+             "extensions.audit baseline: ok commit=#{baseline} tree=#{tree} elixir_tree=#{elixir_tree} first_parent=true\n" <>
+               "extensions.audit budget: ok baseline=#{baseline} head=#{head} changed_kernel_files=0 changed_lines=0 max_changed_lines=40\n"
   end
 
-  test "accepts only baseline for --only in OXE-0.1" do
-    %{root: root} = create_baseline_fixture!()
+  test "accepts baseline or budget for --only" do
+    %{root: root} = create_budget_fixture!()
 
     output =
       capture_io(fn ->
@@ -42,13 +44,12 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
 
     Mix.Task.reenable("extensions.audit")
 
-    assert_raise Mix.Error, ~r/--only accepts only baseline/, fn ->
-      Audit.run(["--only", "budget", "--repo-root", root])
-    end
+    output = capture_io(fn -> assert :ok = Audit.run(["--only", "budget", "--repo-root", root]) end)
+    assert output =~ "extensions.audit budget: ok"
   end
 
   test "resolves the default root from the Mix project file" do
-    %{root: root} = create_baseline_fixture!()
+    %{root: root} = create_budget_fixture!()
     project_file = Path.join([root, "elixir", "mix.exs"])
     File.mkdir_p!(Path.dirname(project_file))
 
@@ -63,6 +64,38 @@ defmodule Mix.Tasks.Extensions.AuditTaskTest do
     output = capture_io(fn -> assert :ok = Audit.run([]) end)
 
     assert output =~ "extensions.audit baseline: ok"
+    assert output =~ "extensions.audit budget: ok"
+  end
+
+  test "does not run budget when the default baseline check fails" do
+    %{root: root} = create_budget_fixture!()
+    File.write!(Path.join(root, "UPSTREAM_BASE.yml"), "schema_version: 1\n")
+
+    error_output =
+      capture_io(:stderr, fn ->
+        assert_raise Mix.Error, "extensions.audit baseline failed", fn ->
+          Audit.run(["--repo-root", root])
+        end
+      end)
+
+    assert error_output =~ "extensions.audit baseline: error"
+    refute error_output =~ "extensions.audit budget:"
+  end
+
+  test "raises once with deterministic sanitized budget findings" do
+    %{root: root} = create_budget_fixture!()
+    path = Path.join(root, "elixir/lib/symphony_elixir/unregistered.ex")
+    File.write!(path, "defmodule Fixture.Unregistered do\n  def changed, do: true\nend\n")
+
+    error_output =
+      capture_io(:stderr, fn ->
+        assert_raise Mix.Error, "extensions.audit budget failed", fn ->
+          Audit.run(["--only", "budget", "--repo-root", root])
+        end
+      end)
+
+    assert Snapshot.strip_ansi(error_output) ==
+             "extensions.audit budget: error code=kernel_path_unregistered field=\"elixir/lib/symphony_elixir/unregistered.ex\"\n"
   end
 
   test "raises once with deterministic typed findings" do

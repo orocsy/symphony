@@ -1,0 +1,34 @@
+schema_version: 1
+baseline_commit: f8e8b8a670c799f6e0ade7a8c25c4bf4a4a56ec7
+kernel_root: elixir/lib/symphony_elixir
+prototype_checkpoint: b534d9d08bfb8559770746d0cec72022337c7189
+prototype_total_patch_sha256: 49539e03a54e86599551ff497add3efbf1e0790aabdb62332f5b994d821d3972
+total_max_changed_lines: 40
+files:
+  - path: elixir/lib/symphony_elixir/orchestrator.ex
+    max_changed_lines: 7
+    required: false
+    expected_patch_sha256: 33ec698629bad5a0f6fc59e2297aa33df058aa1ded771515ee366f166121c90e
+    hooks:
+      - id: dispatch.admission_before_worker_selection
+        max_changed_lines: 7
+        prototype_patch_sha256: 33ec698629bad5a0f6fc59e2297aa33df058aa1ded771515ee366f166121c90e
+  - path: elixir/lib/symphony_elixir/agent_runner.ex
+    max_changed_lines: 8
+    required: false
+    expected_patch_sha256: 317cacea7600e5a30f6cd57c202550df21a3a1cecc2b8daff3d4a2462c0e8336
+    hooks:
+      - id: delivery.workspace_ready_before_model
+        max_changed_lines: 8
+        prototype_patch_sha256: 317cacea7600e5a30f6cd57c202550df21a3a1cecc2b8daff3d4a2462c0e8336
+  - path: elixir/lib/symphony_elixir/codex/app_server.ex
+    max_changed_lines: 25
+    required: false
+    expected_patch_sha256: 627495f2c55450f127a7e6498c481185c04922b989e7ae569a1126f11ab6271c
+    hooks:
+      - id: authorization.immutable_turn_context
+        max_changed_lines: 24
+        prototype_patch_sha256: 0665701f982e9238532b0e5c28cfc8e2167b7cb3fa0c9edd0de5740a8b06a6bf
+      - id: observer.after_event_assembly
+        max_changed_lines: 1
+        prototype_patch_sha256: ef86399e4d7b6cc31cc62114ffc21cd4263daf1d1c3c159b121960462d889538
