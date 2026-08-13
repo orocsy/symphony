@@ -1174,6 +1174,95 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_write_scope:COD-901-MIU-1:this is explanatory prose" in errors
   end
 
+  test "runtime contract rejects MIU read and write scopes fully covered by denied scope" do
+    issue = %Issue{
+      id: "issue-contradictory-runtime-contract",
+      identifier: "COD-276",
+      title: "Contradictory discover test contract",
+      state: "In Progress",
+      description: """
+      ## Runtime Contract
+
+      ```yaml
+      schema_version: 1
+      ticket_type: test-spec
+      base_branch: main
+      integration_branch: orocsy/cod-276
+      dependencies: []
+      denied_scope:
+        - src/**
+        - tests/private/**
+      mius:
+        - id: COD-276-MIU-1
+          write_scope:
+            - tests/private/desktop-discover.test.ts
+          read_context:
+            - src/features/discover/**
+            - tests/fixtures/menu.ts
+          validations:
+            - pnpm test
+      final_validations:
+        - pnpm test
+      review:
+        authority: github_codex
+        require_current_head: true
+      ```
+      """
+    }
+
+    assert {:error, {:invalid_runtime_contract, errors}} =
+             SymphonyElixir.IssueRequirements.from_issue(issue)
+
+    assert "write_scope_denied:COD-276-MIU-1:tests/private/desktop-discover.test.ts" in errors
+    assert "read_context_denied:COD-276-MIU-1:src/features/discover/**" in errors
+    refute "read_context_denied:COD-276-MIU-1:tests/fixtures/menu.ts" in errors
+
+    plain_directory_description =
+      issue.description
+      |> String.replace("src/**", "src/features/discover")
+      |> String.replace("src/features/discover/**", "src/features/discover/DiscoverWorkspace.tsx")
+
+    assert {:error, plain_errors} =
+             SymphonyElixir.RuntimeContract.compile(plain_directory_description)
+
+    assert "read_context_denied:COD-276-MIU-1:src/features/discover/DiscoverWorkspace.tsx" in plain_errors
+
+    leading_relative_description =
+      String.replace(
+        plain_directory_description,
+        "- src/features/discover/DiscoverWorkspace.tsx",
+        "- ./src/features/discover/DiscoverWorkspace.tsx"
+      )
+
+    assert {:error, leading_relative_errors} =
+             SymphonyElixir.RuntimeContract.compile(leading_relative_description)
+
+    assert "read_context_denied:COD-276-MIU-1:./src/features/discover/DiscoverWorkspace.tsx" in leading_relative_errors
+
+    punctuation_distinct_description =
+      issue.description
+      |> String.replace("        - src/**\n", "")
+      |> String.replace(
+        "tests/private/**",
+        "tests/private/desktop-discover.test.ts."
+      )
+
+    assert {:error, punctuation_distinct_errors} =
+             SymphonyElixir.RuntimeContract.compile(punctuation_distinct_description)
+
+    refute "write_scope_denied:COD-276-MIU-1:tests/private/desktop-discover.test.ts" in punctuation_distinct_errors
+
+    internal_wildcard_description =
+      issue.description
+      |> String.replace("src/**", "src/private/*.ts")
+      |> String.replace("src/features/discover/**", "src/private/config.ts")
+
+    assert {:error, internal_wildcard_errors} =
+             SymphonyElixir.RuntimeContract.compile(internal_wildcard_description)
+
+    assert "read_context_denied:COD-276-MIU-1:src/private/config.ts" in internal_wildcard_errors
+  end
+
   test "runtime contract rejects glob metacharacters the scope matcher does not implement" do
     issue = %Issue{
       id: "issue-unsupported-scope-glob",
@@ -1448,6 +1537,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert "invalid_miu" in errors
     assert "invalid_miu_id" in errors
     assert Enum.any?(errors, &String.starts_with?(&1, "invalid_denied_scope:"))
+
+    null_mius_description = String.replace(issue.description, "mius:\n  - bad", "mius: null")
+
+    assert {:error, null_miu_errors} =
+             SymphonyElixir.RuntimeContract.compile(null_mius_description)
+
+    assert "invalid_mius" in null_miu_errors
   end
 
   test "runtime contract rejects malformed certification baselines" do

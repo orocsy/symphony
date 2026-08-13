@@ -45,13 +45,67 @@ other flags, and unbounded history remain denied.
 Structured handoff recovery may read a file named directly by the active Runtime Contract's
 `write_scope` or `read_context`. The allowance is read-only and exact-path: every parsed operand
 must be declared, derived/imported context is not promoted, shell chains and substitutions remain
-denied, and an operator-configured command ban always takes precedence. When a denied compound
+denied, and an operator-configured command ban always takes precedence. Existing targets must
+canonicalize to regular files inside the workspace; a missing declared target may be probed only
+when its canonical path remains inside the workspace. Read operands are canonicalized before both
+allow- and deny-scope checks, so an allowed lexical prefix cannot traverse into a denied target.
+When a denied compound
 read is recoverable, the worker is instructed to split it into separate single-purpose commands;
 the runtime never authorizes the compound command itself. In `handoff_recovery` only, the runtime
 may also admit the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
 `.codex/agentic/issue-briefs/<active-id>.md`. Explicit denied scope takes precedence, other issue
 briefs and dispatch modes receive no such authority, and the target is revalidated as a regular
 file inside the workspace immediately before execution.
+
+For structured Runtime Contracts, dispatch follows ticket type and certified MIU lifecycle before
+generic Git handoff heuristics. Integration-check tickets retain integration mode. A clean branch
+with a pending MIU starts fresh implementation only when no committed delta exists after that MIU's
+certification base; otherwise Symphony recovers and certifies the existing checkpoint. If Git or
+controller evidence cannot prove the absence of a committed delta, dispatch fails closed instead of
+restarting implementation. Branch synchronization preserves the pre-sync authoritative branch head
+when it precedes the synchronized tip. A recreated workspace instead derives the first MIU base from
+the integration branch's merge base with the declared base branch, so a pushed commit cannot erase
+its own delta. The immutable snapshot binds the pending MIU, base and head commits, and concrete
+paths; undeclared or explicitly denied committed paths also fail closed. That unsafe evidence keeps
+priority when live corrections refresh a prompt, so correction text cannot restore edit or commit
+authority. A structured pending-MIU lifecycle state also precedes premature PR feedback; legacy
+review rework keeps its best-effort branch refresh when the remote is temporarily unavailable.
+Recovery prompts name an actual committed path, never a wildcard scope. When that committed delta
+needs a missing in-scope fix, the worker creates one conditional follow-up micro commit before
+requesting certification; an already-complete, clean delta receives no duplicate or empty commit.
+The controller classifies committed, staged, unstaged, and untracked paths together, so in-scope
+dirt must enter that follow-up commit and out-of-scope dirt fails closed. Signed MIU boundaries are
+enumerated across every commit in the uncertified range, so restoring a path at the range endpoint
+cannot hide an undeclared write. A dirty-only pending MIU receives the same structured micro-commit
+and `miu.completion_requested` sequence instead of the legacy push/review handoff. Plain directory
+write scopes authorize descendants consistently in command enforcement, recovery classification,
+and certification; one exact leading `./` path prefix is normalized before conflict checks or
+matching, while leading/trailing whitespace and trailing filename punctuation remain literal so
+`README.md ` and `README.md.` cannot alias `README.md`.
+Fresh structured MIU dispatch advertises the same `miu.completion_requested` checkpoint as its
+execution gate instead of stopping at the legacy `technical-miu-trace` boundary.
+An open retry correction on a safe pending MIU keeps the same `miu.completion_requested`
+certification sequence and cannot fall through to legacy push/review handoff. Any open `block` or
+`escalate` correction takes dispatch to an operator-only checkpoint before fresh implementation or
+review work. A controller-owned block is also enforced at the MIU and handoff certification APIs,
+not only in prompt text: it cannot authorize another edit, validation run, commit, runtime request,
+push, or review handoff. The signed certificates are also
+copied to controller-owned state outside the
+issue workspace and restored after workspace recreation; set
+`SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
+issue workspace to override that state root. Nonterminal recreation preserves this evidence;
+terminal workspace cleanup removes that workspace's hashed durable evidence directory. When the
+restored chain already certifies every MIU, current `HEAD` exactly equals the final MIU
+certificate, and the worktree is clean, dispatch enters structured final-handoff recovery even
+without workspace-local preflight or PR evidence; it authorizes only the clean push, PR, and
+`handoff.requested` sequence, never fresh implementation or another MIU commit. A newer
+post-certification `HEAD` or dirty worktree fails closed for controller/operator reconstruction of
+an authorized review-rework delta.
+
+Observer telemetry writes a non-authoritative per-issue aggregate under
+`.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive
+no-progress attempts, token totals, dominant phase/signature, and latest progress without changing
+dispatch state.
 
 ---
 

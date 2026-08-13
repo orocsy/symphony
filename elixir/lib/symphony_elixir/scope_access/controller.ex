@@ -15,8 +15,6 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   @spec decide(map() | nil, map() | nil, String.t() | nil) :: decision()
   def decide(%{"operation" => operation, "paths" => paths} = request, policy, workspace)
       when operation in ["read", "search"] and is_list(paths) do
-    active_patch = active_policy_patch(workspace, request, policy)
-
     cond do
       Map.get(request, "broad") == true ->
         {:block, correction(request, "broad_scope_drift", "The denied command asks for broad project discovery.")}
@@ -24,6 +22,38 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       paths == [] ->
         {:block, correction(request, "missing_exact_path", "The denied command did not name an exact workspace file.")}
 
+      true ->
+        case canonical_read_request(request, workspace) do
+          {:ok, canonical_request} ->
+            decide_canonical_read(canonical_request, policy, workspace)
+
+          {:error, reason_class} ->
+            {:block,
+             correction(
+               request,
+               reason_class,
+               "The requested read is not a canonical regular or missing workspace path."
+             )}
+        end
+    end
+  end
+
+  def decide(%{"operation" => "write"} = request, _policy, _workspace) do
+    {:escalate, correction(request, "write_scope_expansion_requires_operator", "The denied command would broaden write scope.")}
+  end
+
+  def decide(%{} = request, _policy, _workspace) do
+    {:block, correction(request, "unclassified_scope_request", "The denied command could not be safely auto-unblocked.")}
+  end
+
+  def decide(_request, _policy, _workspace) do
+    {:block, correction(%{}, "missing_scope_request", "No parseable scope access request was available.")}
+  end
+
+  defp decide_canonical_read(%{"paths" => paths} = request, policy, workspace) do
+    active_patch = active_policy_patch(workspace, request, policy)
+
+    cond do
       Enum.any?(paths, &denied_scope_path?(&1, policy)) ->
         {:block, correction(request, "denied_scope", "An explicit denied-scope rule covers the requested path.")}
 
@@ -49,17 +79,41 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     end
   end
 
-  def decide(%{"operation" => "write"} = request, _policy, _workspace) do
-    {:escalate, correction(request, "write_scope_expansion_requires_operator", "The denied command would broaden write scope.")}
+  defp canonical_read_request(%{"paths" => paths} = request, workspace)
+       when is_list(paths) and is_binary(workspace) do
+    paths
+    |> Enum.reduce_while([], fn path, acc ->
+      case canonical_workspace_relative_path(workspace, path) do
+        {:ok, canonical_path} -> {:cont, [canonical_path | acc]}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:error, reason} -> {:error, reason}
+      canonical_paths -> {:ok, Map.put(request, "paths", Enum.reverse(canonical_paths))}
+    end
   end
 
-  def decide(%{} = request, _policy, _workspace) do
-    {:block, correction(request, "unclassified_scope_request", "The denied command could not be safely auto-unblocked.")}
+  defp canonical_read_request(_request, _workspace), do: {:error, "not_safe_read_context"}
+
+  defp canonical_workspace_relative_path(workspace, path)
+       when is_binary(workspace) and is_binary(path) do
+    with false <- Path.type(path) == :absolute,
+         {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, canonical_target} <- PathSafety.canonicalize(Path.expand(path, workspace)),
+         true <- File.regular?(canonical_target) or not File.exists?(canonical_target),
+         true <- canonical_target != canonical_workspace,
+         true <- String.starts_with?(canonical_target, canonical_workspace <> "/") do
+      {:ok, Path.relative_to(canonical_target, canonical_workspace)}
+    else
+      _ -> {:error, "not_safe_read_context"}
+    end
+  rescue
+    _error -> {:error, "not_safe_read_context"}
   end
 
-  def decide(_request, _policy, _workspace) do
-    {:block, correction(%{}, "missing_scope_request", "No parseable scope access request was available.")}
-  end
+  defp canonical_workspace_relative_path(_workspace, _path),
+    do: {:error, "not_safe_read_context"}
 
   @spec write_policy_patch(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def write_policy_patch(workspace, %{"patch_id" => patch_id} = patch) when is_binary(workspace) and is_binary(patch_id) do
@@ -129,7 +183,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
 
   defp scope_entry(path, source, reason) do
     %{
-      "path" => normalize_path(path),
+      "path" => normalize_literal_path(path),
       "source" => source,
       "operation" => "read",
       "expires" => "turn",
@@ -181,7 +235,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   end
 
   defp current_review_path?(path, policy) do
-    normalized = normalize_path(path)
+    normalized = normalize_literal_path(path)
 
     normalized in review_feedback_paths(policy) or
       normalized in scope_bundle_paths(policy, "write_scope", ["write", "write-if-conflicted"])
@@ -194,7 +248,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
        )
        when is_binary(path) and is_binary(issue) and is_binary(workspace) do
     safe_issue = String.replace(String.trim(issue), ~r/[^A-Za-z0-9._-]+/, "-")
-    normalized = normalize_path(path)
+    normalized = normalize_literal_path(path)
 
     canonical_issue_brief_path?(normalized, safe_issue) and
       not denied_scope_path?(normalized, policy) and
@@ -206,7 +260,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   defp current_issue_brief_request?(paths, %{"issue" => issue})
        when is_list(paths) and is_binary(issue) do
     safe_issue = String.replace(String.trim(issue), ~r/[^A-Za-z0-9._-]+/, "-")
-    Enum.any?(paths, &canonical_issue_brief_path?(normalize_path(&1), safe_issue))
+    Enum.any?(paths, &canonical_issue_brief_path?(normalize_literal_path(&1), safe_issue))
   end
 
   defp current_issue_brief_request?(_paths, _policy), do: false
@@ -219,7 +273,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   end
 
   defp denied_scope_path?(path, policy) do
-    normalized = normalize_path(path)
+    normalized = normalize_literal_path(path)
 
     policy
     |> scope_bundle()
@@ -234,7 +288,12 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     end)
   end
 
-  defp scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+  @doc false
+  @spec scope_pattern_matches?(term(), term()) :: boolean()
+  def scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+    path = normalize_literal_path(path)
+    scope = normalize_path(scope)
+
     cond do
       scope == "" ->
         false
@@ -261,7 +320,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     _error -> false
   end
 
-  defp scope_pattern_matches?(_path, _scope), do: false
+  def scope_pattern_matches?(_path, _scope), do: false
 
   defp regular_workspace_file?(workspace, relative_path) do
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
@@ -277,20 +336,20 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   end
 
   defp conflict_path?(path, policy) do
-    normalize_path(path) in scope_bundle_paths(policy, "conflict_scope", ["write-if-conflicted", "read"])
+    normalize_literal_path(path) in scope_bundle_paths(policy, "conflict_scope", ["write-if-conflicted", "read"])
   end
 
   defp focused_test_path?(path, policy) do
-    normalized = normalize_path(path)
+    normalized = normalize_literal_path(path)
     normalized in validation_paths(policy) and test_path?(normalized)
   end
 
   defp existing_read_context?(path, policy) do
-    normalize_path(path) in scope_bundle_paths(policy, "read_context", ["read", "search"])
+    normalize_literal_path(path) in scope_bundle_paths(policy, "read_context", ["read", "search"])
   end
 
   defp direct_import_context?(path, policy, workspace) when is_binary(workspace) do
-    normalized = normalize_path(path)
+    normalized = normalize_literal_path(path)
 
     policy
     |> write_scope_paths()
@@ -330,7 +389,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   defp review_feedback_paths(%{"review" => %{"feedback" => feedback}}) when is_list(feedback) do
     feedback
     |> Enum.flat_map(fn
-      %{"path" => path} when is_binary(path) -> [normalize_path(path)]
+      %{"path" => path} when is_binary(path) -> [normalize_literal_path(path)]
       _ -> []
     end)
     |> Enum.reject(&(&1 == ""))
@@ -415,7 +474,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     import_candidates(base)
     |> Enum.filter(&File.regular?/1)
     |> Enum.map(&Path.relative_to(&1, workspace))
-    |> Enum.map(&normalize_path/1)
+    |> Enum.map(&normalize_literal_path/1)
   end
 
   defp resolve_import_specifier(_workspace, _source_path, _specifier), do: []
@@ -494,14 +553,14 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       |> Enum.flat_map(fn
         %{"path" => path, "operation" => operation}
         when is_binary(path) and operation in ["read", "search"] ->
-          [normalize_path(path)]
+          [normalize_literal_path(path)]
 
         _ ->
           []
       end)
       |> Enum.sort()
 
-    requested_paths = request_paths |> Enum.map(&normalize_path/1) |> Enum.sort()
+    requested_paths = request_paths |> Enum.map(&normalize_literal_path/1) |> Enum.sort()
     length(entry_paths) == length(entries) and entry_paths == requested_paths
   end
 
@@ -512,7 +571,13 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   end
 
   defp patch_id(request) do
-    paths = request |> Map.get("paths", []) |> Enum.map(&normalize_path/1) |> Enum.sort() |> Enum.join(",")
+    paths =
+      request
+      |> Map.get("paths", [])
+      |> Enum.map(&normalize_literal_path/1)
+      |> Enum.sort()
+      |> Enum.join(",")
+
     fingerprint = request["command_fingerprint"] || hash("#{request["operation"]}:#{paths}")
     "scope_access_#{fingerprint}_#{hash(paths)}"
   end
@@ -538,7 +603,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       |> tl()
       |> Enum.find(&(&1 != ""))
       |> case do
-        path when is_binary(path) -> [normalize_path(path)]
+        path when is_binary(path) -> [normalize_text_path(path)]
         _ -> []
       end
     end)
@@ -551,15 +616,30 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   defp string_values(value) when is_binary(value), do: [value]
   defp string_values(_value), do: []
 
-  defp normalize_path(path) when is_binary(path) do
+  @doc false
+  @spec normalize_path(term()) :: String.t()
+  def normalize_path(path) when is_binary(path) do
     path
     |> String.trim()
-    |> String.trim_leading("./")
+    |> strip_leading_current_directory()
+  end
+
+  def normalize_path(_path), do: ""
+
+  defp normalize_literal_path(path) when is_binary(path),
+    do: strip_leading_current_directory(path)
+
+  defp normalize_literal_path(_path), do: ""
+
+  defp strip_leading_current_directory("./" <> path), do: path
+  defp strip_leading_current_directory(path), do: path
+
+  defp normalize_text_path(path) do
+    path
+    |> normalize_path()
     |> String.trim_trailing(".")
     |> String.trim_trailing(",")
   end
-
-  defp normalize_path(_path), do: ""
 
   defp test_path?(path) when is_binary(path) do
     String.starts_with?(path, "tests/") or

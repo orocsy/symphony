@@ -93,6 +93,21 @@ defmodule SymphonyElixir.TokenTelemetryTest do
       assert summary["new_commits"] == []
       assert summary["durable_progress_events"] == []
       assert [%{"phase" => "startup", "total_tokens" => 1_000}] = summary["top_phases"]
+
+      aggregate = read_issue_aggregate!(workspace)
+      assert aggregate["attempts"] == 1
+      assert aggregate["consecutive_no_progress_attempts"] == 1
+      assert aggregate["status_counts"] == %{"blocked_no_durable_progress" => 1}
+      assert aggregate["dominant_phase"] == %{"phase" => "startup", "count" => 1_000}
+
+      assert aggregate["dominant_loop_signature"] == %{
+               "signature" => "no_durable_progress",
+               "count" => 1
+             }
+
+      assert aggregate["durable_progress_event_count"] == 0
+      assert is_nil(aggregate["tokens_per_durable_progress_event"])
+      assert is_nil(aggregate["last_durable_progress_at"])
     after
       File.rm_rf(workspace)
     end
@@ -483,6 +498,13 @@ defmodule SymphonyElixir.TokenTelemetryTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> List.last()
+    |> Jason.decode!()
+  end
+
+  defp read_issue_aggregate!(workspace) do
+    workspace
+    |> Path.join(".orocsy/delivery/token-telemetry/issue-aggregate.json")
+    |> File.read!()
     |> Jason.decode!()
   end
 

@@ -51,10 +51,52 @@ MIU commit ranges SHOULD persist the pre-dispatch branch head as signed
 controller evidence bound to the current issue, branch, and contract so a push
 cannot erase the audit baseline and a workspace edit cannot narrow it. A
 recovery contract MAY declare an exact immutable `certification_base_sha` when
-no prior signed baseline exists. A signed same-issue, same-branch baseline takes
-precedence over later contract input. Invalid signed evidence or unsigned legacy
-preflight without an explicit migration baseline MUST fail closed. Local
-workspace `HEAD` alone MUST NOT establish that baseline.
+no prior signed baseline exists. A signed, non-empty same-issue, same-branch
+baseline takes precedence over later contract input and MAY be reused across
+contract or issue-revision refinements when its controller signature, issue,
+branch, and ancestry remain valid. A signed empty value is absence of a baseline
+and MAY be replaced by the explicit migration base, a preceding
+pre-synchronization branch head, or the merge base with the declared base branch
+after workspace recreation. Invalid signed evidence or unsigned legacy preflight
+without an explicit migration baseline MUST fail closed. An already-synchronized
+clean-but-ahead workspace `HEAD` alone MUST NOT establish that baseline.
+Pending-MIU delta classification MUST treat paths covered by `denied_scope` as
+invalid even when a broader MIU write scope also matches them. Unsafe or unknown
+commit evidence MUST retain priority when live corrections refresh the worker
+prompt; a correction cannot restore permission to edit, commit, or request MIU
+certification. While a structured MIU remains pending, its post-sync lifecycle
+state MUST take precedence over current-head PR feedback so premature review
+cannot bypass implementation or certification. A committed recovery that needs
+additional in-scope edits MUST commit those edits before requesting
+certification; an already-satisfying delta MUST NOT receive an empty or duplicate
+commit. Legacy review-head refresh remains best effort and MUST NOT make a
+temporary remote failure a new dispatch blocker.
+Pending-MIU classification MUST include committed, staged, unstaged, and
+untracked paths while excluding runtime-owned `.orocsy` state. In-scope dirty
+paths, including a dirty-only pending MIU, MUST require a clean MIU micro commit
+and `miu.completion_requested` before certification; they MUST NOT enter a
+legacy push/review handoff. Out-of-scope or denied dirty paths MUST fail closed.
+Committed classification and certification MUST audit every path touched by any
+commit in the uncertified MIU range; restoring endpoint contents does not erase
+the write. Plain directory scopes MUST authorize descendants consistently with
+runtime command enforcement, and all scope comparisons MUST apply the same
+single leading-relative-prefix normalization as command enforcement without
+stripping literal leading/trailing whitespace or trailing filename punctuation.
+Read operands MUST be canonicalized before allow- and deny-scope checks, and the
+canonical target MUST be rechecked against both scopes. Fresh structured MIU dispatch MUST name
+`miu.completion_requested` as the required checkpoint and MUST NOT combine a
+commit-and-certify first task with legacy `technical-miu-trace` stop guidance. An open correction
+on a safe pending MIU MUST retain the MIU micro-commit and certification-event
+sequence; it MUST NOT restore legacy push/review authority. Signed MIU boundary evidence MUST survive
+issue-workspace recreation in controller-owned state outside that workspace and
+MUST remain bound to issue identity, branch, contract, revision, and Git
+ancestry before selecting a later pending MIU. Terminal workspace cleanup MUST
+remove that workspace's durable controller-evidence namespace, while nonterminal
+recreation MUST preserve it. Any open `block` or `escalate` correction MUST take
+dispatch to an operator-only checkpoint before implementation or review work.
+Controller-owned `block` or `escalate` corrections MUST additionally be enforced
+by MIU and handoff certification controllers; they MUST NOT authorize another
+edit, validation, commit, runtime request, push, or review handoff.
 
 A runtime MAY certify commits after the last MIU checkpoint only for an
 authoritative, signed review-rework dispatch bound to the same issue, branch,

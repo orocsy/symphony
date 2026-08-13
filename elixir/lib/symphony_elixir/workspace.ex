@@ -12,7 +12,8 @@ defmodule SymphonyElixir.Workspace do
     PromptBuilder,
     RuntimeContract,
     SSH,
-    UnblockReport
+    UnblockReport,
+    ValidationController
   }
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
@@ -540,14 +541,14 @@ defmodule SymphonyElixir.Workspace do
         case validate_workspace_path(workspace, nil) do
           :ok ->
             maybe_run_before_remove_hook(workspace, nil)
-            File.rm_rf(workspace)
+            remove_local_workspace_and_evidence(workspace)
 
           {:error, reason} ->
             {:error, reason, ""}
         end
 
       false ->
-        File.rm_rf(workspace)
+        remove_local_workspace_and_evidence(workspace)
     end
   end
 
@@ -563,13 +564,23 @@ defmodule SymphonyElixir.Workspace do
 
     case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
       {:ok, {_output, 0}} ->
-        {:ok, []}
+        case ValidationController.remove_durable_evidence(workspace) do
+          {:ok, _removed_paths} -> {:ok, []}
+          {:error, _reason, _path} = error -> error
+        end
 
       {:ok, {output, status}} ->
         {:error, {:workspace_remove_failed, worker_host, status, output}, ""}
 
       {:error, reason} ->
         {:error, reason, ""}
+    end
+  end
+
+  defp remove_local_workspace_and_evidence(workspace) do
+    with {:ok, removed_paths} <- File.rm_rf(workspace),
+         {:ok, _evidence_paths} <- ValidationController.remove_durable_evidence(workspace) do
+      {:ok, removed_paths}
     end
   end
 

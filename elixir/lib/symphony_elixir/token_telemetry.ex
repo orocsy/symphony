@@ -7,6 +7,7 @@ defmodule SymphonyElixir.TokenTelemetry do
 
   @spans_path ".orocsy/delivery/token-telemetry/spans.jsonl"
   @workers_path ".orocsy/delivery/token-telemetry/workers.jsonl"
+  @issue_aggregate_path ".orocsy/delivery/token-telemetry/issue-aggregate.json"
   @summaries_dir ".orocsy/delivery/token-telemetry/summaries"
   @schema_version 1
   @command_fingerprint_patterns [
@@ -831,6 +832,7 @@ defmodule SymphonyElixir.TokenTelemetry do
     summary = worker_summary(telemetry, state)
     File.write!(workers_file(workspace), Jason.encode!(summary) <> "\n", [:append])
     File.write!(summary_file(workspace, telemetry), markdown_summary(summary))
+    write_issue_aggregate(workspace, telemetry.issue_identifier)
     :ok
   rescue
     error in [File.Error, RuntimeError, ArgumentError] ->
@@ -839,6 +841,96 @@ defmodule SymphonyElixir.TokenTelemetry do
   end
 
   defp write_worker_summary(_telemetry, _state), do: :ok
+
+  defp write_issue_aggregate(workspace, issue_identifier)
+       when is_binary(workspace) and is_binary(issue_identifier) do
+    summaries =
+      workspace
+      |> workers_file()
+      |> File.stream!()
+      |> Enum.flat_map(fn line ->
+        case Jason.decode(line) do
+          {:ok, %{"issue" => ^issue_identifier} = summary} -> [summary]
+          _ -> []
+        end
+      end)
+
+    aggregate = issue_aggregate(issue_identifier, summaries)
+    File.write!(issue_aggregate_file(workspace), Jason.encode!(aggregate, pretty: true) <> "\n")
+  end
+
+  defp write_issue_aggregate(_workspace, _issue_identifier), do: :ok
+
+  defp issue_aggregate(issue_identifier, summaries) do
+    status_counts = frequency_map(summaries, & &1["status"])
+    phase_totals = aggregate_phase_totals(summaries)
+    loop_counts = summaries |> Enum.flat_map(&Map.get(&1, "loop_signatures", [])) |> Enum.frequencies()
+    durable_progress_events = Enum.sum(Enum.map(summaries, &length(Map.get(&1, "durable_progress_events", []))))
+    total_tokens = sum_summary_field(summaries, "total_tokens")
+
+    %{
+      "schema_version" => @schema_version,
+      "issue" => issue_identifier,
+      "generated_at" => timestamp(),
+      "attempts" => length(summaries),
+      "status_counts" => status_counts,
+      "consecutive_no_progress_attempts" => consecutive_no_progress_attempts(summaries),
+      "total_tokens" => total_tokens,
+      "input_tokens" => sum_summary_field(summaries, "input_tokens"),
+      "cached_input_tokens" => sum_summary_field(summaries, "cached_input_tokens"),
+      "output_tokens" => sum_summary_field(summaries, "output_tokens"),
+      "counted_guard_tokens" => sum_summary_field(summaries, "counted_guard_tokens"),
+      "durable_progress_event_count" => durable_progress_events,
+      "tokens_per_durable_progress_event" => if(durable_progress_events > 0, do: div(total_tokens, durable_progress_events), else: nil),
+      "dominant_phase" => dominant_counter_entry(phase_totals, "phase"),
+      "dominant_loop_signature" => dominant_counter_entry(loop_counts, "signature"),
+      "phase_totals" => top_phases(phase_totals),
+      "loop_signature_counts" => loop_counts,
+      "last_durable_progress_at" => last_durable_progress_at(summaries),
+      "latest_worker" => List.last(summaries)
+    }
+  end
+
+  defp sum_summary_field(summaries, field) do
+    Enum.sum(Enum.map(summaries, &(Map.get(&1, field, 0) || 0)))
+  end
+
+  defp frequency_map(values, mapper) do
+    values
+    |> Enum.map(mapper)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.frequencies()
+  end
+
+  defp aggregate_phase_totals(summaries) do
+    summaries
+    |> Enum.flat_map(&Map.get(&1, "top_phases", []))
+    |> Enum.reduce(%{}, fn phase, totals ->
+      Map.update(totals, phase["phase"], phase["total_tokens"] || 0, &(&1 + (phase["total_tokens"] || 0)))
+    end)
+  end
+
+  defp dominant_counter_entry(counter, label) when map_size(counter) > 0 do
+    {name, count} = Enum.max_by(counter, fn {name, count} -> {count, name} end)
+    %{label => name, "count" => count}
+  end
+
+  defp dominant_counter_entry(_counter, _label), do: nil
+
+  defp consecutive_no_progress_attempts(summaries) do
+    summaries
+    |> Enum.reverse()
+    |> Enum.take_while(&(&1["status"] == "blocked_no_durable_progress"))
+    |> length()
+  end
+
+  defp last_durable_progress_at(summaries) do
+    summaries
+    |> Enum.reverse()
+    |> Enum.find_value(fn summary ->
+      if summary["status"] != "blocked_no_durable_progress", do: summary["ended_at"]
+    end)
+  end
 
   defp worker_summary(%__MODULE__{} = telemetry, state) do
     progress = progress_evidence(telemetry, state)
@@ -1240,6 +1332,7 @@ defmodule SymphonyElixir.TokenTelemetry do
   defp spans_dir(workspace), do: workspace |> Path.join(@spans_path) |> Path.dirname()
   defp spans_file(workspace), do: Path.join(workspace, @spans_path)
   defp workers_file(workspace), do: Path.join(workspace, @workers_path)
+  defp issue_aggregate_file(workspace), do: Path.join(workspace, @issue_aggregate_path)
   defp summaries_dir(workspace), do: Path.join(workspace, @summaries_dir)
 
   defp summary_file(workspace, %__MODULE__{} = telemetry) do

@@ -36,6 +36,9 @@ During structured handoff recovery, the command guard may admit a single pure re
 parsed file operand is named directly by the active Runtime Contract's `write_scope` or
 `read_context`. The runtime rejects derived/imported context, absolute paths, wildcard operands,
 workspace symlink escapes, unsafe file-fed search options, shell composition, and substitutions.
+Existing targets are canonicalized and must be regular files inside the workspace. A declared
+missing target may be probed so a worker can establish that it must be created, but only when
+canonicalizing its missing path still resolves inside the workspace.
 Configured operator bans always take precedence. A recoverable compound read is split into separate
 commands by the worker; the compound command itself is never authorized. In `handoff_recovery`
 only, the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
@@ -47,16 +50,23 @@ canonicalizes and verifies the target as a regular workspace file immediately be
 
 Issues may include a fenced YAML `## Runtime Contract`. For these issues, the
 contract is the sole authority for branch, write scope, MIUs, validation, and
-review behavior. The runtime certifies one clean MIU checkpoint at a time; a
+review behavior. Contract compilation rejects malformed `mius` values and any
+MIU read/write scope fully covered by denied scope, using the same directory,
+glob, and descendant semantics as command enforcement. The runtime certifies one clean MIU checkpoint at a time; a
 checkpoint may contain multiple focused microcommits. Dispatch preflight
 persists the issue branch's certification baseline in HMAC-signed controller
 evidence bound to the current issue, branch, contract, and issue revision. A
 recovery contract may declare an exact `certification_base_sha` when migrating
-work that predates signed preflight evidence. Existing signed evidence takes
-precedence, and invalid signed evidence or an unsigned legacy preflight without
-an explicit migration baseline blocks certification instead of choosing a
-different range. The runtime never seeds this value from a clean-but-ahead local
-`HEAD`. It executes declared validation itself, and issues
+work that predates signed preflight evidence. Existing signed non-empty evidence
+for the same issue and branch takes precedence across contract refinements; the
+new preflight binds that preserved base to the current contract and issue
+revision. A signed empty baseline remains absence of evidence and is replaced by
+an explicit migration base, a preceding pre-synchronization branch head, or the
+integration branch's merge base with the declared base branch after workspace
+recreation. Invalid signed evidence or an unsigned legacy preflight without an
+explicit migration baseline blocks certification instead of choosing a
+different range. The runtime never seeds this value from an
+already-synchronized clean-but-ahead `HEAD`. It executes declared validation itself, and issues
 `handoff.ready` only after all
 MIU certificates and final validations match the current issue revision and
 pushed head, and an open pull request connects the canonical integration branch
@@ -65,6 +75,67 @@ Authority-bearing MIU, handoff, processed-request, and merge evidence is HMAC
 signed with a runtime key stored outside the issue workspace. Override its
 location with `SYMPHONY_CONTROLLER_EVIDENCE_KEY_PATH`; keep that file unreadable
 from worker sandboxes.
+
+Dispatch mode is derived from ticket type and this certified lifecycle before
+generic Git state. `integration-check` contracts stay in integration mode even
+while their own MIU is pending. For other structured contracts, a clean pending
+MIU starts `fresh_implementation` only when `HEAD` has no committed delta after
+the MIU certification base. A committed but uncertified delta stays in
+`handoff_recovery`, allowing validation and certification without reimplementing
+the same MIU. Branch synchronization records the pre-sync authoritative branch
+head before it computes the lifecycle snapshot. If that head already equals the
+synchronized tip and no baseline evidence survives, the runtime uses the
+integration/base-branch merge base rather than treating the tip as an empty
+delta. The post-sync snapshot binds the pending MIU, scope, base SHA, head SHA,
+and concrete paths for both mode and prompt generation. Evidence failures and
+undeclared or explicitly denied committed paths fail closed ahead of ordinary
+correction recovery. Live-correction prompt refresh preserves that unsafe-state
+priority and cannot restore edit or commit authority; committed recovery names
+an actual in-scope path rather than a wildcard. Structured pending-MIU states
+also precede premature PR review rework. Missing in-scope behavior is committed
+once in a conditional follow-up micro commit before certification; a complete
+existing delta gets no duplicate or empty commit. Legacy review branch refresh
+remains best effort when its configured remote is temporarily unavailable. The
+controller includes committed, staged, unstaged, and untracked paths in one
+pending-MIU snapshot: in-scope dirt must be committed before certification and
+out-of-scope dirt fails closed. Dirty-only MIU recovery explicitly creates that
+clean micro commit and appends `miu.completion_requested`; it never falls through
+to legacy push/review guidance. Commit paths are enumerated across the entire
+uncertified MIU range, so a later restore cannot hide an undeclared write. Plain
+directory scopes cover descendants in classification and certification just as
+they do at command time, including normalization of leading `./` prefixes before
+contract-conflict checks or runtime matching. Trailing `.` and `,` characters
+and leading/trailing whitespace remain part of literal Git filenames and scope
+operands. Read operands are canonicalized before allow- and deny-scope checks,
+so lexical traversal cannot turn an allowed path into a denied canonical target.
+Fresh structured MIU
+dispatch uses the `miu.completion_requested` Runtime Contract checkpoint rather
+than the legacy `technical-miu-trace` first-turn boundary. Safe pending-MIU states keep their
+micro-commit and `miu.completion_requested` guidance when a retry correction is open;
+correction refresh cannot replace it with legacy push/review handoff. A
+`block` or `escalate` correction from any source instead takes dispatch to an
+operator-only checkpoint. A controller-owned block is enforced again by MIU and
+handoff certification, not only by its prompt, and grants no new edit,
+validation, commit, runtime-request, push, or review authority. Signed MIU certificates are mirrored to
+controller-owned state outside each issue workspace, allowing later-MIU
+boundaries to survive workspace recreation. Override that state root with
+`SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR`, pointing it to an operator-owned path
+outside every issue workspace. Terminal workspace cleanup removes the matching
+hashed evidence directory; nonterminal workspace recreation preserves it. A
+recreated workspace whose durable chain already certifies every MIU enters
+structured final-handoff recovery when current `HEAD` exactly equals the final
+MIU certificate and the worktree is clean, even when its local preflight and PR evidence are absent. That
+recovery permits only clean push/PR/`handoff.requested` work, not fresh
+implementation or another MIU commit. If `HEAD` is newer or the worktree is
+dirty, the runtime fails closed for controller/operator reconstruction of an
+authorized review-rework delta instead of issuing an invalid final-handoff
+request.
+
+After each worker turn, observer-only token telemetry refreshes
+`.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes
+attempt count, consecutive no-progress attempts, token totals, dominant
+phase/signature, last durable progress, and the latest worker. No telemetry
+field participates in dispatch, retry, correction, or completion decisions.
 
 When a signed dispatch preflight is specifically in `review_rework` mode, the
 runtime may certify a pushed delta after the last MIU checkpoint without

@@ -4,11 +4,13 @@ defmodule SymphonyElixir.ValidationController do
   """
 
   alias SymphonyElixir.{ControllerEvidence, DispatchPreflight, Linear.Issue, RuntimeContract, RuntimeRequest, Workspace}
+  alias SymphonyElixir.ScopeAccess.Controller, as: ScopeAccessController
 
   @authority "symphony.runtime.validation-controller"
   @attempts_path ".orocsy/delivery/state/validation-attempts.jsonl"
   @events_path ".orocsy/delivery/events/events.jsonl"
   @certificates_dir ".orocsy/delivery/state/miu-certificates"
+  @durable_certificates_dir "miu-certificates"
   @validation_logs_dir ".orocsy/delivery/validation"
   @max_log_bytes 20_000
   @max_capture_bytes 1_000_000
@@ -70,9 +72,11 @@ defmodule SymphonyElixir.ValidationController do
   defp process_named_miu_request(issue, workspace, request, miu_id)
        when is_binary(miu_id) and miu_id != "" do
     result =
-      case current_certificate(workspace, issue, miu_id) do
-        {:ok, certificate} -> {:ok, certificate}
-        :none -> certify_miu(issue, workspace, miu_id)
+      with :ok <- ensure_runtime_requests_allowed(workspace) do
+        case current_certificate(workspace, issue, miu_id) do
+          {:ok, certificate} -> {:ok, certificate}
+          :none -> certify_miu(issue, workspace, miu_id)
+        end
       end
 
     case reconcile_runtime_corrections(issue, workspace, miu_id, result) do
@@ -110,7 +114,8 @@ defmodule SymphonyElixir.ValidationController do
           {:ok, map()} | {:error, term()} | {:blocked, term()}
   def certify_miu(%Issue{} = issue, workspace, miu_id)
       when is_binary(workspace) and is_binary(miu_id) do
-    with {:ok, compiled} <- structured_contract(issue),
+    with :ok <- ensure_runtime_requests_allowed(workspace),
+         {:ok, compiled} <- structured_contract(issue),
          {:ok, miu} <- fetch_miu(compiled.contract, miu_id),
          {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
          true <- branch == compiled.contract["integration_branch"] || {:error, :canonical_branch_mismatch},
@@ -118,7 +123,7 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          :ok <- ensure_next_miu(issue, workspace, compiled, head_sha, miu_id),
          {:ok, base_head_sha} <- certification_base_sha(issue, workspace, compiled, head_sha, miu_id),
-         {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha),
+         {:ok, changed_paths} <- changed_paths_across_commits(workspace, base_head_sha, head_sha),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
          true <-
@@ -158,11 +163,51 @@ defmodule SymphonyElixir.ValidationController do
 
   def certify_miu(_issue, _workspace, _miu_id), do: {:error, :invalid_miu_certification_request}
 
+  @spec ensure_runtime_requests_allowed(String.t()) :: :ok | {:blocked, term()}
+  def ensure_runtime_requests_allowed(workspace) when is_binary(workspace) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> runtime_request_correction_gate()
+  end
+
+  def ensure_runtime_requests_allowed(_workspace),
+    do: {:blocked, {:controller_correction_open, "invalid workspace"}}
+
+  defp runtime_request_correction_gate(corrections) do
+    case Enum.find(corrections, &controller_blocking_correction?/1) do
+      %{"correction_id" => correction_id} when is_binary(correction_id) ->
+        {:blocked, {:controller_correction_open, correction_id}}
+
+      %{} = correction ->
+        summary = correction["summary"] || "blocking runtime-controller correction"
+        {:blocked, {:controller_correction_open, summary}}
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp controller_blocking_correction?(%{} = correction) do
+    correction["source"] == @authority and
+      correction["next_action"] in ["block", "escalate"]
+  end
+
+  defp controller_blocking_correction?(_correction), do: false
+
   @spec certificates(String.t()) :: [map()]
   def certificates(workspace) when is_binary(workspace) do
-    workspace
-    |> Path.join(Path.join(@certificates_dir, "*.json"))
-    |> Path.wildcard()
+    local_paths =
+      workspace
+      |> Path.join(Path.join(@certificates_dir, "*.json"))
+      |> Path.wildcard()
+
+    durable_paths =
+      workspace
+      |> durable_controller_evidence_dir()
+      |> then(&Path.join([&1, @durable_certificates_dir, "**", "*.json"]))
+      |> Path.wildcard()
+
+    (local_paths ++ durable_paths)
     |> Enum.flat_map(fn path ->
       case File.read(path) do
         {:ok, body} ->
@@ -178,9 +223,20 @@ defmodule SymphonyElixir.ValidationController do
           []
       end
     end)
+    |> Enum.uniq_by(& &1["controller_signature"])
   end
 
   def certificates(_workspace), do: []
+
+  @spec remove_durable_evidence(String.t()) ::
+          {:ok, [String.t()]} | {:error, File.posix(), String.t()}
+  def remove_durable_evidence(workspace) when is_binary(workspace) do
+    workspace
+    |> durable_controller_evidence_dir()
+    |> File.rm_rf()
+  end
+
+  def remove_durable_evidence(_workspace), do: {:ok, []}
 
   @spec certified_miu_ids(Issue.t(), String.t()) :: [String.t()]
   def certified_miu_ids(%Issue{} = issue, workspace) when is_binary(workspace) do
@@ -193,6 +249,150 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   def certified_miu_ids(_issue, _workspace), do: []
+
+  @spec final_miu_certificate_head(Issue.t(), String.t()) :: {:ok, String.t()} | :not_ready
+  def final_miu_certificate_head(%Issue{} = issue, workspace) when is_binary(workspace) do
+    with {:ok, compiled} <- structured_contract(issue),
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         final_miu_id when is_binary(final_miu_id) <- List.last(compiled.miu_ids),
+         %{"head_sha" => certified_head} when is_binary(certified_head) <-
+           issue
+           |> valid_miu_certificates(workspace, compiled, head_sha)
+           |> Enum.find(&(&1["miu_id"] == final_miu_id)) do
+      {:ok, certified_head}
+    else
+      _ -> :not_ready
+    end
+  end
+
+  def final_miu_certificate_head(_issue, _workspace), do: :not_ready
+
+  @type pending_miu_commit_state ::
+          :no_pending_miu
+          | {:no_committed_delta, map()}
+          | {:committed_delta, map()}
+          | {:invalid_delta, map()}
+          | {:unknown, term()}
+
+  @spec pending_miu_commit_state(Issue.t(), String.t()) :: pending_miu_commit_state()
+  def pending_miu_commit_state(issue, workspace),
+    do: pending_miu_commit_state(issue, workspace, [])
+
+  @spec pending_miu_commit_state(Issue.t(), String.t(), keyword()) :: pending_miu_commit_state()
+  def pending_miu_commit_state(%Issue{} = issue, workspace, opts)
+      when is_binary(workspace) and is_list(opts) do
+    with {:ok, compiled} <- structured_contract(issue),
+         {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
+         completed_ids <- valid_certified_miu_ids(issue, workspace, compiled, head_sha) |> MapSet.new(),
+         miu_id when is_binary(miu_id) <-
+           Enum.find(compiled.miu_ids, &(not MapSet.member?(completed_ids, &1))),
+         %{} = miu <- Enum.find(compiled.contract["mius"], &(&1["id"] == miu_id)),
+         {:ok, base_head_sha} <-
+           pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id, opts),
+         {:ok, committed_paths} <-
+           changed_paths_across_commits(workspace, base_head_sha, head_sha),
+         {:ok, worktree_paths} <- worktree_paths(workspace) do
+      changed_paths = Enum.sort(Enum.uniq(committed_paths ++ worktree_paths))
+
+      {in_scope_paths, out_of_scope_paths} =
+        Enum.split_with(changed_paths, fn path ->
+          pending_miu_path_allowed?(path, miu["write_scope"], compiled.denied_scope)
+        end)
+
+      snapshot = %{
+        miu_id: miu_id,
+        write_scope: miu["write_scope"],
+        validations: miu["validations"],
+        base_head_sha: base_head_sha,
+        head_sha: head_sha,
+        changed_paths: changed_paths,
+        committed_paths: committed_paths,
+        worktree_paths: worktree_paths,
+        in_scope_paths: in_scope_paths,
+        out_of_scope_paths: out_of_scope_paths
+      }
+
+      cond do
+        out_of_scope_paths != [] -> {:invalid_delta, snapshot}
+        committed_paths == [] -> {:no_committed_delta, snapshot}
+        true -> {:committed_delta, snapshot}
+      end
+    else
+      nil -> :no_pending_miu
+      :none -> {:unknown, :pending_miu_base_unavailable}
+      {:error, reason} -> {:unknown, reason}
+      other -> {:unknown, {:pending_miu_state_unavailable, other}}
+    end
+  rescue
+    error -> {:unknown, {:pending_miu_state_exception, Exception.message(error)}}
+  end
+
+  def pending_miu_commit_state(_issue, _workspace, _opts),
+    do: {:unknown, :invalid_pending_miu_state_request}
+
+  defp pending_miu_path_allowed?(path, write_scope, denied_scope) do
+    Enum.any?(write_scope, &path_matches_scope?(path, &1)) and
+      not Enum.any?(denied_scope, &path_matches_scope?(path, &1))
+  end
+
+  @spec pending_miu_committed_delta?(Issue.t(), String.t()) :: boolean()
+  def pending_miu_committed_delta?(%Issue{} = issue, workspace) when is_binary(workspace) do
+    match?({:committed_delta, _snapshot}, pending_miu_commit_state(issue, workspace))
+  end
+
+  def pending_miu_committed_delta?(_issue, _workspace), do: false
+
+  defp pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id, opts) do
+    if List.first(compiled.miu_ids) == miu_id do
+      first_pending_miu_base_sha(issue, workspace, compiled, head_sha, opts)
+    else
+      certification_base_sha(issue, workspace, compiled, head_sha, miu_id)
+    end
+  end
+
+  defp first_pending_miu_base_sha(issue, workspace, compiled, head_sha, opts) do
+    case dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
+      {:ok, base_head_sha} ->
+        {:ok, base_head_sha}
+
+      :none ->
+        explicit_pending_miu_base_sha(
+          workspace,
+          compiled,
+          head_sha,
+          pending_miu_fallback_base_sha(workspace, compiled, head_sha, opts)
+        )
+
+      {:error, _reason} = error ->
+        explicit_pending_miu_base_sha(workspace, compiled, head_sha, error)
+    end
+  end
+
+  defp pending_miu_fallback_base_sha(workspace, compiled, head_sha, opts) do
+    case Keyword.get(opts, :fallback_base_sha) do
+      fallback_base_sha when is_binary(fallback_base_sha) and fallback_base_sha != "" ->
+        if fallback_base_sha != head_sha and
+             git_ancestor?(workspace, fallback_base_sha, head_sha) do
+          {:ok, fallback_base_sha}
+        else
+          integration_certification_base_sha(workspace, compiled, head_sha)
+        end
+
+      _ ->
+        integration_certification_base_sha(workspace, compiled, head_sha)
+    end
+  end
+
+  defp explicit_pending_miu_base_sha(workspace, compiled, head_sha, fallback) do
+    explicit_base_sha = compiled.contract["certification_base_sha"]
+
+    if is_binary(explicit_base_sha) and explicit_base_sha != "" and
+         git_ancestor?(workspace, explicit_base_sha, head_sha) do
+      {:ok, explicit_base_sha}
+    else
+      fallback
+    end
+  end
 
   @spec validate_final(Issue.t(), String.t()) :: {:ok, [map()]} | {:error, term()} | {:blocked, term()}
   def validate_final(%Issue{} = issue, workspace) when is_binary(workspace) do
@@ -347,19 +547,7 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp integration_certification_base_sha(workspace, compiled, head_sha) do
-    integration_ref = "refs/remotes/origin/#{compiled.contract["integration_branch"]}"
-
-    case git(workspace, ["rev-parse", "--verify", integration_ref]) do
-      {:ok, integration_sha} ->
-        if git_ancestor?(workspace, integration_sha, head_sha) do
-          {:ok, integration_sha}
-        else
-          base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
-        end
-
-      {:error, _reason} ->
-        base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
-    end
+    base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
   end
 
   defp dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
@@ -376,8 +564,6 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp validate_dispatch_certification_base(issue, workspace, compiled, head_sha, preflight) do
-    expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
-
     cond do
       preflight["issue_id"] != issue.id ->
         {:error, :dispatch_preflight_issue_id_mismatch}
@@ -387,12 +573,6 @@ defmodule SymphonyElixir.ValidationController do
 
       preflight["branch"] != compiled.contract["integration_branch"] ->
         {:error, :dispatch_preflight_branch_mismatch}
-
-      preflight["contract_hash"] != compiled.contract_hash ->
-        {:error, :dispatch_preflight_contract_mismatch}
-
-      preflight["issue_revision"] != expected_revision ->
-        {:error, :dispatch_preflight_issue_revision_mismatch}
 
       is_nil(preflight["certification_base_sha"]) ->
         :none
@@ -419,31 +599,58 @@ defmodule SymphonyElixir.ValidationController do
     end)
   end
 
-  defp changed_paths(workspace, base_head_sha, head_sha) do
-    case git(workspace, ["diff", "--name-only", "--no-renames", "#{base_head_sha}..#{head_sha}", "--"]) do
-      {:ok, output} -> {:ok, String.split(output, "\n", trim: true)}
-      error -> error
+  defp worktree_paths(workspace) do
+    commands = [
+      ["diff", "--name-only", "--no-renames", "--", ".", ":(exclude).orocsy/"],
+      ["diff", "--cached", "--name-only", "--no-renames", "--", ".", ":(exclude).orocsy/"],
+      ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).orocsy/"]
+    ]
+
+    Enum.reduce_while(commands, {:ok, []}, fn args, {:ok, paths} ->
+      case git(workspace, args) do
+        {:ok, output} ->
+          current = String.split(output, "\n", trim: true)
+          {:cont, {:ok, current ++ paths}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, paths} -> {:ok, Enum.sort(Enum.uniq(paths))}
+      {:error, _reason} = error -> error
     end
   end
 
   defp changed_paths_across_commits(workspace, base_head_sha, head_sha) do
     case git(workspace, [
            "log",
-           "--format=",
+           "--format=tformat:%x00",
            "--name-only",
+           "-z",
            "--no-renames",
            "-m",
            "#{base_head_sha}..#{head_sha}",
            "--"
          ]) do
       {:ok, output} ->
-        paths = output |> String.split("\n", trim: true) |> Enum.uniq() |> Enum.sort()
+        paths =
+          output
+          |> String.split(<<0>>, trim: true)
+          |> Enum.map(&strip_git_log_record_separator/1)
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.uniq()
+          |> Enum.sort()
+
         {:ok, paths}
 
       error ->
         error
     end
   end
+
+  defp strip_git_log_record_separator("\n" <> path), do: path
+  defp strip_git_log_record_separator(path), do: path
 
   defp paths_allowed?(changed_paths, allowed_scope) do
     Enum.all?(changed_paths, fn path ->
@@ -458,7 +665,7 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp path_matches_scope?(path, scope) when is_binary(path) and is_binary(scope) do
-    path == scope or Regex.match?(glob_regex(scope), path)
+    ScopeAccessController.scope_pattern_matches?(path, scope)
   end
 
   defp path_matches_scope?(_path, _scope), do: false
@@ -523,14 +730,6 @@ defmodule SymphonyElixir.ValidationController do
       {:error, reason} ->
         {:error, {:invalid_review_rework_dispatch_preflight, reason}}
     end
-  end
-
-  defp glob_regex(scope) do
-    scope
-    |> Regex.escape()
-    |> String.replace("\\*\\*", ".*")
-    |> String.replace("\\*", "[^/]*")
-    |> then(&Regex.compile!("^" <> &1 <> "$"))
   end
 
   defp run_validations(issue, workspace, compiled, miu, head_sha) do
@@ -1145,6 +1344,14 @@ defmodule SymphonyElixir.ValidationController do
     end
   end
 
+  def reconcile_runtime_corrections(
+        _issue,
+        _workspace,
+        _miu_id,
+        {:blocked, {:controller_correction_open, _correction_id}}
+      ),
+      do: :ok
+
   def reconcile_runtime_corrections(issue, workspace, miu_id, {:blocked, reason}) do
     head_sha = git_value(workspace, ["rev-parse", "HEAD"])
 
@@ -1644,19 +1851,12 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp current_certificate(workspace, issue, miu_id) do
-    with certificate when is_map(certificate) <-
-           Enum.find(certificates(workspace), &(&1["miu_id"] == miu_id)),
-         {:ok, compiled} <- structured_contract(issue),
+    with {:ok, compiled} <- structured_contract(issue),
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
-         true <- certificate["event"] == "miu.completed",
-         true <- certificate["authority"] == @authority,
-         true <- certificate["issue_id"] == issue.id,
-         true <- certificate["issue"] == issue.identifier,
-         true <- certificate["contract_hash"] == compiled.contract_hash,
-         true <- certificate["issue_revision"] == RuntimeContract.issue_revision(issue.description, issue.updated_at),
-         true <- certificate["branch"] == compiled.contract["integration_branch"],
-         true <- valid_certificate_range?(workspace, certificate),
-         true <- certificate["head_sha"] == head_sha do
+         certificate when is_map(certificate) <-
+           issue
+           |> valid_miu_certificates(workspace, compiled, head_sha)
+           |> Enum.find(&(&1["miu_id"] == miu_id and &1["head_sha"] == head_sha)) do
       {:ok, certificate}
     else
       _ -> :none
@@ -1715,10 +1915,63 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp write_certificate(workspace, miu_id, certificate) do
-    path = Path.join([workspace, @certificates_dir, safe_id(miu_id) <> ".json"])
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(certificate, pretty: true) <> "\n")
+    filename = safe_id(miu_id) <> ".json"
+    body = Jason.encode!(certificate, pretty: true) <> "\n"
+
+    durable_path =
+      Path.join([
+        durable_controller_evidence_dir(workspace),
+        @durable_certificates_dir,
+        durable_certificate_namespace(certificate),
+        filename
+      ])
+
+    local_path = Path.join([workspace, @certificates_dir, filename])
+    :ok = atomic_write_controller_evidence(durable_path, body)
+    :ok = atomic_write_controller_evidence(local_path, body)
     :ok
+  end
+
+  defp durable_controller_evidence_dir(workspace) do
+    root =
+      Application.get_env(:symphony_elixir, :controller_evidence_state_dir) ||
+        System.get_env("SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR") ||
+        Path.join(Path.dirname(workspace), ".orocsy-controller-evidence")
+
+    root
+    |> Path.expand()
+    |> Path.join(sha256(Path.expand(workspace)))
+  end
+
+  defp durable_certificate_namespace(certificate) do
+    [
+      certificate["issue_id"],
+      certificate["issue"],
+      certificate["branch"],
+      certificate["contract_hash"],
+      certificate["issue_revision"]
+    ]
+    |> Enum.map_join(<<0>>, &to_string/1)
+    |> sha256()
+  end
+
+  defp atomic_write_controller_evidence(path, body) do
+    directory = Path.dirname(path)
+    File.mkdir_p!(directory)
+    File.chmod!(directory, 0o700)
+
+    temporary_path =
+      path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+
+    with :ok <- File.write(temporary_path, body, [:exclusive]),
+         :ok <- File.chmod(temporary_path, 0o600),
+         :ok <- File.rename(temporary_path, path) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        File.rm(temporary_path)
+        error
+    end
   end
 
   defp write_validation_log(workspace, event_id, output) do

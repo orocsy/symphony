@@ -107,13 +107,19 @@ defmodule SymphonyElixir.PromptBuilder do
        when is_binary(prompt) and is_binary(workspace) do
     case RuntimeContract.compile(Map.get(issue, :description)) do
       {:ok, compiled} ->
-        certified_ids =
-          issue
-          |> ValidationController.certified_miu_ids(workspace)
-          |> MapSet.new()
+        preflight =
+          case DispatchPreflight.read_for_prompt(workspace) do
+            {:ok, %{} = current} -> current
+            :none -> %{}
+            {:error, reason} -> %{"prompt_evidence_error" => inspect(reason)}
+          end
 
-        guidance = runtime_contract_guidance(compiled, certified_ids)
-        guidance <> "\n\n" <> prompt
+        guidance = runtime_contract_prompt_guidance(compiled, issue, workspace, preflight)
+
+        case guidance do
+          "" -> prompt
+          guidance -> guidance <> "\n\n" <> prompt
+        end
 
       _ ->
         prompt
@@ -124,46 +130,226 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp maybe_prepend_runtime_contract_guidance(prompt, _issue, _workspace), do: prompt
 
-  defp runtime_contract_guidance(compiled, certified_ids) do
+  defp runtime_contract_prompt_guidance(compiled, issue, workspace, preflight) do
+    case blocking_or_escalating_correction(preflight) do
+      nil -> runtime_contract_guidance(compiled, issue, workspace, preflight)
+      correction -> runtime_contract_blocking_guidance(correction)
+    end
+  end
+
+  defp blocking_or_escalating_correction(%{"open_corrections" => corrections})
+       when is_list(corrections) do
+    Enum.find(corrections, fn correction ->
+      correction["next_action"] in ["block", "escalate"]
+    end)
+  end
+
+  defp blocking_or_escalating_correction(_preflight), do: nil
+
+  defp runtime_contract_blocking_guidance(correction) do
+    summary = correction["summary"] || correction["correction_id"] || "blocking runtime correction"
+
+    label =
+      if correction["source"] == "symphony.runtime.validation-controller",
+        do: "controller gate",
+        else: "correction gate"
+
+    """
+    Runtime Contract blocking #{label}:
+
+    - Runtime execution is operator-only: #{summary}.
+    - Preserve the current head. Do not edit product files, run validation, create a commit, append another runtime request, push, or request review.
+    - Record no substitute worker evidence. Stop for the operator action named by the blocking correction.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{"prompt_evidence_error" => reason}
+       ) do
+    """
+    Runtime Contract prompt evidence gate:
+
+    - Symphony could not validate the signed dispatch preflight: #{reason}.
+    - Fail closed. Do not restart implementation, edit product files, or create a commit.
+    - Record the controller-evidence blocker and stop for controller recovery.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(_compiled, _issue, _workspace, %{"mode" => "integration_check"}),
+    do: ""
+
+  defp runtime_contract_guidance(_compiled, _issue, _workspace, %{"mode" => "review_rework"}),
+    do: ""
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{
+           "mode" => "handoff_recovery",
+           "pending_miu_commit_state" => %{"status" => "unknown", "reason" => reason}
+         }
+       ) do
+    """
+    Runtime Contract recovery evidence gate:
+
+    - Symphony could not prove whether the pending MIU already has a committed delta: #{reason}.
+    - Fail closed. Do not restart implementation, edit product files, or create another commit.
+    - Record the controller/Git evidence failure as a scoped blocker and stop for controller recovery.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{
+           "mode" => "handoff_recovery",
+           "pending_miu_commit_state" => %{"status" => "invalid_delta"} = state
+         }
+       ) do
+    paths = Enum.map_join(state["out_of_scope_paths"] || [], ", ", &"`#{&1}`")
+
+    """
+    Runtime Contract undeclared-write recovery gate:
+
+    - The committed range for pending MIU `#{state["miu_id"]}` includes undeclared path(s): #{paths}.
+    - Fail closed. Do not restart implementation, edit product files, or create another commit.
+    - Record the undeclared-write blocker and stop for controller recovery.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
+         compiled,
+         _issue,
+         _workspace,
+         %{
+           "mode" => "handoff_recovery",
+           "pending_miu_commit_state" => %{"status" => "committed_delta"} = state
+         }
+       ) do
+    changed_paths = Enum.map_join(state["in_scope_paths"] || [], ", ", &"`#{&1}`")
+
+    """
+    Runtime Contract committed-MIU recovery gate:
+
+    - Current contract: `#{compiled.contract_hash}`.
+    - Recover the committed but uncertified MIU `#{state["miu_id"]}`; do not restart it.
+    - Existing committed in-scope path(s): #{changed_paths}.
+    - Compare the existing delta with the MIU acceptance requirements and edit only missing in-scope behavior.
+    - If the committed delta already satisfies the MIU, do not create another commit or make an empty commit.
+    - Request runtime certification exactly once:
+      `python3 .codex/delivery/bin/orocsy.py --repo . event append --type miu.completion_requested --status requested --step #{state["miu_id"]}`
+    - End the turn after the request. Symphony runs authoritative validation and issues `miu.completed`.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
+         compiled,
+         _issue,
+         _workspace,
+         %{"pending_miu_commit_state" => %{"status" => "no_committed_delta"} = state}
+       ) do
+    runtime_contract_execution_guidance(compiled, %{
+      "id" => state["miu_id"],
+      "write_scope" => state["write_scope"] || [],
+      "validations" => state["validations"] || []
+    })
+  end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{
+           "mode" => "handoff_recovery",
+           "pending_miu_commit_state" => %{"status" => "no_pending_miu"},
+           "final_miu_head_state" => state
+         }
+       )
+       when state != "certified" do
+    """
+    Runtime Contract post-certification evidence gate:
+
+    - Every MIU certificate remains valid, but current HEAD or the worktree does not exactly match the final MIU certificate.
+    - Fail closed. Do not edit product files, create a commit, append a runtime request, push, or restart implementation.
+    - Preserve the current workspace and stop for controller/operator reconstruction of an authorized review-rework delta.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
+       ),
+       do: ""
+
+  defp runtime_contract_guidance(
+         compiled,
+         _issue,
+         _workspace,
+         %{"pending_miu_commit_state" => %{"status" => "no_pending_miu"}}
+       ) do
+    runtime_contract_final_guidance(compiled)
+  end
+
+  defp runtime_contract_guidance(compiled, issue, workspace, _preflight) do
+    certified_ids = issue |> ValidationController.certified_miu_ids(workspace) |> MapSet.new()
     remaining = Enum.reject(compiled.contract["mius"], &MapSet.member?(certified_ids, &1["id"]))
 
     case remaining do
-      [miu | _] ->
-        """
-        Runtime Contract execution gate:
-
-        - Current contract: `#{compiled.contract_hash}`.
-        - Implement only MIU `#{miu["id"]}` in this turn.
-        - Write scope: #{Enum.map_join(miu["write_scope"], ", ", &"`#{&1}`")}.
-        - Required runtime validation: #{Enum.map_join(miu["validations"], "; ", &"`#{&1}`")}.
-        - Do not run contract-declared validation inside the Codex worker sandbox. Symphony's validation controller runs it authoritatively after the request.
-        - After your focused implementation, create one clean local micro commit. Do not push yet.
-        - Then request runtime certification exactly once:
-          `python3 .codex/delivery/bin/orocsy.py --repo . event append --type miu.completion_requested --status requested --step #{miu["id"]}`
-        - End the turn after the request. Symphony, not the worker, runs authoritative validation and issues `miu.completed`.
-        - Do not append `gate.post-miu` as a substitute for MIU completion and do not request GitHub review yourself.
-        """
-        |> String.trim()
-
-      [] ->
-        """
-        Runtime Contract final handoff gate:
-
-        - All required MIUs are runtime-certified for contract `#{compiled.contract_hash}`.
-        - Keep the worktree clean, push the canonical integration branch, and verify local `HEAD` matches its upstream.
-        - Ensure an open pull request exists from the canonical integration branch into `#{compiled.contract["base_branch"]}`. Create it with `gh pr create` if absent; do not substitute a PR for another branch or base.
-        - Request final runtime certification exactly once:
-          `python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.requested --status requested --step final`
-        - End the turn after the request. Symphony runs final validations, issues `handoff.ready`, and requests GitHub Codex review.
-        - Do not request GitHub review or move Linear to a terminal state yourself.
-        """
-        |> String.trim()
+      [miu | _] -> runtime_contract_execution_guidance(compiled, miu)
+      [] -> runtime_contract_final_guidance(compiled)
     end
+  end
+
+  defp runtime_contract_execution_guidance(compiled, miu) do
+    """
+    Runtime Contract execution gate:
+
+    - Current contract: `#{compiled.contract_hash}`.
+    - Implement only MIU `#{miu["id"]}` in this turn.
+    - Write scope: #{Enum.map_join(miu["write_scope"], ", ", &"`#{&1}`")}.
+    - Required runtime validation: #{Enum.map_join(miu["validations"], "; ", &"`#{&1}`")}.
+    - Do not run contract-declared validation inside the Codex worker sandbox. Symphony's validation controller runs it authoritatively after the request.
+    - After your focused implementation, create one clean local micro commit. Do not push yet.
+    - Then request runtime certification exactly once:
+      `python3 .codex/delivery/bin/orocsy.py --repo . event append --type miu.completion_requested --status requested --step #{miu["id"]}`
+    - End the turn after the request. Symphony, not the worker, runs authoritative validation and issues `miu.completed`.
+    - Do not append `gate.post-miu` as a substitute for MIU completion and do not request GitHub review yourself.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_contract_final_guidance(compiled) do
+    """
+    Runtime Contract final handoff gate:
+
+    - All required MIUs are runtime-certified for contract `#{compiled.contract_hash}`.
+    - Keep the worktree clean, push the canonical integration branch, and verify local `HEAD` matches its upstream.
+    - Ensure an open pull request exists from the canonical integration branch into `#{compiled.contract["base_branch"]}`. Create it with `gh pr create` if absent; do not substitute a PR for another branch or base.
+    - Request final runtime certification exactly once:
+      `python3 .codex/delivery/bin/orocsy.py --repo . event append --type handoff.requested --status requested --step final`
+    - End the turn after the request. Symphony runs final validations, issues `handoff.ready`, and requests GitHub Codex review.
+    - Do not request GitHub review or move Linear to a terminal state yourself.
+    """
+    |> String.trim()
   end
 
   defp maybe_clear_in_progress_checkpoint(checkpoint, issue, workspace)
        when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
-    if issue_in_progress?(issue) and issue_implementation?(issue) and clean_worktree?(workspace) do
+    if issue_in_progress?(issue) and clean_worktree?(workspace) and
+         in_progress_checkpoint_discardable?(issue, workspace) do
       ""
     else
       checkpoint
@@ -171,6 +357,24 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_clear_in_progress_checkpoint(checkpoint, _issue, _workspace), do: checkpoint
+
+  defp in_progress_checkpoint_discardable?(issue, workspace) do
+    case RuntimeContract.compile(Map.get(issue, :description)) do
+      {:ok, _compiled} ->
+        case DispatchPreflight.read_for_prompt(workspace) do
+          {:ok, %{"pending_miu_commit_state" => %{"status" => "no_committed_delta"}}} ->
+            true
+
+          _ ->
+            false
+        end
+
+      _ ->
+        issue_implementation?(issue)
+    end
+  rescue
+    _error -> false
+  end
 
   defp maybe_clear_clean_rework_checkpoint(checkpoint, issue, workspace)
        when is_binary(checkpoint) and checkpoint != "" and is_binary(workspace) do
@@ -368,12 +572,12 @@ defmodule SymphonyElixir.PromptBuilder do
     #{issue_brief_policy}
     - First substantive progress guard: before optional skills, broad docs, recursive listings, or scanning more than eight implementation files, produce one real checkpoint:
       - Rework/existing PR: use the current-head feedback supplied by the runtime, inspect only the referenced in-scope file ranges, then make the scoped edit or record an explicit blocker. Append `review-feedback-classified` only after a scoped edit/blocker decision exists; classification alone is lifecycle context, not durable product progress.
-      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the runtime-confirmed issue brief when present plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
+      - Legacy fresh implementation without an active Runtime Contract execution gate: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the runtime-confirmed issue brief when present plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
       - Blocked issue: create an Orocsy inbox correction with the exact blocker and stop.
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
     - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
     - If any required command fails because a binary is missing, PATH differs, credentials are absent, network/provider access fails, or approval/input is required, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
-    - Implement one MIU at a time. In a fresh implementation first turn, stop after one scoped code/test/doc edit plus `technical-miu-trace`, or after recording a blocker; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff.
+    - Implement one MIU at a time. In a legacy fresh implementation without an active Runtime Contract execution gate, stop after one scoped code/test/doc edit plus `technical-miu-trace`, or after recording a blocker; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff. When a Runtime Contract execution gate is prepended, its event, commit, validation, and stop instructions are authoritative instead.
     - For Rework or an existing PR, fetch only current PR review threads/comments for this branch, classify findings, fix accepted in-scope current-code findings, validate, push, request review again, and never move Linear to a terminal state until a fresh review scan is clean.
     - Never merge automatically from inside the worker.
     """
