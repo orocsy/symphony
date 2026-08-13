@@ -124,11 +124,12 @@ outside every issue workspace. Terminal workspace cleanup removes the matching
 hashed evidence directory; nonterminal workspace recreation preserves it. A
 recreated workspace whose durable chain already certifies every MIU enters
 structured final-handoff recovery when current `HEAD` exactly equals the final
-MIU certificate, even when its local preflight and PR evidence are absent. That
+MIU certificate and the worktree is clean, even when its local preflight and PR evidence are absent. That
 recovery permits only clean push/PR/`handoff.requested` work, not fresh
-implementation or another MIU commit. If `HEAD` is newer, the runtime fails
-closed for controller/operator reconstruction of an authorized review-rework
-delta instead of issuing an invalid final-handoff request.
+implementation or another MIU commit. If `HEAD` is newer or the worktree is
+dirty, the runtime fails closed for controller/operator reconstruction of an
+authorized review-rework delta instead of issuing an invalid final-handoff
+request.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes

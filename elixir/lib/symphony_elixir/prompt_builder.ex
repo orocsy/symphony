@@ -287,9 +287,9 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     Runtime Contract post-certification evidence gate:
 
-    - Every MIU certificate remains valid, but current HEAD does not equal the final MIU certificate.
+    - Every MIU certificate remains valid, but current HEAD or the worktree does not exactly match the final MIU certificate.
     - Fail closed. Do not edit product files, create a commit, append a runtime request, push, or restart implementation.
-    - Preserve the current head and stop for controller/operator reconstruction of an authorized review-rework delta.
+    - Preserve the current workspace and stop for controller/operator reconstruction of an authorized review-rework delta.
     """
     |> String.trim()
   end

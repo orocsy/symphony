@@ -9860,6 +9860,17 @@ defmodule SymphonyElixir.CoreTest do
       refute prompt =~ "Symphony fresh-MIU micro-worker"
       refute prompt =~ "miu.completion_requested"
 
+      File.write!(target, "test('certified', () => {})\n// dirty post-certification delta\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = dirty_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert dirty_preflight["final_miu_head_state"] ==
+               "dirty_post_certification_worktree"
+
+      refute dirty_preflight["first_task"] =~ "append the exact handoff.requested event"
+      File.write!(target, "test('certified', () => {})\n")
+
       File.write!(target, "test('certified', () => {})\n// post-certification review delta\n")
       {_output, 0} = System.cmd("git", ["add", "tests/unit/certified.test.ts"], cd: workspace)
       {_output, 0} = System.cmd("git", ["commit", "-m", "Add review delta"], cd: workspace)
@@ -9876,7 +9887,10 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       assert blocked_preflight["final_miu_head_state"] == "post_certification_delta"
-      assert blocked_preflight["first_task"] =~ "does not equal the final MIU certificate"
+
+      assert blocked_preflight["first_task"] =~
+               "does not exactly match the final MIU certificate"
+
       refute blocked_preflight["first_task"] =~ "append the exact handoff.requested event"
 
       blocked_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)

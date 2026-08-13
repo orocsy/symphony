@@ -1527,7 +1527,7 @@ defmodule SymphonyElixir.DispatchPreflight do
         "Recover final handoff for the fully certified Runtime Contract. Do not edit product files or create another MIU commit. Keep the worktree clean, push the canonical integration branch, verify local HEAD matches its upstream, ensure the PR exists against the declared base branch, append the exact handoff.requested event from the Runtime Contract final handoff gate, and stop so Symphony can run final validation."
 
       _other ->
-        "Stop at the post-certification evidence gate. Current HEAD does not equal the final MIU certificate, so do not edit product files, create a commit, append handoff.requested, or start fresh implementation. Preserve the clean pushed head for controller/operator reconstruction of an authorized review-rework delta."
+        "Stop at the post-certification evidence gate. The current workspace does not exactly match the final MIU certificate, so do not edit product files, create a commit, append handoff.requested, or start fresh implementation. Preserve the workspace for controller/operator reconstruction of an authorized review-rework delta."
     end
   end
 
@@ -2247,9 +2247,11 @@ defmodule SymphonyElixir.DispatchPreflight do
          {:ok, certified_head} <-
            ValidationController.final_miu_certificate_head(issue, workspace),
          {head, 0} <- git_command(workspace, ["rev-parse", "HEAD"]) do
-      if String.trim(head) == certified_head,
-        do: "certified",
-        else: "post_certification_delta"
+      cond do
+        String.trim(head) != certified_head -> "post_certification_delta"
+        clean_worktree?(workspace) -> "certified"
+        true -> "dirty_post_certification_worktree"
+      end
     else
       _ -> "unknown"
     end
