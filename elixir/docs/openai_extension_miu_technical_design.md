@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared; OXE-1.1 trace drafted
+Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared; OXE-1.1 red checkpoint created
 
 Date: 2026-07-29
 
@@ -11,8 +11,8 @@ Parent architecture:
 
 Scope: translate the approved migration direction into independently
 implementable technical units. This revision specifies the first Slice 0 unit,
-links the measured `OXE-0.2` kernel patch-budget trace, and links the drafted
-`OXE-1.1` extension-host trace. Other later units are named to make the
+links the measured `OXE-0.2` kernel patch-budget trace, and links the reviewed
+`OXE-1.1` extension-host trace and red checkpoint. Other later units are named to make the
 dependency boundary explicit, but they are not implementation-ready until
 their own traces are added.
 
@@ -659,5 +659,7 @@ The Slice 1 host trace is now recorded in
 [`openai_extension_oxe11_extension_host.md`](openai_extension_oxe11_extension_host.md).
 It decomposes the slice into four ordered MIUs and keeps `OXE-1.1` kernel-free:
 facade, immutable closed registry, four public interfaces, shared types, and
-neutral no-op adapters. Next, independently review that trace before creating
-its red checkpoint.
+neutral no-op adapters. Independent review corrected the startup-latch,
+decoded-workflow-input, and test-isolation boundaries. The resulting focused
+11-test red checkpoint fails only because the generic host modules do not yet
+exist; no pinned kernel path changed.

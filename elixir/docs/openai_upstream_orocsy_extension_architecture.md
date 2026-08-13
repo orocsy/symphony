@@ -245,10 +245,15 @@ is intentional.
 
 ## Extension Host
 
-The kernel receives an immutable extension registry at startup. Workflow reload
-may change extension options for future issue admissions and future worker
-sessions, but it must not replace the adapter implementation used by an
-in-flight run.
+The kernel receives one immutable extension registry. On the current pinned
+baseline it is resolved lazily from the decoded `WORKFLOW.md` front-matter map
+at the first pre-claim admission call, because changing application startup or
+the kernel configuration schema would exceed the reviewed patch authority. The
+single orchestrator serializes that first call. Once resolved, adapter
+selection is latched for the BEAM lifetime; a selector change fails with a
+typed restart-required result rather than replacing code in flight. Workflow
+reload may still change validated extension options for future issue
+admissions and future worker sessions.
 
 Suggested layout:
 

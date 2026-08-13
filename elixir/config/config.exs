@@ -17,5 +17,24 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
 
 if config_env() == :test do
   config :symphony_elixir,
-    workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__)
+    workflow_file_path: Path.expand("../test/fixtures/startup_workflow.md", __DIR__),
+    extension_adapter_catalog: %{
+      dispatch_admission: %{
+        "noop" => SymphonyElixir.Extensions.Noop.DispatchAdmission,
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.DispatchAdmission
+      },
+      delivery_controller: %{
+        "noop" => SymphonyElixir.Extensions.Noop.DeliveryController,
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.DeliveryController
+      },
+      command_authorization: %{
+        "noop" => SymphonyElixir.Extensions.Noop.CommandAuthorization,
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.CommandAuthorization
+      },
+      observers: %{
+        "noop" => SymphonyElixir.Extensions.Noop.DeliveryObserver,
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.DeliveryObserver,
+        "raising" => SymphonyElixir.ExtensionHostFixtures.RaisingObserver
+      }
+    }
 end

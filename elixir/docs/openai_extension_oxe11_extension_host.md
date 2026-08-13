@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: technical trace drafted; implementation not started
+Status: independent design review corrected; OXE-1.1 red checkpoint created
 
 Date: 2026-08-13
 
@@ -47,8 +47,10 @@ The following facts were re-checked in the integration worktree at `3eba1df`:
   recursive branch.
 - App-server messages are assembled before the caller's `on_message` subscriber
   is invoked.
-- `WorkflowStore` retains both the raw workflow document and parsed kernel
-  settings. The current `Config.Schema` intentionally has no extension field.
+- `WorkflowStore` retains the decoded front-matter configuration map and parsed
+  kernel settings. It does not retain the original document bytes. The current
+  `Config.Schema` intentionally has no extension field and ignores the decoded
+  extension stanza while preserving it in `Workflow.current/0`.
 - `UPSTREAM_PATCH_BUDGET.yml` permits changes only in `orchestrator.ex`,
   `agent_runner.ex`, and `codex/app_server.ex`. Any change to application startup
   or `Config.Schema` would be an unregistered kernel patch.
@@ -134,13 +136,22 @@ Configuration names map through a compile-time allowlist. YAML never becomes a
 module name. Slice 1 accepts only `noop`; later slices add the known `orocsy`
 name when its adapter exists.
 
-The registry is resolved from the raw `WORKFLOW.md` extension stanza on the
+The registry is resolved from the decoded `WORKFLOW.md` front-matter map on the
 first admission facade call, before claim, workspace creation, or worker
 launch. The single orchestrator authority makes that first call serialized.
-The resolved value is stored as an immutable runtime term and cannot be
-replaced without a BEAM restart. This avoids an unregistered startup-file or
-kernel-schema edit while preserving the real invariant: no extension adapter
-can change during an in-flight run.
+The resolved value is stored by `ExtensionRegistry` as an immutable runtime
+term and cannot be replaced without a BEAM restart. This avoids an unregistered
+startup-file or kernel-schema edit while preserving the real invariant: no
+extension adapter can change during an in-flight run.
+
+The facade does not accept a registry, adapter module, or catalog argument.
+Production adapter names are resolved through a build-time closed catalog; the
+production catalog contains only `noop` in `OXE-1.1`. The test build may add
+named fixture adapters through compile-time configuration. A test-build-only,
+`@doc false` reset function erases the latch between non-async host tests. That
+function is absent from production builds and cannot become runtime control
+authority. Tests use it only for lifecycle isolation; they never read or
+replace registry storage directly.
 
 Workflow reload may change adapter options for future admissions and future
 Codex sessions. Each accepted admission/session snapshots normalized options
@@ -203,8 +214,12 @@ end
 
 The shared structs use `@enforce_keys`, explicit `@type t`, stable enum atoms,
 and no worker-authored authority Boolean. Contexts are immutable values. Their
-first schema contains only facts needed by Slice 1 hooks; later fields require
-an interface revision rather than an untyped catch-all map.
+first schema contains only facts needed by the owning Slice 1 hook. `OXE-1.1`
+does not invent placeholder fields merely to fill the structs: the red tests
+exercise the interface modules and facade with explicit fixture terms, while
+`OXE-1.2` and `OXE-1.3` add the reviewed hook-specific context/event schemas
+before their kernel call sites land. A later field requires a documented
+interface revision rather than an untyped catch-all map.
 
 ## Neutral Adapters
 
@@ -372,10 +387,28 @@ runtime shape. A future multi-runtime node must make registry identity an
 explicit supervisor dependency and remeasure the kernel patch budget; it must
 not weaken the latch.
 
+## Independent Review Disposition
+
+The two-axis review against the parent architecture and current upstream code
+found three design-document gaps and corrected them before the red checkpoint:
+
+1. The parent still said the registry arrived at application startup, but the
+   measured budget forbids that startup edit. Both documents now specify the
+   serialized first pre-claim latch.
+2. `WorkflowStore` retains a decoded front-matter map, not raw workflow bytes.
+   Registry decoding now names the real input and does not claim duplicate-YAML
+   evidence that the upstream loader has already discarded.
+3. Fixture routing and a BEAM-lifetime latch need an explicit test boundary.
+   The production facade remains four operations with no injection argument;
+   only the test build gets a closed fixture catalog and reset helper.
+
+No kernel path, runtime behavior, manifest requirement, or Orocsy adapter is
+cleared by this review.
+
 ## Next Action
 
-Run an independent two-axis review of this trace against the parent
-architecture and current upstream code. If it clears, create the `OXE-1.1` red
-checkpoint with only registry/facade/interface/no-op tests and fixtures. Do not
-touch a pinned kernel file until that red checkpoint and its exact write scope
-are reviewed.
+Review the `OXE-1.1` red checkpoint, whose scope is limited to
+registry/facade/interface/no-op tests, the test-build fixture catalog, fixtures,
+and these reviewed docs. Its focused 11-test command fails only because the
+host modules do not exist. Once that checkpoint clears, implement the generic
+host without touching a pinned kernel file.
