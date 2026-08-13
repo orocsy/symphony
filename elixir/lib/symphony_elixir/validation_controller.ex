@@ -287,7 +287,8 @@ defmodule SymphonyElixir.ValidationController do
   defp pending_miu_fallback_base_sha(workspace, compiled, head_sha, opts) do
     case Keyword.get(opts, :fallback_base_sha) do
       fallback_base_sha when is_binary(fallback_base_sha) and fallback_base_sha != "" ->
-        if git_ancestor?(workspace, fallback_base_sha, head_sha) do
+        if fallback_base_sha != head_sha and
+             git_ancestor?(workspace, fallback_base_sha, head_sha) do
           {:ok, fallback_base_sha}
         else
           integration_certification_base_sha(workspace, compiled, head_sha)
@@ -462,19 +463,7 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp integration_certification_base_sha(workspace, compiled, head_sha) do
-    integration_ref = "refs/remotes/origin/#{compiled.contract["integration_branch"]}"
-
-    case git(workspace, ["rev-parse", "--verify", integration_ref]) do
-      {:ok, integration_sha} ->
-        if git_ancestor?(workspace, integration_sha, head_sha) do
-          {:ok, integration_sha}
-        else
-          base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
-        end
-
-      {:error, _reason} ->
-        base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
-    end
+    base_branch_merge_base(workspace, compiled.contract["base_branch"], head_sha)
   end
 
   defp dispatch_certification_base_sha(issue, workspace, compiled, head_sha) do
@@ -491,8 +480,6 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp validate_dispatch_certification_base(issue, workspace, compiled, head_sha, preflight) do
-    expected_revision = RuntimeContract.issue_revision(issue.description, issue.updated_at)
-
     cond do
       preflight["issue_id"] != issue.id ->
         {:error, :dispatch_preflight_issue_id_mismatch}
@@ -502,12 +489,6 @@ defmodule SymphonyElixir.ValidationController do
 
       preflight["branch"] != compiled.contract["integration_branch"] ->
         {:error, :dispatch_preflight_branch_mismatch}
-
-      preflight["contract_hash"] != compiled.contract_hash ->
-        {:error, :dispatch_preflight_contract_mismatch}
-
-      preflight["issue_revision"] != expected_revision ->
-        {:error, :dispatch_preflight_issue_revision_mismatch}
 
       is_nil(preflight["certification_base_sha"]) ->
         :none

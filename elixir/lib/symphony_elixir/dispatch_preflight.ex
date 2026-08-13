@@ -87,7 +87,8 @@ defmodule SymphonyElixir.DispatchPreflight do
              requirements,
              inspection,
              mode,
-             pre_sync_head_sha
+             pre_sync_head_sha,
+             pending_miu_commit_state
            ) do
       preflight =
         case mode do
@@ -1653,7 +1654,8 @@ defmodule SymphonyElixir.DispatchPreflight do
          requirements,
          inspection,
          mode,
-         pre_sync_head_sha
+         pre_sync_head_sha,
+         pending_miu_commit_state
        ) do
     issue_identifier = issue_value(issue, :identifier)
     branch = authoritative_contract_branch(requirements) || Map.get(inspection, :head_ref) || requirements["integration_branch"] || requirements["branch"] || issue_value(issue, :branch_name)
@@ -1662,6 +1664,7 @@ defmodule SymphonyElixir.DispatchPreflight do
     fallback_base_sha =
       explicit_base_sha ||
         review_rework_head_sha(inspection, mode) ||
+        pending_miu_certification_base_sha(pending_miu_commit_state) ||
         structured_pre_sync_base_sha(requirements, pre_sync_head_sha)
 
     case preserved_certification_base_sha(workspace, issue_identifier, branch) do
@@ -1681,6 +1684,12 @@ defmodule SymphonyElixir.DispatchPreflight do
         {:error, {:invalid_certification_preflight, reason}}
     end
   end
+
+  defp pending_miu_certification_base_sha({_status, %{base_head_sha: base_head_sha}})
+       when is_binary(base_head_sha) and base_head_sha != "",
+       do: base_head_sha
+
+  defp pending_miu_certification_base_sha(_pending_miu_commit_state), do: nil
 
   defp structured_pre_sync_base_sha(
          %{"runtime_contract_status" => "structured"},

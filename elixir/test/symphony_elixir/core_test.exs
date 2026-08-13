@@ -9448,6 +9448,162 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "dispatch preflight recovers a pushed pending MIU after workspace recreation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-miu-recreated-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      origin = Path.join(test_root, "origin.git")
+      seed = Path.join(test_root, "seed")
+      workspace = Path.join(test_root, "recreated")
+      branch = "orocsy/cod-recreated-pending"
+
+      {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["init", "-b", "main", seed], stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: seed)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: seed)
+      File.write!(Path.join(seed, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: seed)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: seed)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: seed)
+      {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: seed)
+      {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: seed)
+      target = Path.join(seed, "tests/unit/recreated.test.ts")
+      File.mkdir_p!(Path.dirname(target))
+      File.write!(target, "test('recreated', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/recreated.test.ts"], cd: seed)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Implement pending MIU"], cd: seed)
+      {_output, 0} = System.cmd("git", ["push", "-u", "origin", branch], cd: seed)
+
+      {_output, 0} =
+        System.cmd("git", ["clone", "--branch", branch, origin, workspace], stderr_to_stdout: true)
+
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      issue = %Issue{
+        id: "issue-cod-recreated-pending",
+        identifier: "COD-RECREATED",
+        title: "Recover recreated pending MIU",
+        state: "In Progress",
+        branch_name: branch,
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: #{branch}
+        dependencies: []
+        mius:
+          - id: COD-RECREATED-MIU-1
+            write_scope:
+              - tests/unit/**
+            validations:
+              - git diff --check
+        final_validations:
+          - git diff --check
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "committed_delta"
+      assert preflight["first_task"] =~ "tests/unit/recreated.test.ts"
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = retry_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(retry_preflight, ["pending_miu_commit_state", "status"]) ==
+               "committed_delta"
+
+      assert retry_preflight["certification_base_sha"] == preflight["certification_base_sha"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight reuses a signed baseline after a contract revision" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-revised-contract-baseline-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      branch = "orocsy/cod-revised-contract"
+
+      issue = %Issue{
+        id: "issue-cod-revised-contract",
+        identifier: "COD-REVISED",
+        title: "Preserve revised contract baseline",
+        state: "In Progress",
+        branch_name: branch,
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: #{branch}
+        dependencies: []
+        mius:
+          - id: COD-REVISED-MIU-1
+            write_scope:
+              - tests/unit/**
+            validations:
+              - git diff --check
+        final_validations:
+          - git diff --check
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["switch", "-c", branch], cd: workspace)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+
+      assert {:ok, %{"mode" => "fresh_implementation"}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      target = Path.join(workspace, "tests/unit/revised.test.ts")
+      File.mkdir_p!(Path.dirname(target))
+      File.write!(target, "test('revised', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/revised.test.ts"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Implement revised MIU"], cd: workspace)
+
+      revised_issue = %{issue | description: issue.description <> "\nRevision note.\n"}
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
+
+      assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "committed_delta"
+      assert preflight["first_task"] =~ "tests/unit/revised.test.ts"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "dispatch preflight keeps clean in-progress implementation branches in fresh implementation mode" do
     test_root =
       Path.join(
@@ -25346,7 +25502,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   defp initialize_git_branch!(workspace, branch) do
-    {_output, 0} = System.cmd("git", ["init"], cd: workspace, stderr_to_stdout: true)
+    {_output, 0} =
+      System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
 
     {_output, 0} =
       System.cmd("git", ["config", "user.email", "symphony@example.test"],
@@ -25361,13 +25518,15 @@ defmodule SymphonyElixir.CoreTest do
       )
 
     {_output, 0} =
-      System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
-
-    {_output, 0} =
       System.cmd("git", ["commit", "--allow-empty", "-m", "Initial"],
         cd: workspace,
         stderr_to_stdout: true
       )
+
+    if branch != "main" do
+      {_output, 0} =
+        System.cmd("git", ["switch", "-c", branch], cd: workspace, stderr_to_stdout: true)
+    end
 
     :ok
   end

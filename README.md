@@ -60,10 +60,12 @@ generic Git handoff heuristics. Integration-check tickets retain integration mod
 with a pending MIU starts fresh implementation only when no committed delta exists after that MIU's
 certification base; otherwise Symphony recovers and certifies the existing checkpoint. If Git or
 controller evidence cannot prove the absence of a committed delta, dispatch fails closed instead of
-restarting implementation. Branch synchronization preserves the pre-sync branch head as the first
-MIU's base, so a pushed commit cannot erase its own delta. The immutable snapshot binds the pending
-MIU, base and head commits, and concrete paths; undeclared committed paths also fail closed. Recovery
-prompts name an actual committed path, never a wildcard scope.
+restarting implementation. Branch synchronization preserves the pre-sync authoritative branch head
+when it precedes the synchronized tip. A recreated workspace instead derives the first MIU base from
+the integration branch's merge base with the declared base branch, so a pushed commit cannot erase
+its own delta. The immutable snapshot binds the pending MIU, base and head commits, and concrete
+paths; undeclared committed paths also fail closed. Recovery prompts name an actual committed path,
+never a wildcard scope.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive

@@ -52,12 +52,14 @@ controller evidence bound to the current issue, branch, and contract so a push
 cannot erase the audit baseline and a workspace edit cannot narrow it. A
 recovery contract MAY declare an exact immutable `certification_base_sha` when
 no prior signed baseline exists. A signed, non-empty same-issue, same-branch
-baseline takes precedence over later contract input; a signed empty value is
-absence of a baseline and MAY be replaced by the explicit migration base or the
-pre-synchronization branch head. Invalid signed evidence or unsigned legacy
-preflight without an explicit migration baseline MUST fail closed. An
-already-synchronized clean-but-ahead workspace `HEAD` alone MUST NOT establish
-that baseline.
+baseline takes precedence over later contract input and MAY be reused across
+contract or issue-revision refinements when its controller signature, issue,
+branch, and ancestry remain valid. A signed empty value is absence of a baseline
+and MAY be replaced by the explicit migration base, a preceding
+pre-synchronization branch head, or the merge base with the declared base branch
+after workspace recreation. Invalid signed evidence or unsigned legacy preflight
+without an explicit migration baseline MUST fail closed. An already-synchronized
+clean-but-ahead workspace `HEAD` alone MUST NOT establish that baseline.
 
 A runtime MAY certify commits after the last MIU checkpoint only for an
 authoritative, signed review-rework dispatch bound to the same issue, branch,

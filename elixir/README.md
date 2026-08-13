@@ -58,12 +58,15 @@ persists the issue branch's certification baseline in HMAC-signed controller
 evidence bound to the current issue, branch, contract, and issue revision. A
 recovery contract may declare an exact `certification_base_sha` when migrating
 work that predates signed preflight evidence. Existing signed non-empty evidence
-takes precedence. A signed empty baseline remains absence of evidence and is
-replaced by an explicit migration base or the pre-synchronization branch head;
-invalid signed evidence or an unsigned legacy preflight without an explicit
-migration baseline blocks certification instead of choosing a different range.
-The runtime never seeds this value from an already-synchronized clean-but-ahead
-`HEAD`. It executes declared validation itself, and issues
+for the same issue and branch takes precedence across contract refinements; the
+new preflight binds that preserved base to the current contract and issue
+revision. A signed empty baseline remains absence of evidence and is replaced by
+an explicit migration base, a preceding pre-synchronization branch head, or the
+integration branch's merge base with the declared base branch after workspace
+recreation. Invalid signed evidence or an unsigned legacy preflight without an
+explicit migration baseline blocks certification instead of choosing a
+different range. The runtime never seeds this value from an
+already-synchronized clean-but-ahead `HEAD`. It executes declared validation itself, and issues
 `handoff.ready` only after all
 MIU certificates and final validations match the current issue revision and
 pushed head, and an open pull request connects the canonical integration branch
@@ -79,10 +82,12 @@ while their own MIU is pending. For other structured contracts, a clean pending
 MIU starts `fresh_implementation` only when `HEAD` has no committed delta after
 the MIU certification base. A committed but uncertified delta stays in
 `handoff_recovery`, allowing validation and certification without reimplementing
-the same MIU. Branch synchronization records the pre-sync branch head before it
-computes the lifecycle snapshot, preserving the first pending MIU's pushed delta.
-The post-sync snapshot binds the pending MIU, scope, base SHA, head SHA, and
-concrete paths for both mode and prompt generation. Evidence failures and
+the same MIU. Branch synchronization records the pre-sync authoritative branch
+head before it computes the lifecycle snapshot. If that head already equals the
+synchronized tip and no baseline evidence survives, the runtime uses the
+integration/base-branch merge base rather than treating the tip as an empty
+delta. The post-sync snapshot binds the pending MIU, scope, base SHA, head SHA,
+and concrete paths for both mode and prompt generation. Evidence failures and
 undeclared committed paths fail closed ahead of ordinary correction recovery;
 committed recovery names an actual in-scope path rather than a wildcard.
 
