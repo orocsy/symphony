@@ -1514,14 +1514,23 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp committed_pending_miu_recovery_task(snapshot) do
     changed_path = List.first(snapshot.in_scope_paths)
+    worktree_guidance = committed_pending_miu_worktree_guidance(snapshot)
 
-    "Continue the committed but uncertified MIU `#{snapshot.miu_id}` on the clean canonical branch. Inspect the committed in-scope path `#{changed_path}` and compare the existing implementation with that MIU's acceptance requirements. If missing in-scope behavior requires edits, create one clean follow-up micro commit containing only those edits before appending the certification event. If the committed delta already satisfies the MIU, do not recreate it or make an empty commit. Append the exact `miu.completion_requested` event from the Runtime Contract gate and stop so Symphony can validate and certify the resulting committed delta."
+    "Continue the committed but uncertified MIU `#{snapshot.miu_id}` on the canonical branch. Inspect the committed in-scope path `#{changed_path}` and compare the existing implementation with that MIU's acceptance requirements.#{worktree_guidance} If missing in-scope behavior requires edits, create one clean follow-up micro commit containing only those edits before appending the certification event. If the committed delta already satisfies the MIU and the worktree is clean, do not recreate it or make an empty commit. Append the exact `miu.completion_requested` event from the Runtime Contract gate only after the resulting delta is committed, then stop so Symphony can validate and certify it."
+  end
+
+  defp committed_pending_miu_worktree_guidance(%{worktree_paths: []}), do: ""
+
+  defp committed_pending_miu_worktree_guidance(%{worktree_paths: worktree_paths}) do
+    paths = Enum.map_join(worktree_paths, ", ", &"`#{&1}`")
+
+    " The interrupted worker also left in-scope worktree path(s): #{paths}. Inspect and include the complete required work in the conditional follow-up micro commit; certification cannot start while these paths remain dirty."
   end
 
   defp invalid_pending_miu_recovery_task(snapshot) do
     paths = Enum.map_join(snapshot.out_of_scope_paths, ", ", &"`#{&1}`")
 
-    "The committed range for pending MIU `#{snapshot.miu_id}` includes undeclared path(s): #{paths}. Fail closed: do not restart implementation, edit product files, or create another commit. Record the undeclared-write blocker and stop for controller recovery."
+    "The committed range or worktree for pending MIU `#{snapshot.miu_id}` includes undeclared path(s): #{paths}. Fail closed: do not restart implementation, edit product files, or create another commit. Record the undeclared-write blocker and stop for controller recovery."
   end
 
   defp unknown_pending_miu_recovery_task(reason) do
@@ -1538,6 +1547,8 @@ defmodule SymphonyElixir.DispatchPreflight do
       "base_head_sha" => snapshot.base_head_sha,
       "head_sha" => snapshot.head_sha,
       "changed_paths" => snapshot.changed_paths,
+      "committed_paths" => snapshot.committed_paths,
+      "worktree_paths" => snapshot.worktree_paths,
       "in_scope_paths" => snapshot.in_scope_paths,
       "out_of_scope_paths" => snapshot.out_of_scope_paths
     }

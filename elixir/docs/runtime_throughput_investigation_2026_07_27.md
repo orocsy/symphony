@@ -237,7 +237,11 @@ redispatched:
   recovery finds missing in-scope behavior, it creates one conditional follow-up
   micro commit before certification; a complete delta gets no empty or duplicate
   commit. Legacy review branch refresh remains best effort across temporary remote
-  failures.
+  failures. The controller now classifies committed and worktree paths together:
+  in-scope dirt must enter the follow-up commit, while out-of-scope dirt fails
+  closed. Signed MIU boundary certificates are mirrored into controller-owned
+  state outside the issue workspace, so recreation can restore completed MIUs and
+  select the actual later pending MIU.
 - Fresh preflight names the exact next MIU and its first write target.
 - Contract compilation rejects MIU read or write scopes fully covered by
   `denied_scope`, before a worker starts. It returns validation errors for

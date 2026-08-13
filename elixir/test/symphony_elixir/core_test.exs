@@ -9297,6 +9297,24 @@ defmodule SymphonyElixir.CoreTest do
       refute prompt =~ "After your focused implementation, create one clean local micro commit"
       refute prompt =~ "create its micro commit"
 
+      dirty_target = Path.join(workspace, "tests/unit/dirty-followup.test.ts")
+      File.write!(dirty_target, "test('dirty followup', () => {})\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = dirty_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
+
+      assert get_in(dirty_preflight, ["pending_miu_commit_state", "committed_paths"]) ==
+               ["tests/unit/pending.test.ts"]
+
+      assert get_in(dirty_preflight, ["pending_miu_commit_state", "worktree_paths"]) ==
+               ["tests/unit/dirty-followup.test.ts"]
+
+      dirty_prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
+      assert dirty_prompt =~ "interrupted worker also left in-scope worktree path(s)"
+      assert dirty_prompt =~ "`tests/unit/dirty-followup.test.ts`"
+      assert dirty_prompt =~ "certification cannot start while these paths remain dirty"
+      File.rm!(dirty_target)
+
       File.rm_rf!(Path.join(workspace, ".orocsy/delivery"))
 
       origin = Path.join(test_root, "origin.git")

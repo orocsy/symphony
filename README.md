@@ -70,7 +70,12 @@ authority. A structured pending-MIU lifecycle state also precedes premature PR f
 review rework keeps its best-effort branch refresh when the remote is temporarily unavailable.
 Recovery prompts name an actual committed path, never a wildcard scope. When that committed delta
 needs a missing in-scope fix, the worker creates one conditional follow-up micro commit before
-requesting certification; an already-complete delta receives no duplicate or empty commit.
+requesting certification; an already-complete, clean delta receives no duplicate or empty commit.
+The controller classifies committed, staged, unstaged, and untracked paths together, so in-scope
+dirt must enter that follow-up commit and out-of-scope dirt fails closed. Signed MIU boundaries are
+also copied to controller-owned state outside the issue workspace and restored after workspace
+recreation; set `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
+issue workspace to override that state root.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive

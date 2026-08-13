@@ -71,6 +71,13 @@ additional in-scope edits MUST commit those edits before requesting
 certification; an already-satisfying delta MUST NOT receive an empty or duplicate
 commit. Legacy review-head refresh remains best effort and MUST NOT make a
 temporary remote failure a new dispatch blocker.
+Pending-MIU classification MUST include committed, staged, unstaged, and
+untracked paths while excluding runtime-owned `.orocsy` state. In-scope dirty
+paths MUST require a committed follow-up before certification; out-of-scope or
+denied dirty paths MUST fail closed. Signed MIU boundary evidence MUST survive
+issue-workspace recreation in controller-owned state outside that workspace and
+MUST remain bound to issue identity, branch, contract, revision, and Git
+ancestry before selecting a later pending MIU.
 
 A runtime MAY certify commits after the last MIU checkpoint only for an
 authoritative, signed review-rework dispatch bound to the same issue, branch,

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.ValidationController do
   @attempts_path ".orocsy/delivery/state/validation-attempts.jsonl"
   @events_path ".orocsy/delivery/events/events.jsonl"
   @certificates_dir ".orocsy/delivery/state/miu-certificates"
+  @durable_certificates_dir "miu-certificates"
   @validation_logs_dir ".orocsy/delivery/validation"
   @max_log_bytes 20_000
   @max_capture_bytes 1_000_000
@@ -160,9 +161,18 @@ defmodule SymphonyElixir.ValidationController do
 
   @spec certificates(String.t()) :: [map()]
   def certificates(workspace) when is_binary(workspace) do
-    workspace
-    |> Path.join(Path.join(@certificates_dir, "*.json"))
-    |> Path.wildcard()
+    local_paths =
+      workspace
+      |> Path.join(Path.join(@certificates_dir, "*.json"))
+      |> Path.wildcard()
+
+    durable_paths =
+      workspace
+      |> durable_controller_evidence_dir()
+      |> then(&Path.join([&1, @durable_certificates_dir, "**", "*.json"]))
+      |> Path.wildcard()
+
+    (local_paths ++ durable_paths)
     |> Enum.flat_map(fn path ->
       case File.read(path) do
         {:ok, body} ->
@@ -178,6 +188,7 @@ defmodule SymphonyElixir.ValidationController do
           []
       end
     end)
+    |> Enum.uniq_by(& &1["controller_signature"])
   end
 
   def certificates(_workspace), do: []
@@ -216,7 +227,10 @@ defmodule SymphonyElixir.ValidationController do
          %{} = miu <- Enum.find(compiled.contract["mius"], &(&1["id"] == miu_id)),
          {:ok, base_head_sha} <-
            pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id, opts),
-         {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha) do
+         {:ok, committed_paths} <- changed_paths(workspace, base_head_sha, head_sha),
+         {:ok, worktree_paths} <- worktree_paths(workspace) do
+      changed_paths = Enum.sort(Enum.uniq(committed_paths ++ worktree_paths))
+
       {in_scope_paths, out_of_scope_paths} =
         Enum.split_with(changed_paths, fn path ->
           pending_miu_path_allowed?(path, miu["write_scope"], compiled.denied_scope)
@@ -229,13 +243,15 @@ defmodule SymphonyElixir.ValidationController do
         base_head_sha: base_head_sha,
         head_sha: head_sha,
         changed_paths: changed_paths,
+        committed_paths: committed_paths,
+        worktree_paths: worktree_paths,
         in_scope_paths: in_scope_paths,
         out_of_scope_paths: out_of_scope_paths
       }
 
       cond do
-        changed_paths == [] -> {:no_committed_delta, snapshot}
         out_of_scope_paths != [] -> {:invalid_delta, snapshot}
+        committed_paths == [] -> {:no_committed_delta, snapshot}
         true -> {:committed_delta, snapshot}
       end
     else
@@ -524,6 +540,29 @@ defmodule SymphonyElixir.ValidationController do
     case git(workspace, ["diff", "--name-only", "--no-renames", "#{base_head_sha}..#{head_sha}", "--"]) do
       {:ok, output} -> {:ok, String.split(output, "\n", trim: true)}
       error -> error
+    end
+  end
+
+  defp worktree_paths(workspace) do
+    commands = [
+      ["diff", "--name-only", "--no-renames", "--", ".", ":(exclude).orocsy/"],
+      ["diff", "--cached", "--name-only", "--no-renames", "--", ".", ":(exclude).orocsy/"],
+      ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).orocsy/"]
+    ]
+
+    Enum.reduce_while(commands, {:ok, []}, fn args, {:ok, paths} ->
+      case git(workspace, args) do
+        {:ok, output} ->
+          current = String.split(output, "\n", trim: true)
+          {:cont, {:ok, current ++ paths}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, paths} -> {:ok, Enum.sort(Enum.uniq(paths))}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -1745,19 +1784,12 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp current_certificate(workspace, issue, miu_id) do
-    with certificate when is_map(certificate) <-
-           Enum.find(certificates(workspace), &(&1["miu_id"] == miu_id)),
-         {:ok, compiled} <- structured_contract(issue),
+    with {:ok, compiled} <- structured_contract(issue),
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
-         true <- certificate["event"] == "miu.completed",
-         true <- certificate["authority"] == @authority,
-         true <- certificate["issue_id"] == issue.id,
-         true <- certificate["issue"] == issue.identifier,
-         true <- certificate["contract_hash"] == compiled.contract_hash,
-         true <- certificate["issue_revision"] == RuntimeContract.issue_revision(issue.description, issue.updated_at),
-         true <- certificate["branch"] == compiled.contract["integration_branch"],
-         true <- valid_certificate_range?(workspace, certificate),
-         true <- certificate["head_sha"] == head_sha do
+         certificate when is_map(certificate) <-
+           issue
+           |> valid_miu_certificates(workspace, compiled, head_sha)
+           |> Enum.find(&(&1["miu_id"] == miu_id and &1["head_sha"] == head_sha)) do
       {:ok, certificate}
     else
       _ -> :none
@@ -1816,10 +1848,63 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp write_certificate(workspace, miu_id, certificate) do
-    path = Path.join([workspace, @certificates_dir, safe_id(miu_id) <> ".json"])
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, Jason.encode!(certificate, pretty: true) <> "\n")
+    filename = safe_id(miu_id) <> ".json"
+    body = Jason.encode!(certificate, pretty: true) <> "\n"
+
+    durable_path =
+      Path.join([
+        durable_controller_evidence_dir(workspace),
+        @durable_certificates_dir,
+        durable_certificate_namespace(certificate),
+        filename
+      ])
+
+    local_path = Path.join([workspace, @certificates_dir, filename])
+    :ok = atomic_write_controller_evidence(durable_path, body)
+    :ok = atomic_write_controller_evidence(local_path, body)
     :ok
+  end
+
+  defp durable_controller_evidence_dir(workspace) do
+    root =
+      Application.get_env(:symphony_elixir, :controller_evidence_state_dir) ||
+        System.get_env("SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR") ||
+        Path.join(Path.dirname(workspace), ".orocsy-controller-evidence")
+
+    root
+    |> Path.expand()
+    |> Path.join(sha256(Path.expand(workspace)))
+  end
+
+  defp durable_certificate_namespace(certificate) do
+    [
+      certificate["issue_id"],
+      certificate["issue"],
+      certificate["branch"],
+      certificate["contract_hash"],
+      certificate["issue_revision"]
+    ]
+    |> Enum.map_join(<<0>>, &to_string/1)
+    |> sha256()
+  end
+
+  defp atomic_write_controller_evidence(path, body) do
+    directory = Path.dirname(path)
+    File.mkdir_p!(directory)
+    File.chmod!(directory, 0o700)
+
+    temporary_path =
+      path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+
+    with :ok <- File.write(temporary_path, body, [:exclusive]),
+         :ok <- File.chmod(temporary_path, 0o600),
+         :ok <- File.rename(temporary_path, path) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        File.rm(temporary_path)
+        error
+    end
   end
 
   defp write_validation_log(workspace, event_id, output) do

@@ -12,6 +12,24 @@ defmodule SymphonyElixir.ValidationControllerTest do
     Workspace
   }
 
+  setup do
+    state_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-controller-evidence-#{System.unique_integer([:positive])}"
+      )
+
+    previous = Application.get_env(:symphony_elixir, :controller_evidence_state_dir)
+    Application.put_env(:symphony_elixir, :controller_evidence_state_dir, state_dir)
+
+    on_exit(fn ->
+      restore_application_env(:controller_evidence_state_dir, previous)
+      File.rm_rf(state_dir)
+    end)
+
+    :ok
+  end
+
   test "certifies a clean micro commit after runtime-controlled validation" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
@@ -268,6 +286,87 @@ defmodule SymphonyElixir.ValidationControllerTest do
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
       File.rm_rf(workspace)
+    end
+  end
+
+  test "pending MIU recovery classifies committed and dirty paths together" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    issue = %{
+      issue
+      | description:
+          issue.description
+          |> String.replace("- README.md", "- \"**\"")
+          |> String.replace("dependencies: []", "dependencies: []\ndenied_scope:\n  - SECRET.md")
+    }
+
+    try do
+      File.write!(Path.join(workspace, "SECOND.md"), "in-scope follow-up\n")
+
+      assert {:committed_delta, snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert snapshot.committed_paths == ["README.md"]
+      assert snapshot.worktree_paths == ["SECOND.md"]
+      assert snapshot.changed_paths == ["README.md", "SECOND.md"]
+      assert snapshot.in_scope_paths == ["README.md", "SECOND.md"]
+      assert snapshot.out_of_scope_paths == []
+
+      File.rm!(Path.join(workspace, "SECOND.md"))
+      File.write!(Path.join(workspace, "SECRET.md"), "out-of-scope follow-up\n")
+
+      assert {:invalid_delta, invalid_snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert invalid_snapshot.committed_paths == ["README.md"]
+      assert invalid_snapshot.worktree_paths == ["SECRET.md"]
+      assert invalid_snapshot.in_scope_paths == ["README.md"]
+      assert invalid_snapshot.out_of_scope_paths == ["SECRET.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "restores the certified MIU boundary after workspace recreation" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+    issue = add_second_miu(issue)
+    origin = workspace <> "-origin.git"
+
+    try do
+      assert {:ok, first_certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      File.write!(Path.join(workspace, "SECOND.md"), "second MIU\n")
+      git!(workspace, ["add", "SECOND.md"])
+      git!(workspace, ["commit", "-m", "Implement second MIU"])
+      second_head = git_output!(workspace, ["rev-parse", "HEAD"])
+
+      git!(workspace, ["init", "--bare", origin])
+      git!(workspace, ["remote", "add", "origin", origin])
+      git!(workspace, ["push", "-u", "origin", "orocsy/cod-700"])
+
+      File.rm_rf!(workspace)
+
+      {_output, 0} =
+        System.cmd("git", ["clone", "--branch", "orocsy/cod-700", origin, workspace], stderr_to_stdout: true)
+
+      refute File.exists?(Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json"))
+
+      assert ValidationController.certified_miu_ids(issue, workspace) == ["COD-700-MIU-1"]
+
+      assert {:committed_delta, snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert snapshot.miu_id == "COD-700-MIU-2"
+      assert snapshot.base_head_sha == first_certificate["head_sha"]
+      assert snapshot.head_sha == second_head
+      assert snapshot.committed_paths == ["SECOND.md"]
+      assert snapshot.worktree_paths == []
+      assert snapshot.changed_paths == ["SECOND.md"]
+      assert snapshot.out_of_scope_paths == []
+    after
+      File.rm_rf(workspace)
+      File.rm_rf(origin)
     end
   end
 
@@ -2282,7 +2381,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
-  test "ignores a worker-tampered MIU certificate" do
+  test "keeps durable controller evidence when a worker tampers with the workspace copy" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
@@ -2290,13 +2389,13 @@ defmodule SymphonyElixir.ValidationControllerTest do
       path = Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json")
       File.write!(path, Jason.encode!(Map.put(certificate, "head_sha", "forged-head")))
 
-      assert ValidationController.certificates(workspace) == []
+      assert ValidationController.certificates(workspace) == [certificate]
     after
       File.rm_rf(workspace)
     end
   end
 
-  test "does not reuse a signed MIU certificate from another issue as current cache" do
+  test "does not let another issue's workspace copy replace durable MIU evidence" do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
@@ -2305,9 +2404,10 @@ defmodule SymphonyElixir.ValidationControllerTest do
       path = Path.join(workspace, ".orocsy/delivery/state/miu-certificates/COD-700-MIU-1.json")
       File.write!(path, Jason.encode!(SymphonyElixir.ControllerEvidence.sign(forged)))
 
-      assert {:ok, certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
-      assert certificate["issue_id"] == issue.id
-      assert certificate["issue"] == issue.identifier
+      assert ValidationController.certified_miu_ids(issue, workspace) == ["COD-700-MIU-1"]
+
+      assert {:error, :all_mius_already_certified} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
       File.rm_rf(workspace)
     end
@@ -2352,7 +2452,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert ValidationController.certified_miu_ids(issue, workspace) == ["COD-700-MIU-1"]
       assert ValidationController.certified_miu_ids(other_issue, workspace) == []
 
-      assert {:error, {:miu_certificate_issue_mismatch, "COD-700-MIU-1"}} =
+      assert {:error, {:missing_miu_certificate, "COD-700-MIU-1"}} =
                HandoffController.process_requests(other_issue, workspace)
     after
       File.rm_rf(workspace)
