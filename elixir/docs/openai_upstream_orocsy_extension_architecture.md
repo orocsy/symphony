@@ -1283,14 +1283,13 @@ justify moving policy back into kernel files.
 ## Technical MIU Traces
 
 Implementation detail is developed incrementally in
-`openai_extension_miu_technical_design.md`. Its current revision decomposes
-Slice 0 and specifies the approved `OXE-0.1` pinned upstream-baseline
-verifier. The parent gate is not yet formally accepted. `OXE-0.1` exists on
-the upstream-first integration lineage as a review-hardening candidate. The
-owner has blessed deferring the Orocsy-history merge to Slice 2. Its focused
-gates are green; the exact full handoff gate and final re-review still control
-whether OXE-0.1 is cleared to land. No Orocsy runtime behavior or kernel hook
-has been introduced.
+`openai_extension_miu_technical_design.md`. `OXE-0.1` and its test-only
+`OXE-0.1a` support unit are review-cleared on the upstream-first integration
+lineage. The measured `OXE-0.2` trace is recorded in
+`openai_extension_oxe02_kernel_patch_budget.md`: a throwaway no-op host
+prototype identified three kernel files, four named hook seams, and an exact
+40-changed-line ceiling. The prototype code was discarded. No Orocsy runtime
+behavior or production kernel hook has been introduced.
 
 ## Approval Gate
 

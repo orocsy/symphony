@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate
+Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 trace ready for review
 
 Date: 2026-07-29
 
@@ -11,8 +11,9 @@ Parent architecture:
 
 Scope: translate the approved migration direction into independently
 implementable technical units. This revision fully specifies the first Slice 0
-unit only. Later units are named to make the dependency boundary explicit, but
-they are not implementation-ready until their own traces are added.
+unit and links the measured `OXE-0.2` kernel patch-budget trace. Later units are
+named to make the dependency boundary explicit, but they are not
+implementation-ready until their own traces are added.
 
 ## Decision
 
@@ -635,6 +636,12 @@ after the test-only fix, 100 repeated focused iterations and the exact
 `make all` gate are green. The gate is fixed rather than waived.
 
 `OXE-0.1` is approved, conditional on the parent architecture approval gate.
-Next, write the `OXE-0.2` trace. It must derive its initial allowed kernel
-paths from an actual extension-host hook prototype against the pinned OpenAI
-tree; it must not guess line budgets from the current Orocsy fork.
+The next trace is now recorded in
+[`openai_extension_oxe02_kernel_patch_budget.md`](openai_extension_oxe02_kernel_patch_budget.md).
+It derives three allowed kernel paths and a 40-changed-line total ceiling from
+an actual no-op extension-host prototype against the pinned OpenAI tree. The
+prototype exposed and corrected an immutable-turn-context recursion hazard;
+its code was discarded, and production host work remains Slice 1 scope.
+
+Next, review the `OXE-0.2` trace. If accepted, implement its manifest and
+offline audit red-first without landing any extension-host code.
