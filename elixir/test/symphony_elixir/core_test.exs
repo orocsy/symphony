@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.ScopeAccess.Controller, as: ScopeAccessController
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -9027,10 +9029,33 @@ defmodule SymphonyElixir.CoreTest do
       assert prompt =~ "--type miu.completion_requested"
       assert prompt =~ "create one clean local micro commit"
       assert prompt =~ "append only `miu.completion_requested`"
-      assert prompt =~ "When a Runtime Contract execution gate is prepended"
       refute prompt =~ "stop after the scoped code/test checkpoint and `technical-miu-trace`"
       refute prompt =~ "Local handoff recovery checkpoint"
       refute prompt =~ "inspect the focused local diff"
+
+      assert {:ok, blocking_correction} =
+               Workspace.create_correction_in_workspace(workspace, issue, %{
+                 source: "symphony.runtime.scope-access",
+                 source_status: "blocked",
+                 summary: "Declared dependency scope requires operator approval",
+                 findings: ["The next MIU needs a denied dependency path."],
+                 required_corrections: ["An operator must revise the Runtime Contract scope."],
+                 next_action: "block",
+                 guard: %{"reason_class" => "dependency_scope_blocked"}
+               })
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = blocked_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert blocked_preflight["checkpoint_event"] == "operator-blocked"
+      assert blocked_preflight["first_task"] =~ "operator"
+      assert blocked_preflight["first_task"] =~ blocking_correction["summary"]
+      assert blocked_preflight["first_task"] =~ "Do not edit product files"
+
+      blocked_prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert String.starts_with?(blocked_prompt, "Runtime Contract blocking correction gate:")
+      assert blocked_prompt =~ "operator-only"
+      refute blocked_prompt =~ "Implement only MIU `COD-276-MIU-2`"
     after
       File.rm_rf(test_root)
     end
@@ -16865,6 +16890,43 @@ defmodule SymphonyElixir.CoreTest do
                2,
                "worker-a"
              )
+  end
+
+  test "scope access rechecks allowed and denied scope after canonicalizing read operands" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-scope-canonical-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, "allowed"))
+      File.write!(Path.join(workspace, "SECRET.md"), "secret\n")
+
+      policy = %{
+        "scope_bundle" => %{
+          "read_context" => [%{"path" => "allowed", "operation" => "read"}],
+          "write_scope" => [],
+          "conflict_scope" => [],
+          "denied_scope" => [%{"path" => "SECRET.md", "operation" => "read"}]
+        }
+      }
+
+      request = %{
+        "operation" => "read",
+        "paths" => ["allowed/../SECRET.md"],
+        "broad" => false,
+        "command_fingerprint" => "canonical-read-escape"
+      }
+
+      assert {:block, correction} =
+               ScopeAccessController.decide(request, policy, workspace)
+
+      assert get_in(correction, [:guard, "reason_class"]) == "denied_scope"
+      assert get_in(correction, [:guard, "scope_access", "paths"]) == ["SECRET.md"]
+    after
+      File.rm_rf(workspace)
+    end
   end
 
   test "safe direct import read writes read-context policy patch and retries once" do

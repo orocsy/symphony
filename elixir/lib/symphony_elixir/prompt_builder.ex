@@ -131,31 +131,35 @@ defmodule SymphonyElixir.PromptBuilder do
   defp maybe_prepend_runtime_contract_guidance(prompt, _issue, _workspace), do: prompt
 
   defp runtime_contract_prompt_guidance(compiled, issue, workspace, preflight) do
-    case blocking_controller_correction(preflight) do
+    case blocking_or_escalating_correction(preflight) do
       nil -> runtime_contract_guidance(compiled, issue, workspace, preflight)
-      correction -> runtime_contract_blocking_controller_guidance(correction)
+      correction -> runtime_contract_blocking_guidance(correction)
     end
   end
 
-  defp blocking_controller_correction(%{"open_corrections" => corrections})
+  defp blocking_or_escalating_correction(%{"open_corrections" => corrections})
        when is_list(corrections) do
     Enum.find(corrections, fn correction ->
-      correction["source"] == "symphony.runtime.validation-controller" and
-        correction["next_action"] in ["block", "escalate"]
+      correction["next_action"] in ["block", "escalate"]
     end)
   end
 
-  defp blocking_controller_correction(_preflight), do: nil
+  defp blocking_or_escalating_correction(_preflight), do: nil
 
-  defp runtime_contract_blocking_controller_guidance(correction) do
+  defp runtime_contract_blocking_guidance(correction) do
     summary = correction["summary"] || correction["correction_id"] || "blocking runtime correction"
 
-    """
-    Runtime Contract blocking controller gate:
+    label =
+      if correction["source"] == "symphony.runtime.validation-controller",
+        do: "controller gate",
+        else: "correction gate"
 
-    - Runtime certification is operator-only: #{summary}.
-    - Preserve the certified head. Do not edit product files, run validation, create a post-certification commit, append another runtime request, push, or request review.
-    - Record no substitute worker evidence. Stop for the operator action named by the controller correction.
+    """
+    Runtime Contract blocking #{label}:
+
+    - Runtime execution is operator-only: #{summary}.
+    - Preserve the current head. Do not edit product files, run validation, create a commit, append another runtime request, push, or request review.
+    - Record no substitute worker evidence. Stop for the operator action named by the blocking correction.
     """
     |> String.trim()
   end

@@ -458,6 +458,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         |> Map.put("developerInstructions", fresh_implementation_developer_instructions())
         |> Map.put("config", fresh_implementation_thread_config())
 
+      {:ok, %{"mode" => "handoff_recovery", "checkpoint_event" => "operator-blocked"}} ->
+        params
+        |> Map.put("baseInstructions", operator_blocked_base_instructions())
+        |> Map.put("developerInstructions", operator_blocked_developer_instructions())
+        |> Map.put("config", fresh_implementation_thread_config())
+
       {:ok,
        %{
          "mode" => "handoff_recovery",
@@ -647,6 +653,28 @@ defmodule SymphonyElixir.Codex.AppServer do
     Do not load skills, plugins, apps, MCP tools, prior session logs, historical tickets, or broad project context. Do not broaden read or write scope.
     Do not request GitHub review or change Linear state yourself.
     Never merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp operator_blocked_base_instructions do
+    """
+    Symphony operator-blocked recovery worker.
+
+    The runtime has withdrawn implementation and handoff authority until an operator resolves the named correction.
+    Preserve the current workspace and Git head. Do not edit files, run validation, create commits, append runtime
+    requests, push, request review, or change tracker state. Report no substitute evidence and stop.
+    """
+    |> String.trim()
+  end
+
+  defp operator_blocked_developer_instructions do
+    """
+    This is an operator-only checkpoint. The blocking Runtime Contract correction is authoritative.
+
+    Do not inspect broad project context or attempt the pending MIU. Do not edit product files, run validation,
+    create a commit, append `miu.completion_requested` or `handoff.requested`, push, request review, or change tracker
+    state. Preserve the current head and stop for the operator action named in the prompt.
     """
     |> String.trim()
   end

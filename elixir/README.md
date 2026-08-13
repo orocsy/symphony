@@ -105,14 +105,18 @@ uncertified MIU range, so a later restore cannot hide an undeclared write. Plain
 directory scopes cover descendants in classification and certification just as
 they do at command time, including normalization of leading `./` prefixes before
 contract-conflict checks or runtime matching. Trailing `.` and `,` characters
-remain part of literal Git filenames and scope operands. Fresh structured MIU
+and leading/trailing whitespace remain part of literal Git filenames and scope
+operands. Read operands are canonicalized before allow- and deny-scope checks,
+so lexical traversal cannot turn an allowed path into a denied canonical target.
+Fresh structured MIU
 dispatch uses the `miu.completion_requested` Runtime Contract checkpoint rather
 than the legacy `technical-miu-trace` first-turn boundary. Safe pending-MIU states keep their
-micro-commit and `miu.completion_requested` guidance when a correction is open;
+micro-commit and `miu.completion_requested` guidance when a retry correction is open;
 correction refresh cannot replace it with legacy push/review handoff. A
-controller-owned `block` or `escalate` correction after certification remains
-operator-only and grants no new edit, validation, commit, runtime-request, push,
-or review authority. Signed MIU certificates are mirrored to
+`block` or `escalate` correction from any source instead takes dispatch to an
+operator-only checkpoint. A controller-owned block is enforced again by MIU and
+handoff certification, not only by its prompt, and grants no new edit,
+validation, commit, runtime-request, push, or review authority. Signed MIU certificates are mirrored to
 controller-owned state outside each issue workspace, allowing later-MIU
 boundaries to survive workspace recreation. Override that state root with
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR`, pointing it to an operator-owned path

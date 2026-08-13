@@ -72,9 +72,11 @@ defmodule SymphonyElixir.ValidationController do
   defp process_named_miu_request(issue, workspace, request, miu_id)
        when is_binary(miu_id) and miu_id != "" do
     result =
-      case current_certificate(workspace, issue, miu_id) do
-        {:ok, certificate} -> {:ok, certificate}
-        :none -> certify_miu(issue, workspace, miu_id)
+      with :ok <- ensure_runtime_requests_allowed(workspace) do
+        case current_certificate(workspace, issue, miu_id) do
+          {:ok, certificate} -> {:ok, certificate}
+          :none -> certify_miu(issue, workspace, miu_id)
+        end
       end
 
     case reconcile_runtime_corrections(issue, workspace, miu_id, result) do
@@ -112,7 +114,8 @@ defmodule SymphonyElixir.ValidationController do
           {:ok, map()} | {:error, term()} | {:blocked, term()}
   def certify_miu(%Issue{} = issue, workspace, miu_id)
       when is_binary(workspace) and is_binary(miu_id) do
-    with {:ok, compiled} <- structured_contract(issue),
+    with :ok <- ensure_runtime_requests_allowed(workspace),
+         {:ok, compiled} <- structured_contract(issue),
          {:ok, miu} <- fetch_miu(compiled.contract, miu_id),
          {:ok, branch} <- git(workspace, ["branch", "--show-current"]),
          true <- branch == compiled.contract["integration_branch"] || {:error, :canonical_branch_mismatch},
@@ -159,6 +162,37 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   def certify_miu(_issue, _workspace, _miu_id), do: {:error, :invalid_miu_certification_request}
+
+  @spec ensure_runtime_requests_allowed(String.t()) :: :ok | {:blocked, term()}
+  def ensure_runtime_requests_allowed(workspace) when is_binary(workspace) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> runtime_request_correction_gate()
+  end
+
+  def ensure_runtime_requests_allowed(_workspace),
+    do: {:blocked, {:controller_correction_open, "invalid workspace"}}
+
+  defp runtime_request_correction_gate(corrections) do
+    case Enum.find(corrections, &controller_blocking_correction?/1) do
+      %{"correction_id" => correction_id} when is_binary(correction_id) ->
+        {:blocked, {:controller_correction_open, correction_id}}
+
+      %{} = correction ->
+        summary = correction["summary"] || "blocking runtime-controller correction"
+        {:blocked, {:controller_correction_open, summary}}
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp controller_blocking_correction?(%{} = correction) do
+    correction["source"] == @authority and
+      correction["next_action"] in ["block", "escalate"]
+  end
+
+  defp controller_blocking_correction?(_correction), do: false
 
   @spec certificates(String.t()) :: [map()]
   def certificates(workspace) when is_binary(workspace) do
@@ -574,21 +608,32 @@ defmodule SymphonyElixir.ValidationController do
   defp changed_paths_across_commits(workspace, base_head_sha, head_sha) do
     case git(workspace, [
            "log",
-           "--format=",
+           "--format=tformat:%x00",
            "--name-only",
+           "-z",
            "--no-renames",
            "-m",
            "#{base_head_sha}..#{head_sha}",
            "--"
          ]) do
       {:ok, output} ->
-        paths = output |> String.split("\n", trim: true) |> Enum.uniq() |> Enum.sort()
+        paths =
+          output
+          |> String.split(<<0>>, trim: true)
+          |> Enum.map(&strip_git_log_record_separator/1)
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.uniq()
+          |> Enum.sort()
+
         {:ok, paths}
 
       error ->
         error
     end
   end
+
+  defp strip_git_log_record_separator("\n" <> path), do: path
+  defp strip_git_log_record_separator(path), do: path
 
   defp paths_allowed?(changed_paths, allowed_scope) do
     Enum.all?(changed_paths, fn path ->
@@ -1281,6 +1326,14 @@ defmodule SymphonyElixir.ValidationController do
       end
     end
   end
+
+  def reconcile_runtime_corrections(
+        _issue,
+        _workspace,
+        _miu_id,
+        {:blocked, {:controller_correction_open, _correction_id}}
+      ),
+      do: :ok
 
   def reconcile_runtime_corrections(issue, workspace, miu_id, {:blocked, reason}) do
     head_sha = git_value(workspace, ["rev-parse", "HEAD"])

@@ -341,7 +341,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         preflight_file,
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "review_rework",
           "issue" => "MT-REVIEW",
           "branch" => "orocsy/mt-review"
@@ -466,7 +466,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         preflight_file,
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "fresh_implementation",
           "issue" => "MT-FRESH",
           "requirements" => %{
@@ -587,7 +587,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         preflight_file,
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "handoff_recovery",
           "issue" => "MT-STRUCTURED-HANDOFF",
           "checkpoint_event" => "runtime-contract-gate",
@@ -701,7 +701,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         Path.join(state_dir, "dispatch-preflight.json"),
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "handoff_recovery",
           "checkpoint_event" => "correction-scoped-fix",
           "first_task" => "Fix and resolve the generic correction",
@@ -738,7 +738,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         Path.join(preflight_dir, "dispatch-preflight.json"),
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "handoff_recovery",
           "checkpoint_event" => "runtime-contract-gate",
           "requirements" => %{"runtime_contract_status" => "structured"}
@@ -773,6 +773,38 @@ defmodule SymphonyElixir.AppServerTest do
 
       correction_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
       assert correction_params["developerInstructions"] =~ "structured handoff-recovery micro-worker"
+
+      File.write!(
+        Path.join(inbox_dir, "correction_live.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction-live",
+          "status" => "open",
+          "next_action" => "block",
+          "source" => "symphony.runtime.scope-access",
+          "summary" => "Operator approval required"
+        })
+      )
+
+      File.write!(
+        Path.join(preflight_dir, "dispatch-preflight.json"),
+        signed_preflight_json(%{
+          "mode" => "handoff_recovery",
+          "checkpoint_event" => "operator-blocked",
+          "requirements" => %{"runtime_contract_status" => "structured"},
+          "open_corrections" => [
+            %{
+              "correction_id" => "correction-blocking",
+              "next_action" => "block",
+              "summary" => "Operator approval required"
+            }
+          ]
+        })
+      )
+
+      blocked_params = AppServer.worker_thread_overrides_for_test(base_params, workspace)
+      assert blocked_params["baseInstructions"] =~ "operator-blocked recovery worker"
+      assert blocked_params["developerInstructions"] =~ "operator-only checkpoint"
+      refute blocked_params["developerInstructions"] =~ "create one clean local micro commit"
       assert correction_params["developerInstructions"] =~ "correction is the first task"
       refute correction_params["developerInstructions"] == "generic correction instructions"
     after
@@ -2253,7 +2285,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         preflight_file,
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "integration_check",
           "issue" => "MT-INTEGRATION-GH-READ",
           "branch" => "orocsy/feature-analytics-observability-integration",
@@ -5737,7 +5769,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.write!(
         preflight_file,
-        Jason.encode!(%{
+        signed_preflight_json(%{
           "mode" => "integration_check",
           "issue" => "MT-INTEGRATION-FILE-GREP",
           "branch" => "orocsy/mt-integration-file-grep",
@@ -8624,5 +8656,11 @@ defmodule SymphonyElixir.AppServerTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp signed_preflight_json(preflight) do
+    preflight
+    |> SymphonyElixir.ControllerEvidence.sign()
+    |> Jason.encode!()
   end
 end

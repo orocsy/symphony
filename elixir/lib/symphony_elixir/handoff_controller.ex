@@ -58,11 +58,7 @@ defmodule SymphonyElixir.HandoffController do
   defp process_handoff_request(issue, workspace, contract_identity) do
     case RuntimeRequest.latest_unprocessed(workspace, "handoff.requested", contract_identity) do
       {:ok, request} ->
-        result =
-          case HandoffCertificate.current(issue, workspace) do
-            {:ok, certificate} -> {:ok, certificate}
-            _ -> certify_handoff(issue, workspace)
-          end
+        result = handoff_request_result(issue, workspace)
 
         case reconcile_handoff_result(result, issue, workspace) do
           ^result ->
@@ -79,6 +75,20 @@ defmodule SymphonyElixir.HandoffController do
 
       :none ->
         :none
+    end
+  end
+
+  defp handoff_request_result(issue, workspace) do
+    case ValidationController.ensure_runtime_requests_allowed(workspace) do
+      :ok -> current_or_new_handoff_certificate(issue, workspace)
+      {:blocked, _reason} = blocked -> blocked
+    end
+  end
+
+  defp current_or_new_handoff_certificate(issue, workspace) do
+    case HandoffCertificate.current(issue, workspace) do
+      {:ok, certificate} -> {:ok, certificate}
+      _ -> certify_handoff(issue, workspace)
     end
   end
 
@@ -125,7 +135,8 @@ defmodule SymphonyElixir.HandoffController do
   end
 
   defp certify_handoff(issue, workspace) do
-    with {:ok, compiled} <- structured_contract(issue),
+    with :ok <- ValidationController.ensure_runtime_requests_allowed(workspace),
+         {:ok, compiled} <- structured_contract(issue),
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          certificates <- relevant_miu_certificates(issue, compiled, workspace),
          :ok <- verify_miu_certificates(issue, workspace, compiled, head_sha, certificates),

@@ -47,7 +47,9 @@ Structured handoff recovery may read a file named directly by the active Runtime
 must be declared, derived/imported context is not promoted, shell chains and substitutions remain
 denied, and an operator-configured command ban always takes precedence. Existing targets must
 canonicalize to regular files inside the workspace; a missing declared target may be probed only
-when its canonical path remains inside the workspace. When a denied compound
+when its canonical path remains inside the workspace. Read operands are canonicalized before both
+allow- and deny-scope checks, so an allowed lexical prefix cannot traverse into a denied target.
+When a denied compound
 read is recoverable, the worker is instructed to split it into separate single-purpose commands;
 the runtime never authorizes the compound command itself. In `handoff_recovery` only, the runtime
 may also admit the canonical active issue brief at `.orocsy/delivery/issue-brief.md` or
@@ -77,14 +79,17 @@ enumerated across every commit in the uncertified range, so restoring a path at 
 cannot hide an undeclared write. A dirty-only pending MIU receives the same structured micro-commit
 and `miu.completion_requested` sequence instead of the legacy push/review handoff. Plain directory
 write scopes authorize descendants consistently in command enforcement, recovery classification,
-and certification; leading `./` path prefixes are normalized before conflict checks or matching,
-while trailing filename punctuation remains literal so `README.md.` cannot alias `README.md`.
+and certification; one exact leading `./` path prefix is normalized before conflict checks or
+matching, while leading/trailing whitespace and trailing filename punctuation remain literal so
+`README.md ` and `README.md.` cannot alias `README.md`.
 Fresh structured MIU dispatch advertises the same `miu.completion_requested` checkpoint as its
 execution gate instead of stopping at the legacy `technical-miu-trace` boundary.
-An open correction on a safe pending MIU keeps the same `miu.completion_requested` certification
-sequence and cannot fall through to legacy push/review handoff. A controller-owned `block` or
-`escalate` correction remains operator-only after final certification: it cannot authorize another
-edit, validation run, commit, runtime request, push, or review handoff. The signed certificates are also
+An open retry correction on a safe pending MIU keeps the same `miu.completion_requested`
+certification sequence and cannot fall through to legacy push/review handoff. Any open `block` or
+`escalate` correction takes dispatch to an operator-only checkpoint before fresh implementation or
+review work. A controller-owned block is also enforced at the MIU and handoff certification APIs,
+not only in prompt text: it cannot authorize another edit, validation run, commit, runtime request,
+push, or review handoff. The signed certificates are also
 copied to controller-owned state outside the
 issue workspace and restored after workspace recreation; set
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every

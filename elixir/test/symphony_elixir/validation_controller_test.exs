@@ -208,7 +208,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
     {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
 
     try do
-      for path <- ["README.md.", "README.md,"] do
+      for path <- [" README.md", "README.md ", "README.md.", "README.md,"] do
         File.write!(Path.join(workspace, path), "distinct Linux filename\n")
         git!(workspace, ["add", path])
       end
@@ -219,12 +219,12 @@ defmodule SymphonyElixir.ValidationControllerTest do
                ValidationController.pending_miu_commit_state(issue, workspace)
 
       assert snapshot.in_scope_paths == ["README.md"]
-      assert snapshot.out_of_scope_paths == ["README.md,", "README.md."]
+      assert snapshot.out_of_scope_paths == [" README.md", "README.md ", "README.md,", "README.md."]
 
       assert {:error, {:undeclared_write, changed_paths}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
 
-      assert changed_paths == ["README.md", "README.md,", "README.md."]
+      assert changed_paths == [" README.md", "README.md", "README.md ", "README.md,", "README.md."]
     after
       File.rm_rf(workspace)
     end
@@ -1444,7 +1444,16 @@ defmodule SymphonyElixir.ValidationControllerTest do
   end
 
   test "exhausted validation budget replaces retry guidance with a durable block" do
-    {workspace, issue} = workspace_and_issue("0 tests, 0 failures")
+    script_body = """
+    #!/bin/sh
+    if [ -f .orocsy/validation-passes ]; then
+      echo '3 tests, 0 failures'
+    else
+      echo '0 tests, 0 failures'
+    fi
+    """
+
+    {workspace, issue} = workspace_and_issue("unused", script_body: script_body)
 
     try do
       allow_workspace_corrections!(workspace)
@@ -1473,6 +1482,27 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert correction["next_action"] == "block"
       assert get_in(correction, ["guard", "reason_class"]) == "product_fix_budget_exhausted"
       assert Enum.any?(correction["findings"], &String.contains?(&1, "Declared write scope: README.md"))
+
+      File.touch!(Path.join(workspace, ".orocsy/validation-passes"))
+      commit_readme!(workspace, "Unapproved repair after controller block")
+
+      assert {:blocked, {:controller_correction_open, correction_id}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert correction_id == correction["correction_id"]
+
+      append_event!(workspace, issue, %{
+        "event" => "miu.completion_requested",
+        "status" => "requested",
+        "miu_id" => "COD-700-MIU-1"
+      })
+
+      assert {:blocked, {:controller_correction_open, ^correction_id}} =
+               ValidationController.process_requests(issue, workspace)
+
+      assert ValidationController.certificates(workspace) == []
+      assert [still_open] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert still_open["correction_id"] == correction_id
     after
       File.rm_rf(workspace)
     end
@@ -1588,7 +1618,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
                DispatchPreflight.prepare(workspace, issue)
 
-      assert preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert preflight["checkpoint_event"] == "operator-blocked"
       assert preflight["first_task"] =~ "operator"
       assert preflight["first_task"] =~ "Do not edit product files"
       assert preflight["first_task"] =~ "create a post-certification commit"
@@ -1598,6 +1628,15 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert prompt =~ "operator-only"
       assert prompt =~ "Do not edit product files"
       refute prompt =~ "Make the smallest in-scope source edit"
+
+      append_event!(workspace, issue, %{"event" => "handoff.requested", "status" => "requested"})
+
+      assert {:blocked, {:controller_correction_open, correction_id}} =
+               HandoffController.process_requests(issue, workspace)
+
+      assert correction_id == correction["correction_id"]
+      assert [still_open] = Workspace.open_blocking_corrections_in_workspace(workspace)
+      assert still_open["correction_id"] == correction_id
     after
       File.rm_rf(workspace)
     end

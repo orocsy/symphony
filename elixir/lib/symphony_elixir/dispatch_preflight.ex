@@ -286,20 +286,20 @@ defmodule SymphonyElixir.DispatchPreflight do
     unsafe_pending_miu? =
       unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"])
 
-    controller_owned? =
+    first_correction_blocking? =
       visible_corrections
       |> List.first()
-      |> controller_validation_correction?()
+      |> blocking_or_escalating_correction?()
 
     checkpoint_event =
       cond do
         structured? and unsafe_pending_miu? ->
           "runtime-contract-gate"
 
-        structured? and safe_pending_miu_commit_state?(preflight["pending_miu_commit_state"]) ->
-          "runtime-contract-gate"
+        first_correction_blocking? ->
+          "operator-blocked"
 
-        structured? and controller_owned? ->
+        structured? and safe_pending_miu_commit_state?(preflight["pending_miu_commit_state"]) ->
           "runtime-contract-gate"
 
         visible_corrections != [] ->
@@ -650,7 +650,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp preflight_mode(workspace, _issue, requirements, inspection, pending_miu_commit_state) do
     cond do
-      blocking_controller_validation_correction?(workspace) ->
+      blocking_or_escalating_correction?(workspace) ->
         "handoff_recovery"
 
       integration_check_mergeability?(requirements, inspection) ->
@@ -932,18 +932,17 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp retryable_controller_validation_correction?(_correction), do: false
 
-  defp blocking_controller_validation_correction?(workspace) when is_binary(workspace) do
+  defp blocking_or_escalating_correction?(workspace) when is_binary(workspace) do
     workspace
     |> Workspace.open_blocking_corrections_in_workspace()
-    |> Enum.any?(&blocking_controller_validation_correction?/1)
+    |> Enum.any?(&blocking_or_escalating_correction?/1)
   end
 
-  defp blocking_controller_validation_correction?(%{} = correction) do
-    controller_validation_correction?(correction) and
-      correction["next_action"] in ["block", "escalate"]
+  defp blocking_or_escalating_correction?(%{} = correction) do
+    correction["next_action"] in ["block", "escalate"]
   end
 
-  defp blocking_controller_validation_correction?(_correction), do: false
+  defp blocking_or_escalating_correction?(_correction), do: false
 
   defp controller_validation_correction?(%{} = correction) do
     correction["source"] == "symphony.runtime.validation-controller"
@@ -1412,10 +1411,10 @@ defmodule SymphonyElixir.DispatchPreflight do
     correction_active? = open_corrections != []
     structured_contract? = requirements["runtime_contract_status"] == "structured"
 
-    first_correction_controller_owned? =
+    first_correction_blocking? =
       open_corrections
       |> List.first()
-      |> controller_validation_correction?()
+      |> blocking_or_escalating_correction?()
 
     base_first_task =
       handoff_recovery_first_task([], requirements, workspace, issue, pending_miu_commit_state)
@@ -1451,10 +1450,10 @@ defmodule SymphonyElixir.DispatchPreflight do
           structured_contract? and unsafe_pending_miu_commit_state?(pending_miu_commit_state) ->
             "runtime-contract-gate"
 
-          structured_contract? and safe_pending_miu_commit_state?(pending_miu_commit_state) ->
-            "runtime-contract-gate"
+          first_correction_blocking? ->
+            "operator-blocked"
 
-          structured_contract? and first_correction_controller_owned? ->
+          structured_contract? and safe_pending_miu_commit_state?(pending_miu_commit_state) ->
             "runtime-contract-gate"
 
           correction_active? ->
@@ -1614,7 +1613,7 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_correction_summaries(all_open_corrections) do
     visible = Enum.take(all_open_corrections, 5)
 
-    case Enum.find(all_open_corrections, &blocking_controller_validation_correction?/1) do
+    case Enum.find(all_open_corrections, &blocking_or_escalating_correction?/1) do
       nil ->
         case Enum.find(all_open_corrections, &retryable_controller_validation_correction?/1) do
           nil -> visible
@@ -1627,15 +1626,19 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp handoff_recovery_correction_task(correction) do
-    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+    if blocking_or_escalating_correction?(correction) do
+      blocking_correction_task(correction)
+    else
+      summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
 
-    "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Inspect the existing focused dirty delta first. When that delta already addresses the named correction and current passed evidence covers it, resolve the correction from that evidence and continue commit/push/review handoff without manufacturing another edit or rerunning the same validation. Otherwise edit only the named in-scope files, run focused validation, and resolve the correction after evidence is recorded. Do not use unrelated or stale handoff evidence to skip the correction."
+      "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Inspect the existing focused dirty delta first. When that delta already addresses the named correction and current passed evidence covers it, resolve the correction from that evidence and continue commit/push/review handoff without manufacturing another edit or rerunning the same validation. Otherwise edit only the named in-scope files, run focused validation, and resolve the correction after evidence is recorded. Do not use unrelated or stale handoff evidence to skip the correction."
+    end
   end
 
   defp structured_handoff_recovery_correction_task(correction, pending_miu_commit_state) do
     cond do
-      blocking_controller_validation_correction?(correction) ->
-        blocking_controller_validation_correction_task(correction)
+      blocking_or_escalating_correction?(correction) ->
+        blocking_correction_task(correction)
 
       retryable_controller_validation_correction?(correction) ->
         summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
@@ -1650,10 +1653,10 @@ defmodule SymphonyElixir.DispatchPreflight do
     end
   end
 
-  defp blocking_controller_validation_correction_task(correction) do
+  defp blocking_correction_task(correction) do
     summary = correction["summary"] || correction["correction_id"] || "blocking runtime correction"
 
-    "Runtime certification is operator-blocked: #{summary}. Fail closed. Do not edit product files, run validation, create a post-certification commit, append another runtime request, push, or request review. Preserve the certified head and stop for the operator action named by the correction."
+    "Runtime execution is operator-blocked: #{summary}. Fail closed. Do not edit product files, run validation, create a post-certification commit or any other commit, append another runtime request, push, or request review. Preserve the current head and stop for the operator action named by the correction."
   end
 
   defp structured_pending_miu_correction_task(correction, pending_miu_commit_state) do
@@ -2075,6 +2078,23 @@ defmodule SymphonyElixir.DispatchPreflight do
     |> String.trim()
   end
 
+  defp handoff_recovery_prompt_context(%{"checkpoint_event" => "operator-blocked"} = preflight) do
+    open_corrections = preflight["open_corrections"] || []
+
+    """
+    Runtime dispatch preflight:
+
+    - Mode: operator-blocked handoff recovery
+    - Preflight file: `#{@preflight_path}`
+    - Branch: `#{preflight["branch"] || "unknown"}`
+    - Required action: #{preflight["first_task"]}
+    - Open Orocsy corrections: #{format_corrections(open_corrections)}
+    - This is an operator-only checkpoint. Do not edit product files, run validation, create a commit,
+      append a runtime request, push, or request review.
+    """
+    |> String.trim()
+  end
+
   defp handoff_recovery_prompt_context(preflight) do
     requirements = preflight["requirements"] || %{}
     review = preflight["review"] || %{}
@@ -2157,7 +2177,6 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp structured_recovery_state_limit(%{
          "open_corrections" => [
            %{
-             "source" => "symphony.runtime.validation-controller",
              "next_action" => next_action
            }
            | _
