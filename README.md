@@ -73,8 +73,13 @@ needs a missing in-scope fix, the worker creates one conditional follow-up micro
 requesting certification; an already-complete, clean delta receives no duplicate or empty commit.
 The controller classifies committed, staged, unstaged, and untracked paths together, so in-scope
 dirt must enter that follow-up commit and out-of-scope dirt fails closed. Signed MIU boundaries are
-also copied to controller-owned state outside the issue workspace and restored after workspace
-recreation; set `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
+enumerated across every commit in the uncertified range, so restoring a path at the range endpoint
+cannot hide an undeclared write. A dirty-only pending MIU receives the same structured micro-commit
+and `miu.completion_requested` sequence instead of the legacy push/review handoff. Plain directory
+write scopes authorize descendants consistently in command enforcement, recovery classification,
+and certification. The signed certificates are also copied to controller-owned state outside the
+issue workspace and restored after workspace recreation; set
+`SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
 issue workspace to override that state root.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under

@@ -73,8 +73,13 @@ commit. Legacy review-head refresh remains best effort and MUST NOT make a
 temporary remote failure a new dispatch blocker.
 Pending-MIU classification MUST include committed, staged, unstaged, and
 untracked paths while excluding runtime-owned `.orocsy` state. In-scope dirty
-paths MUST require a committed follow-up before certification; out-of-scope or
-denied dirty paths MUST fail closed. Signed MIU boundary evidence MUST survive
+paths, including a dirty-only pending MIU, MUST require a clean MIU micro commit
+and `miu.completion_requested` before certification; they MUST NOT enter a
+legacy push/review handoff. Out-of-scope or denied dirty paths MUST fail closed.
+Committed classification and certification MUST audit every path touched by any
+commit in the uncertified MIU range; restoring endpoint contents does not erase
+the write. Plain directory scopes MUST authorize descendants consistently with
+runtime command enforcement. Signed MIU boundary evidence MUST survive
 issue-workspace recreation in controller-owned state outside that workspace and
 MUST remain bound to issue identity, branch, contract, revision, and Git
 ancestry before selecting a later pending MIU.

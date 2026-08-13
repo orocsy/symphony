@@ -98,7 +98,12 @@ existing delta gets no duplicate or empty commit. Legacy review branch refresh
 remains best effort when its configured remote is temporarily unavailable. The
 controller includes committed, staged, unstaged, and untracked paths in one
 pending-MIU snapshot: in-scope dirt must be committed before certification and
-out-of-scope dirt fails closed. Signed MIU certificates are mirrored to
+out-of-scope dirt fails closed. Dirty-only MIU recovery explicitly creates that
+clean micro commit and appends `miu.completion_requested`; it never falls through
+to legacy push/review guidance. Commit paths are enumerated across the entire
+uncertified MIU range, so a later restore cannot hide an undeclared write. Plain
+directory scopes cover descendants in classification and certification just as
+they do at command time. Signed MIU certificates are mirrored to
 controller-owned state outside each issue workspace, allowing later-MIU
 boundaries to survive workspace recreation. Override that state root with
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR`, pointing it to an operator-owned path

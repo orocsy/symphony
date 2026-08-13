@@ -1493,6 +1493,10 @@ defmodule SymphonyElixir.DispatchPreflight do
       test_spec_issue?(requirements) ->
         "Recover the existing dirty test-spec checkpoint: run `git status --short --branch`, then run each focused `git diff --no-ext-diff --no-textconv -- <dirty-file>` read as a separate command; never combine checkpoint reads with `&&`, `||`, `;`, or pipes. Run the declared focused validation. If the new test assertions fail only because the implementation is intentionally not present yet, record that expected test-spec result, commit and push the test-only change on the existing branch, and do not edit production source or broaden scope."
 
+      match?({:no_committed_delta, %{worktree_paths: [_ | _]}}, pending_miu_commit_state) ->
+        {:no_committed_delta, snapshot} = pending_miu_commit_state
+        dirty_pending_miu_recovery_task(snapshot)
+
       true ->
         handoff_recovery_first_task([], nil, workspace, issue, :no_pending_miu)
     end
@@ -1525,6 +1529,12 @@ defmodule SymphonyElixir.DispatchPreflight do
     paths = Enum.map_join(worktree_paths, ", ", &"`#{&1}`")
 
     " The interrupted worker also left in-scope worktree path(s): #{paths}. Inspect and include the complete required work in the conditional follow-up micro commit; certification cannot start while these paths remain dirty."
+  end
+
+  defp dirty_pending_miu_recovery_task(snapshot) do
+    paths = Enum.map_join(snapshot.worktree_paths, ", ", &"`#{&1}`")
+
+    "Continue the dirty but uncommitted MIU `#{snapshot.miu_id}` on the canonical branch. Inspect only its in-scope worktree path(s): #{paths}. Complete that MIU without restarting broader implementation, then create one clean local micro commit containing the complete required delta. Append the exact `miu.completion_requested` event from the Runtime Contract gate only after the worktree is clean and that commit exists, then stop so Symphony's validation controller can validate and certify it. Do not run contract-declared validation inside the Codex worker, push, or request review."
   end
 
   defp invalid_pending_miu_recovery_task(snapshot) do

@@ -179,6 +179,31 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "matches plain directory write scope against descendants" do
+    {workspace, issue} =
+      workspace_and_issue("3 tests, 0 failures", implementation: :delete_doc)
+
+    issue = %{
+      issue
+      | description: String.replace(issue.description, "- README.md", "- docs")
+    }
+
+    try do
+      assert {:committed_delta, snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert snapshot.in_scope_paths == ["docs/old.md"]
+      assert snapshot.out_of_scope_paths == []
+
+      assert {:ok, certificate} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert certificate["changed_paths"] == ["docs/old.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "parses pytest normal success summary" do
     {workspace, issue} = workspace_and_issue("3 passed in 0.12s")
 
@@ -322,6 +347,30 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert invalid_snapshot.worktree_paths == ["SECRET.md"]
       assert invalid_snapshot.in_scope_paths == ["README.md"]
       assert invalid_snapshot.out_of_scope_paths == ["SECRET.md"]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pending MIU recovery retains paths touched and restored within the commit range" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      File.write!(Path.join(workspace, "SECRET.md"), "temporary out-of-scope write\n")
+      git!(workspace, ["add", "SECRET.md"])
+      git!(workspace, ["commit", "-m", "Add temporary secret file"])
+      git!(workspace, ["rm", "SECRET.md"])
+      git!(workspace, ["commit", "-m", "Restore endpoint contents"])
+
+      assert {:invalid_delta, snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert snapshot.committed_paths == ["README.md", "SECRET.md"]
+      assert snapshot.in_scope_paths == ["README.md"]
+      assert snapshot.out_of_scope_paths == ["SECRET.md"]
+
+      assert {:error, {:undeclared_write, ["README.md", "SECRET.md"]}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after
       File.rm_rf(workspace)
     end

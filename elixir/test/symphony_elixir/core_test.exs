@@ -9175,6 +9175,28 @@ defmodule SymphonyElixir.CoreTest do
       target_path = Path.join(workspace, "tests/unit/pending.test.ts")
       File.mkdir_p!(Path.dirname(target_path))
       File.write!(target_path, "test('pending', () => {})\n")
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = dirty_only_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
+
+      assert get_in(dirty_only_preflight, ["pending_miu_commit_state", "status"]) ==
+               "no_committed_delta"
+
+      assert get_in(dirty_only_preflight, ["pending_miu_commit_state", "worktree_paths"]) ==
+               ["tests/unit/pending.test.ts"]
+
+      assert dirty_only_preflight["first_task"] =~
+               "Continue the dirty but uncommitted MIU `COD-PENDING-MIU-1`"
+
+      assert dirty_only_preflight["first_task"] =~ "create one clean local micro commit"
+      assert dirty_only_preflight["first_task"] =~ "miu.completion_requested"
+      refute dirty_only_preflight["first_task"] =~ "commit, push, and request/update Codex review"
+
+      dirty_only_prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
+      assert dirty_only_prompt =~ "Continue the dirty but uncommitted MIU `COD-PENDING-MIU-1`"
+      assert dirty_only_prompt =~ "create one clean local micro commit"
+      assert dirty_only_prompt =~ "miu.completion_requested"
+
       {_output, 0} = System.cmd("git", ["add", "tests/unit/pending.test.ts"], cd: workspace, stderr_to_stdout: true)
       {_output, 0} = System.cmd("git", ["commit", "-m", "Implement pending MIU"], cd: workspace, stderr_to_stdout: true)
 

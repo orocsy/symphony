@@ -239,8 +239,14 @@ redispatched:
   commit. Legacy review branch refresh remains best effort across temporary remote
   failures. The controller now classifies committed and worktree paths together:
   in-scope dirt must enter the follow-up commit, while out-of-scope dirt fails
-  closed. Signed MIU boundary certificates are mirrored into controller-owned
-  state outside the issue workspace, so recreation can restore completed MIUs and
+  closed. Dirty-only MIUs receive an explicit structured micro-commit and
+  `miu.completion_requested` recovery task rather than the legacy push/review
+  handoff. Committed paths are enumerated across every commit in the uncertified
+  range, so restoring endpoint contents cannot hide an undeclared write. Plain
+  directory scopes authorize descendants consistently during command execution,
+  pending-MIU classification, and certification. Signed MIU boundary certificates
+  are mirrored into controller-owned state outside the issue workspace, so
+  recreation can restore completed MIUs and
   select the actual later pending MIU.
 - Fresh preflight names the exact next MIU and its first write target.
 - Contract compilation rejects MIU read or write scopes fully covered by

@@ -119,7 +119,7 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          :ok <- ensure_next_miu(issue, workspace, compiled, head_sha, miu_id),
          {:ok, base_head_sha} <- certification_base_sha(issue, workspace, compiled, head_sha, miu_id),
-         {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha),
+         {:ok, changed_paths} <- changed_paths_across_commits(workspace, base_head_sha, head_sha),
          true <- changed_paths != [] || {:error, :empty_miu_commit},
          true <- paths_allowed?(changed_paths, miu["write_scope"]) || {:error, {:undeclared_write, changed_paths}},
          true <-
@@ -227,7 +227,8 @@ defmodule SymphonyElixir.ValidationController do
          %{} = miu <- Enum.find(compiled.contract["mius"], &(&1["id"] == miu_id)),
          {:ok, base_head_sha} <-
            pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id, opts),
-         {:ok, committed_paths} <- changed_paths(workspace, base_head_sha, head_sha),
+         {:ok, committed_paths} <-
+           changed_paths_across_commits(workspace, base_head_sha, head_sha),
          {:ok, worktree_paths} <- worktree_paths(workspace) do
       changed_paths = Enum.sort(Enum.uniq(committed_paths ++ worktree_paths))
 
@@ -536,13 +537,6 @@ defmodule SymphonyElixir.ValidationController do
     end)
   end
 
-  defp changed_paths(workspace, base_head_sha, head_sha) do
-    case git(workspace, ["diff", "--name-only", "--no-renames", "#{base_head_sha}..#{head_sha}", "--"]) do
-      {:ok, output} -> {:ok, String.split(output, "\n", trim: true)}
-      error -> error
-    end
-  end
-
   defp worktree_paths(workspace) do
     commands = [
       ["diff", "--name-only", "--no-renames", "--", ".", ":(exclude).orocsy/"],
@@ -598,7 +592,30 @@ defmodule SymphonyElixir.ValidationController do
   end
 
   defp path_matches_scope?(path, scope) when is_binary(path) and is_binary(scope) do
-    path == scope or Regex.match?(glob_regex(scope), path)
+    cond do
+      scope == "" ->
+        false
+
+      String.ends_with?(scope, "/**") ->
+        prefix = String.trim_trailing(scope, "/**")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.ends_with?(scope, "/*") ->
+        prefix = String.trim_trailing(scope, "/*")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.contains?(scope, "*") ->
+        scope
+        |> Regex.escape()
+        |> String.replace("\\*", ".*")
+        |> then(&Regex.compile!("^#{&1}$"))
+        |> Regex.match?(path)
+
+      true ->
+        path == scope or String.starts_with?(path, scope <> "/")
+    end
+  rescue
+    _error -> false
   end
 
   defp path_matches_scope?(_path, _scope), do: false
@@ -663,14 +680,6 @@ defmodule SymphonyElixir.ValidationController do
       {:error, reason} ->
         {:error, {:invalid_review_rework_dispatch_preflight, reason}}
     end
-  end
-
-  defp glob_regex(scope) do
-    scope
-    |> Regex.escape()
-    |> String.replace("\\*\\*", ".*")
-    |> String.replace("\\*", "[^/]*")
-    |> then(&Regex.compile!("^" <> &1 <> "$"))
   end
 
   defp run_validations(issue, workspace, compiled, miu, head_sha) do
