@@ -644,10 +644,12 @@ prototype exposed and corrected an immutable-turn-context recursion hazard;
 its code was discarded, and production host work remains Slice 1 scope.
 
 `OXE-0.2` was implemented red-first at checkpoints `1ec682d` and `ff7b986`.
-Its focused 43-test suite, three real audit modes, formatter, specs, strict
-Credo, and exact `make all` gate pass; the full gate reports 339 tests, six
-skipped, 100% total coverage, and zero Dialyzer errors. No extension-host or
-Orocsy runtime code landed.
+Implementation review found and closed a staged-index bypass at `de41f63`: the
+audit now checks baseline-to-index and baseline-to-worktree candidates
+independently. Its focused 44-test suite, three real audit modes, formatter,
+specs, strict Credo, and exact `make all` gate pass; the full gate reports 340
+tests, six skipped, 100% total coverage, and zero Dialyzer errors. No
+extension-host or Orocsy runtime code landed.
 
 Next, independently review the `OXE-0.2` implementation. If it clears, write
 the Slice 1 technical trace for the production facade, interfaces, registry,

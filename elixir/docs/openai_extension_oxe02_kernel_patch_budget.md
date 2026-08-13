@@ -203,19 +203,24 @@ mistakenly updated.
 
 ## Deterministic Fingerprint
 
-For each registered file, the audit runs the equivalent argument-list command:
+For each registered file, the audit runs both equivalent argument-list
+commands:
 
 ```text
 git -C <root> diff --no-ext-diff --no-textconv --no-renames --no-color --full-index --unified=3 \
   <baseline_commit> -- <registered_path>
+git -C <root> diff --no-ext-diff --no-textconv --no-renames --no-color --cached \
+  --full-index --unified=3 <baseline_commit> -- <registered_path>
 ```
 
 The expected fingerprint is lowercase SHA-256 of the exact stdout bytes. The
-omitted right revision intentionally compares the pinned baseline with the
-complete index-plus-worktree checkout, so an uncommitted kernel edit cannot
-bypass the audit. On a clean integration or CI checkout this is byte-identical
-to comparing the baseline with `HEAD`. The baseline is immutable, full object
-IDs remove abbreviation variance, the path is validated and separated by `--`,
+first command compares the pinned baseline with worktree content; the second
+compares it independently with staged index content. Results for the same path
+are merged without double-counting. Consequently, neither an unstaged edit nor
+a staged patch hidden by restoring baseline worktree bytes can bypass the
+audit. On a clean integration or CI checkout both are byte-identical to
+comparing the baseline with `HEAD`. The baseline is immutable, full object IDs
+remove abbreviation variance, the path is validated and separated by `--`,
 external diff drivers, text-conversion filters, and rename heuristics are
 disabled, and Git configuration is isolated by the existing audit environment.
 
@@ -329,6 +334,7 @@ ExtensionsAuditBudgetTest:
   rejects a fingerprint mismatch below the line ceiling
   rejects direct SymphonyElixir.Orocsy dependency lines
   rejects an uncommitted change to a registered or unregistered pinned kernel file
+  rejects a staged kernel patch hidden by baseline worktree content
   allows absent optional Slice 0 hooks
   rejects an absent required Slice 1 hook
   accepts the exact measured prototype patches
@@ -370,16 +376,23 @@ deterministic findings and reports, task ordering, and hermetic boundary
 coverage. It does not add the facade, adapters, kernel hooks, or Orocsy runtime
 behavior.
 
-Observed validation at the green checkpoint:
+Implementation review then found that the original baseline-to-worktree diff
+could miss staged kernel bytes when the working file was restored to baseline.
+The regression failed at `ff7b986`, proving the bypass. Checkpoint
+`de41f6344dba1f1616b5c2689ee781f5f8b6329f` closes it by auditing staged-index
+and worktree candidates independently and merging duplicate safe path evidence
+without double-counting.
+
+Observed validation at the hardened checkpoint:
 
 | Command | Outcome |
 | --- | --- |
-| focused baseline, budget, and task suites | pass, 43 tests |
+| focused baseline, budget, and task suites | pass, 44 tests |
 | `mix extensions.audit --only baseline` | pass with the pinned object, trees, and first-parent proof |
 | `mix extensions.audit --only budget` | pass with zero kernel divergence and a 40-line ceiling |
 | default `mix extensions.audit` | pass in baseline-then-budget order |
 | `mix format --check-formatted`, `mix specs.check`, strict Credo, and `git diff --check` | pass |
-| `make all` | pass; 339 tests, 6 skipped, 100% total coverage, Dialyzer zero errors |
+| `make all` | pass; 340 tests, 6 skipped, 100% total coverage, Dialyzer zero errors |
 
 Reproduction commands:
 
