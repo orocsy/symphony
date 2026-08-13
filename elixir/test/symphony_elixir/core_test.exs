@@ -8839,10 +8839,11 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, %{"mode" => "handoff_recovery"} = corrected_preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
-      assert corrected_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert corrected_preflight["checkpoint_event"] == "runtime-contract-gate"
       assert corrected_preflight["first_task"] =~ "Browser validation failed in the worker sandbox"
-      assert corrected_preflight["first_task"] =~ "run focused validation"
-      refute corrected_preflight["first_task"] =~ "active Runtime Contract gate"
+      assert corrected_preflight["first_task"] =~ "miu.completion_requested"
+      assert corrected_preflight["first_task"] =~ "Do not run contract-declared validation"
+      refute corrected_preflight["first_task"] =~ "run focused validation"
 
       File.write!(
         Path.join(inbox_dir, "correction_structured_browser.json"),
@@ -8903,8 +8904,9 @@ defmodule SymphonyElixir.CoreTest do
       assert controller_prompt =~ "Validation output:"
       assert controller_prompt =~ "owns exactly one responsive screen slot"
       assert controller_prompt =~ "Expect test to fail"
-      refute String.starts_with?(controller_prompt, "Runtime Contract execution gate:")
-      refute controller_prompt =~ "After your focused implementation, create one clean local micro commit"
+      assert String.starts_with?(controller_prompt, "Runtime Contract execution gate:")
+      assert controller_prompt =~ "After your focused implementation, create one clean local micro commit"
+      assert controller_prompt =~ "--type miu.completion_requested"
 
       for index <- 1..5 do
         File.write!(
@@ -8921,7 +8923,7 @@ defmodule SymphonyElixir.CoreTest do
       assert {:ok, %{"mode" => "handoff_recovery"} = generic_first_preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
-      assert generic_first_preflight["checkpoint_event"] == "correction-scoped-fix"
+      assert generic_first_preflight["checkpoint_event"] == "runtime-contract-gate"
       assert generic_first_preflight["first_task"] =~ "Newer generic correction"
       assert length(generic_first_preflight["open_corrections"]) == 6
 
@@ -9336,6 +9338,33 @@ defmodule SymphonyElixir.CoreTest do
       assert dirty_prompt =~ "`tests/unit/dirty-followup.test.ts`"
       assert dirty_prompt =~ "certification cannot start while these paths remain dirty"
       File.rm!(dirty_target)
+
+      pending_correction_dir = Path.join(workspace, ".orocsy/delivery/inbox")
+      File.mkdir_p!(pending_correction_dir)
+
+      File.write!(
+        Path.join(pending_correction_dir, "correction_pending_miu.json"),
+        Jason.encode!(%{
+          "correction_id" => "correction_pending_miu",
+          "source" => "orocsy.runtime.generic",
+          "status" => "open",
+          "next_action" => "retry",
+          "summary" => "Repair the pending MIU assertion"
+        })
+      )
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = correction_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
+
+      assert correction_preflight["first_task"] =~
+               "Resolve the open Orocsy correction within pending MIU `COD-PENDING-MIU-1`"
+
+      refute correction_preflight["first_task"] =~ "commit/push/review handoff"
+
+      correction_prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
+      assert correction_prompt =~ "Runtime Contract committed-MIU recovery gate"
+      assert correction_prompt =~ "--type miu.completion_requested"
+      refute correction_prompt =~ "continue commit/push/review handoff"
 
       File.rm_rf!(Path.join(workspace, ".orocsy/delivery"))
 

@@ -77,7 +77,10 @@ enumerated across every commit in the uncertified range, so restoring a path at 
 cannot hide an undeclared write. A dirty-only pending MIU receives the same structured micro-commit
 and `miu.completion_requested` sequence instead of the legacy push/review handoff. Plain directory
 write scopes authorize descendants consistently in command enforcement, recovery classification,
-and certification. The signed certificates are also copied to controller-owned state outside the
+and certification; leading `./` path prefixes are normalized before conflict checks or matching.
+An open correction on a safe pending MIU keeps the same `miu.completion_requested` certification
+sequence and cannot fall through to legacy push/review handoff. The signed certificates are also
+copied to controller-owned state outside the
 issue workspace and restored after workspace recreation; set
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
 issue workspace to override that state root.

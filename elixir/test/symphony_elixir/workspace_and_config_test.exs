@@ -1227,6 +1227,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert "read_context_denied:COD-276-MIU-1:src/features/discover/DiscoverWorkspace.tsx" in plain_errors
 
+    leading_relative_description =
+      String.replace(
+        plain_directory_description,
+        "- src/features/discover/DiscoverWorkspace.tsx",
+        "- ./src/features/discover/DiscoverWorkspace.tsx"
+      )
+
+    assert {:error, leading_relative_errors} =
+             SymphonyElixir.RuntimeContract.compile(leading_relative_description)
+
+    assert "read_context_denied:COD-276-MIU-1:./src/features/discover/DiscoverWorkspace.tsx" in leading_relative_errors
+
     internal_wildcard_description =
       issue.description
       |> String.replace("src/**", "src/private/*.ts")

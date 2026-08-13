@@ -237,6 +237,9 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   @doc false
   @spec scope_pattern_matches?(term(), term()) :: boolean()
   def scope_pattern_matches?(path, scope) when is_binary(path) and is_binary(scope) do
+    path = normalize_path(path)
+    scope = normalize_path(scope)
+
     cond do
       scope == "" ->
         false
@@ -553,7 +556,9 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
   defp string_values(value) when is_binary(value), do: [value]
   defp string_values(_value), do: []
 
-  defp normalize_path(path) when is_binary(path) do
+  @doc false
+  @spec normalize_path(term()) :: String.t()
+  def normalize_path(path) when is_binary(path) do
     path
     |> String.trim()
     |> String.trim_leading("./")
@@ -561,7 +566,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     |> String.trim_trailing(",")
   end
 
-  defp normalize_path(_path), do: ""
+  def normalize_path(_path), do: ""
 
   defp test_path?(path) when is_binary(path) do
     String.starts_with?(path, "tests/") or

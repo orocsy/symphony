@@ -185,7 +185,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
 
     issue = %{
       issue
-      | description: String.replace(issue.description, "- README.md", "- docs")
+      | description: String.replace(issue.description, "- README.md", "- ./docs")
     }
 
     try do
@@ -297,7 +297,7 @@ defmodule SymphonyElixir.ValidationControllerTest do
       | description:
           issue.description
           |> String.replace("- README.md", "- \"**\"")
-          |> String.replace("dependencies: []", "dependencies: []\ndenied_scope:\n  - README.md")
+          |> String.replace("dependencies: []", "dependencies: []\ndenied_scope:\n  - ./README.md")
     }
 
     try do

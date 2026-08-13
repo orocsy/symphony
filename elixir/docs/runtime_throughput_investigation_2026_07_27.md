@@ -244,7 +244,11 @@ redispatched:
   handoff. Committed paths are enumerated across every commit in the uncertified
   range, so restoring endpoint contents cannot hide an undeclared write. Plain
   directory scopes authorize descendants consistently during command execution,
-  pending-MIU classification, and certification. Signed MIU boundary certificates
+  contract-conflict validation, pending-MIU classification, and certification,
+  with the same leading-`./` normalization at every boundary. Safe pending-MIU
+  recovery retains its micro-commit and `miu.completion_requested` sequence when
+  a correction is open, instead of reverting to legacy push/review handoff.
+  Signed MIU boundary certificates
   are mirrored into controller-owned state outside the issue workspace, so
   recreation can restore completed MIUs and
   select the actual later pending MIU.

@@ -79,7 +79,10 @@ legacy push/review handoff. Out-of-scope or denied dirty paths MUST fail closed.
 Committed classification and certification MUST audit every path touched by any
 commit in the uncertified MIU range; restoring endpoint contents does not erase
 the write. Plain directory scopes MUST authorize descendants consistently with
-runtime command enforcement. Signed MIU boundary evidence MUST survive
+runtime command enforcement, and all scope comparisons MUST apply the same
+leading-relative-prefix normalization as command enforcement. An open correction
+on a safe pending MIU MUST retain the MIU micro-commit and certification-event
+sequence; it MUST NOT restore legacy push/review authority. Signed MIU boundary evidence MUST survive
 issue-workspace recreation in controller-owned state outside that workspace and
 MUST remain bound to issue identity, branch, contract, revision, and Git
 ancestry before selecting a later pending MIU.

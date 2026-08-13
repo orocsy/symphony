@@ -103,7 +103,10 @@ clean micro commit and appends `miu.completion_requested`; it never falls throug
 to legacy push/review guidance. Commit paths are enumerated across the entire
 uncertified MIU range, so a later restore cannot hide an undeclared write. Plain
 directory scopes cover descendants in classification and certification just as
-they do at command time. Signed MIU certificates are mirrored to
+they do at command time, including normalization of leading `./` prefixes before
+contract-conflict checks or runtime matching. Safe pending-MIU states keep their
+micro-commit and `miu.completion_requested` guidance when a correction is open;
+correction refresh cannot replace it with legacy push/review handoff. Signed MIU certificates are mirrored to
 controller-owned state outside each issue workspace, allowing later-MIU
 boundaries to survive workspace recreation. Override that state root with
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR`, pointing it to an operator-owned path

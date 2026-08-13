@@ -290,11 +290,23 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     checkpoint_event =
       cond do
-        structured? and unsafe_pending_miu? -> "runtime-contract-gate"
-        structured? and controller_owned? -> "runtime-contract-gate"
-        visible_corrections != [] -> "correction-scoped-fix"
-        structured? -> "runtime-contract-gate"
-        true -> "gate.post-miu"
+        structured? and unsafe_pending_miu? ->
+          "runtime-contract-gate"
+
+        structured? and safe_pending_miu_commit_state?(preflight["pending_miu_commit_state"]) ->
+          "runtime-contract-gate"
+
+        structured? and controller_owned? ->
+          "runtime-contract-gate"
+
+        visible_corrections != [] ->
+          "correction-scoped-fix"
+
+        structured? ->
+          "runtime-contract-gate"
+
+        true ->
+          "gate.post-miu"
       end
 
     refreshed =
@@ -309,6 +321,12 @@ defmodule SymphonyElixir.DispatchPreflight do
 
         corrections == [] ->
           preflight["base_first_task"] || preflight["first_task"]
+
+        structured? ->
+          structured_handoff_recovery_correction_task(
+            List.first(corrections),
+            preflight["pending_miu_commit_state"]
+          )
 
         true ->
           handoff_recovery_first_task(corrections, requirements)
@@ -1408,6 +1426,9 @@ defmodule SymphonyElixir.DispatchPreflight do
           structured_contract? and unsafe_pending_miu_commit_state?(pending_miu_commit_state) ->
             "runtime-contract-gate"
 
+          structured_contract? and safe_pending_miu_commit_state?(pending_miu_commit_state) ->
+            "runtime-contract-gate"
+
           structured_contract? and first_correction_controller_owned? ->
             "runtime-contract-gate"
 
@@ -1445,15 +1466,9 @@ defmodule SymphonyElixir.DispatchPreflight do
          %{"runtime_contract_status" => "structured"},
          _workspace,
          _issue,
-         _pending_miu_commit_state
+         pending_miu_commit_state
        ) do
-    if retryable_controller_validation_correction?(correction) do
-      summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
-
-      "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
-    else
-      handoff_recovery_correction_task(correction)
-    end
+    structured_handoff_recovery_correction_task(correction, pending_miu_commit_state)
   end
 
   defp handoff_recovery_first_task(
@@ -1585,6 +1600,41 @@ defmodule SymphonyElixir.DispatchPreflight do
 
     "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Inspect the existing focused dirty delta first. When that delta already addresses the named correction and current passed evidence covers it, resolve the correction from that evidence and continue commit/push/review handoff without manufacturing another edit or rerunning the same validation. Otherwise edit only the named in-scope files, run focused validation, and resolve the correction after evidence is recorded. Do not use unrelated or stale handoff evidence to skip the correction."
   end
+
+  defp structured_handoff_recovery_correction_task(correction, pending_miu_commit_state) do
+    if retryable_controller_validation_correction?(correction) do
+      summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+      "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
+    else
+      if safe_pending_miu_commit_state?(pending_miu_commit_state) do
+        structured_pending_miu_correction_task(correction, pending_miu_commit_state)
+      else
+        handoff_recovery_correction_task(correction)
+      end
+    end
+  end
+
+  defp structured_pending_miu_correction_task(correction, pending_miu_commit_state) do
+    summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+    miu_id = pending_miu_id(pending_miu_commit_state)
+
+    "Resolve the open Orocsy correction within pending MIU `#{miu_id}` before certification: #{summary}. Inspect only that MIU's existing committed and worktree paths. If the correction requires an in-scope edit or the worktree is dirty, create one clean MIU micro commit containing the complete required delta; if the committed delta already satisfies both the correction and MIU, do not create a duplicate or empty commit. Append only the exact `miu.completion_requested` event supplied by the active Runtime Contract gate, then stop. Do not run contract-declared validation inside the Codex worker, push, or request review."
+  end
+
+  defp safe_pending_miu_commit_state?(%{"status" => status})
+       when status in ["committed_delta", "no_committed_delta"],
+       do: true
+
+  defp safe_pending_miu_commit_state?({status, _snapshot})
+       when status in [:committed_delta, :no_committed_delta],
+       do: true
+
+  defp safe_pending_miu_commit_state?(_pending_miu_commit_state), do: false
+
+  defp pending_miu_id(%{"miu_id" => miu_id}) when is_binary(miu_id), do: miu_id
+  defp pending_miu_id({_status, %{miu_id: miu_id}}) when is_binary(miu_id), do: miu_id
+  defp pending_miu_id(_pending_miu_commit_state), do: "unknown"
 
   defp handoff_recovery_branch(workspace, issue, requirements, inspection) do
     review_head = Map.get(inspection, :head_ref)

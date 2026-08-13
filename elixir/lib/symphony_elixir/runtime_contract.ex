@@ -6,6 +6,8 @@ defmodule SymphonyElixir.RuntimeContract do
   authority over branch, scope, MIU, validation, or review decisions.
   """
 
+  alias SymphonyElixir.ScopeAccess.Controller, as: ScopeAccessController
+
   @schema_version 1
   @default_validation_timeout_ms 900_000
   @max_validation_timeout_ms 1_800_000
@@ -250,6 +252,9 @@ defmodule SymphonyElixir.RuntimeContract do
 
   defp scope_fully_covers?(denied_pattern, authorized_pattern)
        when is_binary(denied_pattern) and is_binary(authorized_pattern) do
+    denied_pattern = ScopeAccessController.normalize_path(denied_pattern)
+    authorized_pattern = ScopeAccessController.normalize_path(authorized_pattern)
+
     cond do
       denied_pattern == authorized_pattern ->
         true

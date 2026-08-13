@@ -191,14 +191,6 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp runtime_contract_guidance(
-         _compiled,
-         _issue,
-         _workspace,
-         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
-       ),
-       do: ""
-
-  defp runtime_contract_guidance(
          compiled,
          _issue,
          _workspace,
@@ -236,6 +228,14 @@ defmodule SymphonyElixir.PromptBuilder do
       "validations" => state["validations"] || []
     })
   end
+
+  defp runtime_contract_guidance(
+         _compiled,
+         _issue,
+         _workspace,
+         %{"mode" => "handoff_recovery", "open_corrections" => [_ | _]}
+       ),
+       do: ""
 
   defp runtime_contract_guidance(
          compiled,
