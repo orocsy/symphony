@@ -258,6 +258,12 @@ defmodule SymphonyElixir.ValidationControllerTest do
     }
 
     try do
+      assert {:invalid_delta, snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert snapshot.in_scope_paths == []
+      assert snapshot.out_of_scope_paths == ["README.md"]
+
       assert {:error, {:denied_scope_write, ["README.md"]}} =
                ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
     after

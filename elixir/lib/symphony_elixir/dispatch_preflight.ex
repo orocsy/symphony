@@ -297,14 +297,32 @@ defmodule SymphonyElixir.DispatchPreflight do
       |> Map.put("open_corrections", visible_corrections)
       |> Map.put("checkpoint_event", checkpoint_event)
 
-    if corrections == [] do
-      Map.put(refreshed, "first_task", preflight["base_first_task"] || preflight["first_task"])
-    else
-      Map.put(refreshed, "first_task", handoff_recovery_first_task(corrections, requirements))
-    end
+    first_task =
+      cond do
+        unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"]) ->
+          preflight["base_first_task"] || preflight["first_task"]
+
+        corrections == [] ->
+          preflight["base_first_task"] || preflight["first_task"]
+
+        true ->
+          handoff_recovery_first_task(corrections, requirements)
+      end
+
+    Map.put(refreshed, "first_task", first_task)
   end
 
   defp refresh_correction_derived_fields(preflight, _corrections), do: preflight
+
+  defp unsafe_pending_miu_commit_state?(%{"status" => status})
+       when status in ["invalid_delta", "unknown"],
+       do: true
+
+  defp unsafe_pending_miu_commit_state?({status, _evidence})
+       when status in [:invalid_delta, :unknown],
+       do: true
+
+  defp unsafe_pending_miu_commit_state?(_pending_miu_commit_state), do: false
 
   defp ensure_dirs(workspace) do
     File.mkdir_p!(Path.join(workspace, ".orocsy/delivery/state"))
@@ -1410,12 +1428,6 @@ defmodule SymphonyElixir.DispatchPreflight do
     }
   end
 
-  defp unsafe_pending_miu_commit_state?({status, _evidence})
-       when status in [:invalid_delta, :unknown],
-       do: true
-
-  defp unsafe_pending_miu_commit_state?(_pending_miu_commit_state), do: false
-
   defp handoff_recovery_first_task(
          [correction | _],
          %{"runtime_contract_status" => "structured"},
@@ -1981,6 +1993,13 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp structured_recovery_state_limit(%{
+         "pending_miu_commit_state" => %{"status" => status}
+       })
+       when status in ["unknown", "invalid_delta"] do
+    "- Commit evidence is not safe for execution. Fail closed: do not edit product files, create a commit, or request MIU certification; record the scoped blocker and stop."
+  end
+
+  defp structured_recovery_state_limit(%{
          "open_corrections" => [_ | _]
        }) do
     "- Resolve the active correction named above before requesting MIU certification. Make only its smallest in-scope fix; do not replay a failed certification while the correction remains open."
@@ -1990,13 +2009,6 @@ defmodule SymphonyElixir.DispatchPreflight do
          "pending_miu_commit_state" => %{"status" => "committed_delta"}
        }) do
     "- The pending MIU already has a committed delta. Inspect only the concrete paths named above. If that delta satisfies acceptance, do not create another commit; append `miu.completion_requested` and stop without pushing."
-  end
-
-  defp structured_recovery_state_limit(%{
-         "pending_miu_commit_state" => %{"status" => status}
-       })
-       when status in ["unknown", "invalid_delta"] do
-    "- Commit evidence is not safe for execution. Fail closed: do not edit product files, create a commit, or request MIU certification; record the scoped blocker and stop."
   end
 
   defp structured_recovery_state_limit(_preflight) do

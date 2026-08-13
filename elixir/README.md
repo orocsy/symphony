@@ -88,8 +88,10 @@ synchronized tip and no baseline evidence survives, the runtime uses the
 integration/base-branch merge base rather than treating the tip as an empty
 delta. The post-sync snapshot binds the pending MIU, scope, base SHA, head SHA,
 and concrete paths for both mode and prompt generation. Evidence failures and
-undeclared committed paths fail closed ahead of ordinary correction recovery;
-committed recovery names an actual in-scope path rather than a wildcard.
+undeclared or explicitly denied committed paths fail closed ahead of ordinary
+correction recovery. Live-correction prompt refresh preserves that unsafe-state
+priority and cannot restore edit or commit authority; committed recovery names
+an actual in-scope path rather than a wildcard.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes

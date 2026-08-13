@@ -219,7 +219,7 @@ defmodule SymphonyElixir.ValidationController do
          {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha) do
       {in_scope_paths, out_of_scope_paths} =
         Enum.split_with(changed_paths, fn path ->
-          Enum.any?(miu["write_scope"], &path_matches_scope?(path, &1))
+          pending_miu_path_allowed?(path, miu["write_scope"], compiled.denied_scope)
         end)
 
       snapshot = %{
@@ -250,6 +250,11 @@ defmodule SymphonyElixir.ValidationController do
 
   def pending_miu_commit_state(_issue, _workspace, _opts),
     do: {:unknown, :invalid_pending_miu_state_request}
+
+  defp pending_miu_path_allowed?(path, write_scope, denied_scope) do
+    Enum.any?(write_scope, &path_matches_scope?(path, &1)) and
+      not Enum.any?(denied_scope, &path_matches_scope?(path, &1))
+  end
 
   @spec pending_miu_committed_delta?(Issue.t(), String.t()) :: boolean()
   def pending_miu_committed_delta?(%Issue{} = issue, workspace) when is_binary(workspace) do

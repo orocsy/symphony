@@ -9270,8 +9270,16 @@ defmodule SymphonyElixir.CoreTest do
       assert invalid_preflight["first_task"] =~ "undeclared path(s)"
       refute invalid_preflight["first_task"] =~ "create the clean local micro commit"
 
+      assert {:ok, refreshed_invalid_preflight} =
+               SymphonyElixir.DispatchPreflight.read_for_prompt(workspace)
+
+      assert refreshed_invalid_preflight["first_task"] ==
+               invalid_preflight["base_first_task"]
+
       invalid_prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
       assert invalid_prompt =~ "undeclared path(s): `README.md`"
+      assert invalid_prompt =~ "Commit evidence is not safe for execution"
+      refute invalid_prompt =~ "Resolve the active correction named above before requesting MIU certification"
       refute invalid_prompt =~ "create its micro commit"
       refute invalid_prompt =~ "After your focused implementation, create one clean local micro commit"
 

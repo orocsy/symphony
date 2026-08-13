@@ -60,6 +60,11 @@ pre-synchronization branch head, or the merge base with the declared base branch
 after workspace recreation. Invalid signed evidence or unsigned legacy preflight
 without an explicit migration baseline MUST fail closed. An already-synchronized
 clean-but-ahead workspace `HEAD` alone MUST NOT establish that baseline.
+Pending-MIU delta classification MUST treat paths covered by `denied_scope` as
+invalid even when a broader MIU write scope also matches them. Unsafe or unknown
+commit evidence MUST retain priority when live corrections refresh the worker
+prompt; a correction cannot restore permission to edit, commit, or request MIU
+certification.
 
 A runtime MAY certify commits after the last MIU checkpoint only for an
 authoritative, signed review-rework dispatch bound to the same issue, branch,

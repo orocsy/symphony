@@ -64,8 +64,9 @@ restarting implementation. Branch synchronization preserves the pre-sync authori
 when it precedes the synchronized tip. A recreated workspace instead derives the first MIU base from
 the integration branch's merge base with the declared base branch, so a pushed commit cannot erase
 its own delta. The immutable snapshot binds the pending MIU, base and head commits, and concrete
-paths; undeclared committed paths also fail closed. Recovery prompts name an actual committed path,
-never a wildcard scope.
+paths; undeclared or explicitly denied committed paths also fail closed. That unsafe evidence keeps
+priority when live corrections refresh a prompt, so correction text cannot restore edit or commit
+authority. Recovery prompts name an actual committed path, never a wildcard scope.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive
