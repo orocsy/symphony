@@ -104,13 +104,20 @@ to legacy push/review guidance. Commit paths are enumerated across the entire
 uncertified MIU range, so a later restore cannot hide an undeclared write. Plain
 directory scopes cover descendants in classification and certification just as
 they do at command time, including normalization of leading `./` prefixes before
-contract-conflict checks or runtime matching. Safe pending-MIU states keep their
+contract-conflict checks or runtime matching. Trailing `.` and `,` characters
+remain part of literal Git filenames and scope operands. Fresh structured MIU
+dispatch uses the `miu.completion_requested` Runtime Contract checkpoint rather
+than the legacy `technical-miu-trace` first-turn boundary. Safe pending-MIU states keep their
 micro-commit and `miu.completion_requested` guidance when a correction is open;
-correction refresh cannot replace it with legacy push/review handoff. Signed MIU certificates are mirrored to
+correction refresh cannot replace it with legacy push/review handoff. A
+controller-owned `block` or `escalate` correction after certification remains
+operator-only and grants no new edit, validation, commit, runtime-request, push,
+or review authority. Signed MIU certificates are mirrored to
 controller-owned state outside each issue workspace, allowing later-MIU
 boundaries to survive workspace recreation. Override that state root with
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR`, pointing it to an operator-owned path
-outside every issue workspace.
+outside every issue workspace. Terminal workspace cleanup removes the matching
+hashed evidence directory; nonterminal workspace recreation preserves it.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes

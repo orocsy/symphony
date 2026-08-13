@@ -286,7 +286,10 @@ defmodule SymphonyElixir.DispatchPreflight do
     unsafe_pending_miu? =
       unsafe_pending_miu_commit_state?(preflight["pending_miu_commit_state"])
 
-    controller_owned? = corrections |> List.first() |> retryable_controller_validation_correction?()
+    controller_owned? =
+      visible_corrections
+      |> List.first()
+      |> controller_validation_correction?()
 
     checkpoint_event =
       cond do
@@ -324,7 +327,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
         structured? ->
           structured_handoff_recovery_correction_task(
-            List.first(corrections),
+            List.first(visible_corrections),
             preflight["pending_miu_commit_state"]
           )
 
@@ -647,6 +650,9 @@ defmodule SymphonyElixir.DispatchPreflight do
 
   defp preflight_mode(workspace, _issue, requirements, inspection, pending_miu_commit_state) do
     cond do
+      blocking_controller_validation_correction?(workspace) ->
+        "handoff_recovery"
+
       integration_check_mergeability?(requirements, inspection) ->
         "integration_check"
 
@@ -920,11 +926,30 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp retryable_miu_validation_correction?(_workspace), do: false
 
   defp retryable_controller_validation_correction?(correction) when is_map(correction) do
-    correction["source"] == "symphony.runtime.validation-controller" and
+    controller_validation_correction?(correction) and
       correction["next_action"] == "retry"
   end
 
   defp retryable_controller_validation_correction?(_correction), do: false
+
+  defp blocking_controller_validation_correction?(workspace) when is_binary(workspace) do
+    workspace
+    |> Workspace.open_blocking_corrections_in_workspace()
+    |> Enum.any?(&blocking_controller_validation_correction?/1)
+  end
+
+  defp blocking_controller_validation_correction?(%{} = correction) do
+    controller_validation_correction?(correction) and
+      correction["next_action"] in ["block", "escalate"]
+  end
+
+  defp blocking_controller_validation_correction?(_correction), do: false
+
+  defp controller_validation_correction?(%{} = correction) do
+    correction["source"] == "symphony.runtime.validation-controller"
+  end
+
+  defp controller_validation_correction?(_correction), do: false
 
   defp implementation_issue?(requirements) when is_map(requirements) do
     requirements
@@ -1388,9 +1413,9 @@ defmodule SymphonyElixir.DispatchPreflight do
     structured_contract? = requirements["runtime_contract_status"] == "structured"
 
     first_correction_controller_owned? =
-      all_open_corrections
+      open_corrections
       |> List.first()
-      |> retryable_controller_validation_correction?()
+      |> controller_validation_correction?()
 
     base_first_task =
       handoff_recovery_first_task([], requirements, workspace, issue, pending_miu_commit_state)
@@ -1405,7 +1430,7 @@ defmodule SymphonyElixir.DispatchPreflight do
 
         true ->
           handoff_recovery_first_task(
-            all_open_corrections,
+            open_corrections,
             requirements,
             workspace,
             issue,
@@ -1589,9 +1614,15 @@ defmodule SymphonyElixir.DispatchPreflight do
   defp handoff_recovery_correction_summaries(all_open_corrections) do
     visible = Enum.take(all_open_corrections, 5)
 
-    case Enum.find(all_open_corrections, &retryable_controller_validation_correction?/1) do
-      nil -> visible
-      controller_correction -> Enum.uniq_by(visible ++ [controller_correction], & &1["correction_id"])
+    case Enum.find(all_open_corrections, &blocking_controller_validation_correction?/1) do
+      nil ->
+        case Enum.find(all_open_corrections, &retryable_controller_validation_correction?/1) do
+          nil -> visible
+          controller_correction -> Enum.uniq_by(visible ++ [controller_correction], & &1["correction_id"])
+        end
+
+      controller_correction ->
+        Enum.uniq_by([controller_correction | visible], & &1["correction_id"])
     end
   end
 
@@ -1602,17 +1633,27 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp structured_handoff_recovery_correction_task(correction, pending_miu_commit_state) do
-    if retryable_controller_validation_correction?(correction) do
-      summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+    cond do
+      blocking_controller_validation_correction?(correction) ->
+        blocking_controller_validation_correction_task(correction)
 
-      "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
-    else
-      if safe_pending_miu_commit_state?(pending_miu_commit_state) do
+      retryable_controller_validation_correction?(correction) ->
+        summary = correction["summary"] || correction["correction_id"] || "open Orocsy correction"
+
+        "Resolve the open Orocsy correction before dirty handoff recovery: #{summary}. Follow the active Runtime Contract gate, edit only files named by a remaining MIU, create the clean local micro commit when that gate requires one, append only the exact runtime event supplied by the gate, and stop. Do not run contract-declared validation inside the Codex worker. After successful certification, Symphony's validation controller resolves matching MIU validation corrections and records authoritative evidence."
+
+      safe_pending_miu_commit_state?(pending_miu_commit_state) ->
         structured_pending_miu_correction_task(correction, pending_miu_commit_state)
-      else
+
+      true ->
         handoff_recovery_correction_task(correction)
-      end
     end
+  end
+
+  defp blocking_controller_validation_correction_task(correction) do
+    summary = correction["summary"] || correction["correction_id"] || "blocking runtime correction"
+
+    "Runtime certification is operator-blocked: #{summary}. Fail closed. Do not edit product files, run validation, create a post-certification commit, append another runtime request, push, or request review. Preserve the certified head and stop for the operator action named by the correction."
   end
 
   defp structured_pending_miu_correction_task(correction, pending_miu_commit_state) do
@@ -1698,8 +1739,10 @@ defmodule SymphonyElixir.DispatchPreflight do
   end
 
   defp fresh_implementation_preflight(workspace, issue, requirements, inspection) do
+    remaining_mius = remaining_structured_mius(workspace, issue, requirements)
+
     first_task =
-      case remaining_structured_mius(workspace, issue, requirements) do
+      case remaining_mius do
         [%{"id" => miu_id, "write_scope" => [first_path | _]} | _] ->
           "Continue with the next uncertified MIU `#{miu_id}` at its first declared write-scope path `#{first_path}`; make the scoped code/test change, create one clean micro commit, and request runtime MIU certification. Do not recover or revalidate already certified MIUs."
 
@@ -1718,7 +1761,11 @@ defmodule SymphonyElixir.DispatchPreflight do
       "state" => issue_value(issue, :state),
       "branch" => fresh_implementation_branch(workspace, issue, requirements),
       "policy_hash" => policy_hash(requirements),
-      "checkpoint_event" => "technical-miu-trace",
+      "checkpoint_event" =>
+        if(requirements["runtime_contract_status"] == "structured" and remaining_mius != [],
+          do: "runtime-contract-gate",
+          else: "technical-miu-trace"
+        ),
       "first_task" => first_task,
       "requirements" => compact_requirements(requirements),
       "toolchain" => toolchain_snapshot(workspace),
@@ -1975,6 +2022,31 @@ defmodule SymphonyElixir.DispatchPreflight do
     "`#{checkpoint_event}` after making the scoped review fix or recording an explicit blocker; classification alone is lifecycle context."
   end
 
+  defp fresh_prompt_context(%{"checkpoint_event" => "runtime-contract-gate"} = preflight) do
+    requirements = preflight["requirements"] || %{}
+    base_branch = requirements["base_branch"] || requirements["integration_branch"] || "unknown"
+
+    """
+    Runtime dispatch preflight:
+
+    - Mode: fresh implementation with structured MIU execution
+    - Preflight file: `#{@preflight_path}`
+    - Branch: `#{preflight["branch"] || "unknown"}`
+    - Base/PR target branch: `#{base_branch}`
+    - Worker-required checkpoint: follow the active Runtime Contract execution gate and append only `miu.completion_requested` for the named MIU after its clean micro commit.
+    - Runtime preflight is not worker progress and is not proof that implementation or certification is complete.
+    - First task: #{preflight["first_task"]}
+    - First MIU: #{first_item(requirements["mius"])}
+    - First write-scope path: #{first_item(requirements["write_scope"])}
+    - Issue brief: #{format_issue_brief(requirements["issue_brief"])}
+    - Dependencies: #{format_inline_items(requirements["dependencies"] || [])}
+    - Toolchain preflight: #{format_toolchain(preflight["toolchain"])}
+
+    Implement only the named uncertified MIU. Do not run contract-declared validation inside the worker; create one clean local micro commit, append the exact `miu.completion_requested` event supplied by the Runtime Contract gate, and stop so Symphony can validate and certify it. Do not push, create or update a PR, request review, or update Linear handoff from this execution turn.
+    """
+    |> String.trim()
+  end
+
   defp fresh_prompt_context(preflight) do
     requirements = preflight["requirements"] || %{}
     base_branch = requirements["base_branch"] || requirements["integration_branch"] || "unknown"
@@ -2080,6 +2152,19 @@ defmodule SymphonyElixir.DispatchPreflight do
        })
        when status in ["unknown", "invalid_delta"] do
     "- Commit evidence is not safe for execution. Fail closed: do not edit product files, create a commit, or request MIU certification; record the scoped blocker and stop."
+  end
+
+  defp structured_recovery_state_limit(%{
+         "open_corrections" => [
+           %{
+             "source" => "symphony.runtime.validation-controller",
+             "next_action" => next_action
+           }
+           | _
+         ]
+       })
+       when next_action in ["block", "escalate"] do
+    "- Runtime certification is operator-only at this checkpoint. Fail closed: preserve the certified head; do not edit product files, run validation, create a post-certification commit, append a runtime request, push, or request review."
   end
 
   defp structured_recovery_state_limit(%{

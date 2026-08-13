@@ -9018,11 +9018,17 @@ defmodule SymphonyElixir.CoreTest do
       assert preflight["first_task"] =~ "tests/e2e/desktop-discover.spec.ts"
       assert preflight["first_task"] =~ "Do not recover or revalidate already certified MIUs"
       refute preflight["first_task"] =~ "dirty"
+      assert preflight["checkpoint_event"] == "runtime-contract-gate"
       assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "no_committed_delta"
 
       prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
       assert prompt =~ "Implement only MIU `COD-276-MIU-2`"
       assert prompt =~ "Mode: fresh implementation"
+      assert prompt =~ "--type miu.completion_requested"
+      assert prompt =~ "create one clean local micro commit"
+      assert prompt =~ "append only `miu.completion_requested`"
+      assert prompt =~ "When a Runtime Contract execution gate is prepended"
+      refute prompt =~ "stop after the scoped code/test checkpoint and `technical-miu-trace`"
       refute prompt =~ "Local handoff recovery checkpoint"
       refute prompt =~ "inspect the focused local diff"
     after

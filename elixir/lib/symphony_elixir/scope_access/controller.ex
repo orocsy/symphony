@@ -543,7 +543,7 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
       |> tl()
       |> Enum.find(&(&1 != ""))
       |> case do
-        path when is_binary(path) -> [normalize_path(path)]
+        path when is_binary(path) -> [normalize_text_path(path)]
         _ -> []
       end
     end)
@@ -562,11 +562,16 @@ defmodule SymphonyElixir.ScopeAccess.Controller do
     path
     |> String.trim()
     |> String.trim_leading("./")
-    |> String.trim_trailing(".")
-    |> String.trim_trailing(",")
   end
 
   def normalize_path(_path), do: ""
+
+  defp normalize_text_path(path) do
+    path
+    |> normalize_path()
+    |> String.trim_trailing(".")
+    |> String.trim_trailing(",")
+  end
 
   defp test_path?(path) when is_binary(path) do
     String.starts_with?(path, "tests/") or

@@ -194,6 +194,16 @@ defmodule SymphonyElixir.ValidationController do
 
   def certificates(_workspace), do: []
 
+  @spec remove_durable_evidence(String.t()) ::
+          {:ok, [String.t()]} | {:error, File.posix(), String.t()}
+  def remove_durable_evidence(workspace) when is_binary(workspace) do
+    workspace
+    |> durable_controller_evidence_dir()
+    |> File.rm_rf()
+  end
+
+  def remove_durable_evidence(_workspace), do: {:ok, []}
+
   @spec certified_miu_ids(Issue.t(), String.t()) :: [String.t()]
   def certified_miu_ids(%Issue{} = issue, workspace) when is_binary(workspace) do
     with {:ok, compiled} <- structured_contract(issue),

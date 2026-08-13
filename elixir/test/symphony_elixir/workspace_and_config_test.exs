@@ -1239,6 +1239,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert "read_context_denied:COD-276-MIU-1:./src/features/discover/DiscoverWorkspace.tsx" in leading_relative_errors
 
+    punctuation_distinct_description =
+      issue.description
+      |> String.replace("        - src/**\n", "")
+      |> String.replace(
+        "tests/private/**",
+        "tests/private/desktop-discover.test.ts."
+      )
+
+    assert {:error, punctuation_distinct_errors} =
+             SymphonyElixir.RuntimeContract.compile(punctuation_distinct_description)
+
+    refute "write_scope_denied:COD-276-MIU-1:tests/private/desktop-discover.test.ts" in punctuation_distinct_errors
+
     internal_wildcard_description =
       issue.description
       |> String.replace("src/**", "src/private/*.ts")

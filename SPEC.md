@@ -80,12 +80,19 @@ Committed classification and certification MUST audit every path touched by any
 commit in the uncertified MIU range; restoring endpoint contents does not erase
 the write. Plain directory scopes MUST authorize descendants consistently with
 runtime command enforcement, and all scope comparisons MUST apply the same
-leading-relative-prefix normalization as command enforcement. An open correction
+leading-relative-prefix normalization as command enforcement without stripping
+literal trailing filename punctuation. Fresh structured MIU dispatch MUST name
+`miu.completion_requested` as the required checkpoint and MUST NOT combine a
+commit-and-certify first task with legacy `technical-miu-trace` stop guidance. An open correction
 on a safe pending MIU MUST retain the MIU micro-commit and certification-event
 sequence; it MUST NOT restore legacy push/review authority. Signed MIU boundary evidence MUST survive
 issue-workspace recreation in controller-owned state outside that workspace and
 MUST remain bound to issue identity, branch, contract, revision, and Git
-ancestry before selecting a later pending MIU.
+ancestry before selecting a later pending MIU. Terminal workspace cleanup MUST
+remove that workspace's durable controller-evidence namespace, while nonterminal
+recreation MUST preserve it. Controller-owned `block` or `escalate` corrections
+MUST remain fail-closed and operator-only; they MUST NOT authorize another edit,
+validation, commit, runtime request, push, or review handoff.
 
 A runtime MAY certify commits after the last MIU checkpoint only for an
 authoritative, signed review-rework dispatch bound to the same issue, branch,

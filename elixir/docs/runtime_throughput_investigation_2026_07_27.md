@@ -245,14 +245,20 @@ redispatched:
   range, so restoring endpoint contents cannot hide an undeclared write. Plain
   directory scopes authorize descendants consistently during command execution,
   contract-conflict validation, pending-MIU classification, and certification,
-  with the same leading-`./` normalization at every boundary. Safe pending-MIU
+  with the same leading-`./` normalization at every boundary while preserving
+  literal trailing filename punctuation. Safe pending-MIU
   recovery retains its micro-commit and `miu.completion_requested` sequence when
   a correction is open, instead of reverting to legacy push/review handoff.
   Signed MIU boundary certificates
   are mirrored into controller-owned state outside the issue workspace, so
   recreation can restore completed MIUs and
-  select the actual later pending MIU.
-- Fresh preflight names the exact next MIU and its first write target.
+  select the actual later pending MIU. Terminal workspace cleanup removes the
+  matching hashed durable namespace; nonterminal recreation preserves it.
+- Fresh structured preflight names the exact next MIU and first write target,
+  then requires its clean micro commit plus `miu.completion_requested`; it no
+  longer advertises the legacy `technical-miu-trace` stop boundary.
+- Controller-owned `block` and `escalate` corrections remain operator-only after
+  final certification and cannot fall through to generic edit/commit recovery.
 - Contract compilation rejects MIU read or write scopes fully covered by
   `denied_scope`, before a worker starts. It returns validation errors for
   malformed non-list `mius` values and uses the same plain-directory descendant

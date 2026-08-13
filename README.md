@@ -77,13 +77,19 @@ enumerated across every commit in the uncertified range, so restoring a path at 
 cannot hide an undeclared write. A dirty-only pending MIU receives the same structured micro-commit
 and `miu.completion_requested` sequence instead of the legacy push/review handoff. Plain directory
 write scopes authorize descendants consistently in command enforcement, recovery classification,
-and certification; leading `./` path prefixes are normalized before conflict checks or matching.
+and certification; leading `./` path prefixes are normalized before conflict checks or matching,
+while trailing filename punctuation remains literal so `README.md.` cannot alias `README.md`.
+Fresh structured MIU dispatch advertises the same `miu.completion_requested` checkpoint as its
+execution gate instead of stopping at the legacy `technical-miu-trace` boundary.
 An open correction on a safe pending MIU keeps the same `miu.completion_requested` certification
-sequence and cannot fall through to legacy push/review handoff. The signed certificates are also
+sequence and cannot fall through to legacy push/review handoff. A controller-owned `block` or
+`escalate` correction remains operator-only after final certification: it cannot authorize another
+edit, validation run, commit, runtime request, push, or review handoff. The signed certificates are also
 copied to controller-owned state outside the
 issue workspace and restored after workspace recreation; set
 `SYMPHONY_CONTROLLER_EVIDENCE_STATE_DIR` to an operator-owned path outside every
-issue workspace to override that state root.
+issue workspace to override that state root. Nonterminal recreation preserves this evidence;
+terminal workspace cleanup removes that workspace's hashed durable evidence directory.
 
 Observer telemetry writes a non-authoritative per-issue aggregate under
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. It reports attempts, consecutive

@@ -204,6 +204,32 @@ defmodule SymphonyElixir.ValidationControllerTest do
     end
   end
 
+  test "does not alias trailing punctuation in Git paths to declared scope" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+
+    try do
+      for path <- ["README.md.", "README.md,"] do
+        File.write!(Path.join(workspace, path), "distinct Linux filename\n")
+        git!(workspace, ["add", path])
+      end
+
+      git!(workspace, ["commit", "-m", "Add punctuation-suffixed paths"])
+
+      assert {:invalid_delta, snapshot} =
+               ValidationController.pending_miu_commit_state(issue, workspace)
+
+      assert snapshot.in_scope_paths == ["README.md"]
+      assert snapshot.out_of_scope_paths == ["README.md,", "README.md."]
+
+      assert {:error, {:undeclared_write, changed_paths}} =
+               ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+
+      assert changed_paths == ["README.md", "README.md,", "README.md."]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "parses pytest normal success summary" do
     {workspace, issue} = workspace_and_issue("3 passed in 0.12s")
 
@@ -1558,6 +1584,20 @@ defmodule SymphonyElixir.ValidationControllerTest do
       assert Enum.any?(correction["findings"], &String.contains?(&1, "1 test, 1 failure"))
       assert Enum.any?(correction["required_corrections"], &String.contains?(&1, "Do not create a post-certification commit"))
       refute Enum.any?(correction["required_corrections"], &String.contains?(&1, "new micro commit"))
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               DispatchPreflight.prepare(workspace, issue)
+
+      assert preflight["checkpoint_event"] == "runtime-contract-gate"
+      assert preflight["first_task"] =~ "operator"
+      assert preflight["first_task"] =~ "Do not edit product files"
+      assert preflight["first_task"] =~ "create a post-certification commit"
+
+      prompt = SymphonyElixir.PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert String.starts_with?(prompt, "Runtime Contract blocking controller gate:")
+      assert prompt =~ "operator-only"
+      assert prompt =~ "Do not edit product files"
+      refute prompt =~ "Make the smallest in-scope source edit"
     after
       File.rm_rf(workspace)
     end
@@ -2439,6 +2479,23 @@ defmodule SymphonyElixir.ValidationControllerTest do
       File.write!(path, Jason.encode!(Map.put(certificate, "head_sha", "forged-head")))
 
       assert ValidationController.certificates(workspace) == [certificate]
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "terminal workspace removal deletes its durable controller evidence" do
+    {workspace, issue} = workspace_and_issue("3 tests, 0 failures")
+    evidence_root = Application.fetch_env!(:symphony_elixir, :controller_evidence_state_dir)
+
+    try do
+      allow_workspace_corrections!(workspace)
+      assert {:ok, _certificate} = ValidationController.certify_miu(issue, workspace, "COD-700-MIU-1")
+      assert Path.wildcard(Path.join([evidence_root, "**", "*.json"])) != []
+
+      assert {:ok, _removed_paths} = Workspace.remove(workspace)
+      refute File.exists?(workspace)
+      assert Path.wildcard(Path.join([evidence_root, "**", "*.json"])) == []
     after
       File.rm_rf(workspace)
     end

@@ -114,7 +114,9 @@ defmodule SymphonyElixir.PromptBuilder do
             {:error, reason} -> %{"prompt_evidence_error" => inspect(reason)}
           end
 
-        case runtime_contract_guidance(compiled, issue, workspace, preflight) do
+        guidance = runtime_contract_prompt_guidance(compiled, issue, workspace, preflight)
+
+        case guidance do
           "" -> prompt
           guidance -> guidance <> "\n\n" <> prompt
         end
@@ -127,6 +129,36 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_prepend_runtime_contract_guidance(prompt, _issue, _workspace), do: prompt
+
+  defp runtime_contract_prompt_guidance(compiled, issue, workspace, preflight) do
+    case blocking_controller_correction(preflight) do
+      nil -> runtime_contract_guidance(compiled, issue, workspace, preflight)
+      correction -> runtime_contract_blocking_controller_guidance(correction)
+    end
+  end
+
+  defp blocking_controller_correction(%{"open_corrections" => corrections})
+       when is_list(corrections) do
+    Enum.find(corrections, fn correction ->
+      correction["source"] == "symphony.runtime.validation-controller" and
+        correction["next_action"] in ["block", "escalate"]
+    end)
+  end
+
+  defp blocking_controller_correction(_preflight), do: nil
+
+  defp runtime_contract_blocking_controller_guidance(correction) do
+    summary = correction["summary"] || correction["correction_id"] || "blocking runtime correction"
+
+    """
+    Runtime Contract blocking controller gate:
+
+    - Runtime certification is operator-only: #{summary}.
+    - Preserve the certified head. Do not edit product files, run validation, create a post-certification commit, append another runtime request, push, or request review.
+    - Record no substitute worker evidence. Stop for the operator action named by the controller correction.
+    """
+    |> String.trim()
+  end
 
   defp runtime_contract_guidance(
          _compiled,
@@ -515,12 +547,12 @@ defmodule SymphonyElixir.PromptBuilder do
     #{issue_brief_policy}
     - First substantive progress guard: before optional skills, broad docs, recursive listings, or scanning more than eight implementation files, produce one real checkpoint:
       - Rework/existing PR: use the current-head feedback supplied by the runtime, inspect only the referenced in-scope file ranges, then make the scoped edit or record an explicit blocker. Append `review-feedback-classified` only after a scoped edit/blocker decision exists; classification alone is lifecycle context, not durable product progress.
-      - Fresh implementation: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the runtime-confirmed issue brief when present plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
+      - Legacy fresh implementation without an active Runtime Contract execution gate: first run `git status --short --branch`, switch/create the exact Linear branch from the runtime dispatch preflight Base/PR target branch when listed (otherwise `origin/main`), read the runtime-confirmed issue brief when present plus only the first target file/test, then make a scoped code/test edit or record an explicit blocker. Append `PYTHONDONTWRITEBYTECODE=1 python3 .codex/delivery/bin/orocsy.py --repo . event append --type tool.finished --status passed --tool "technical-miu-trace"` only after that scoped edit; trace-only/read-only MIU notes are not durable progress.
       - Blocked issue: create an Orocsy inbox correction with the exact blocker and stop.
       - `first-turn-miu-handoff` alone only proves the worker is alive; it is not substantive progress.
     - If the issue shape is missing code-level scope, dependencies are unfinished, approvals/auth/network block required work, or review feedback is outside scope, record a blocker/correction and stop instead of exploring broadly.
     - If any required command fails because a binary is missing, PATH differs, credentials are absent, network/provider access fails, or approval/input is required, record the exact command, stderr/output, failure kind, and next action in an Orocsy blocker/correction before stopping.
-    - Implement one MIU at a time. In a fresh implementation first turn, stop after one scoped code/test/doc edit plus `technical-miu-trace`, or after recording a blocker; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff.
+    - Implement one MIU at a time. In a legacy fresh implementation without an active Runtime Contract execution gate, stop after one scoped code/test/doc edit plus `technical-miu-trace`, or after recording a blocker; a later dirty handoff-recovery turn handles focused validation, evidence, commit, push, PR review request, and Linear handoff. When a Runtime Contract execution gate is prepended, its event, commit, validation, and stop instructions are authoritative instead.
     - For Rework or an existing PR, fetch only current PR review threads/comments for this branch, classify findings, fix accepted in-scope current-code findings, validate, push, request review again, and never move Linear to a terminal state until a fresh review scan is clean.
     - Never merge automatically from inside the worker.
     """
