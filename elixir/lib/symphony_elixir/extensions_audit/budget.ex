@@ -433,8 +433,21 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
              diff_args(["--name-status"], manifest.baseline_commit, manifest.kernel_root),
              "listing kernel divergence"
            ),
-         {:ok, changes} <- parse_name_status(status_output) do
-      {:ok, %{head: head, kernel_paths: MapSet.new(kernel_paths), changes: changes}}
+         {:ok, worktree_changes} <- parse_name_status(status_output),
+         {:ok, index_status_output} <-
+           git_success(
+             git,
+             repo_root,
+             diff_args(["--cached", "--name-status"], manifest.baseline_commit, manifest.kernel_root),
+             "listing staged kernel divergence"
+           ),
+         {:ok, index_changes} <- parse_name_status(index_status_output) do
+      {:ok,
+       %{
+         head: head,
+         kernel_paths: MapSet.new(kernel_paths),
+         changes: tag_changes(worktree_changes, :worktree) ++ tag_changes(index_changes, :index)
+       }}
     else
       false -> budget_git_error("Git evidence did not match the requested repository or object type")
       {:error, findings} when is_list(findings) -> {:error, findings}
@@ -481,6 +494,7 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
   end
 
   defp build_budget_result(manifest, evidence, pinned_changes, file_results, manifest_path_findings) do
+    file_results = merge_file_results(file_results)
     changed_paths = MapSet.new(Enum.map(pinned_changes, & &1.path))
     required_findings = required_findings(manifest.files, changed_paths)
     changed_lines = Enum.sum(Enum.map(file_results, & &1.changed_lines))
@@ -504,6 +518,19 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
   end
 
   defp total_findings(_changed_lines, _maximum), do: []
+
+  defp merge_file_results(file_results) do
+    file_results
+    |> Enum.group_by(& &1.path)
+    |> Enum.map(fn {path, results} ->
+      %{
+        path: path,
+        changed_lines: results |> Enum.map(& &1.changed_lines) |> Enum.max(),
+        findings: results |> Enum.flat_map(& &1.findings) |> Enum.uniq()
+      }
+    end)
+    |> Enum.sort_by(& &1.path)
+  end
 
   defp budget_result([], manifest, evidence, file_results, changed_lines) do
     {:ok,
@@ -531,7 +558,7 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
            git_success(
              git,
              repo_root,
-             diff_args(["--numstat"], manifest.baseline_commit, file.path),
+             diff_args(change_mode_args(change, ["--numstat"]), manifest.baseline_commit, file.path),
              "measuring registered kernel patch"
            ),
          {:ok, changed_lines} <- parse_numstat(numstat, file.path),
@@ -539,7 +566,11 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
            git_success(
              git,
              repo_root,
-             diff_args(["--full-index", "--unified=3"], manifest.baseline_commit, file.path),
+             diff_args(
+               change_mode_args(change, ["--full-index", "--unified=3"]),
+               manifest.baseline_commit,
+               file.path
+             ),
              "fingerprinting registered kernel patch"
            ) do
       fingerprint = sha256(patch)
@@ -585,6 +616,11 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
     ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"] ++
       mode_args ++ [baseline, "--", path]
   end
+
+  defp change_mode_args(%{source: :index}, args), do: ["--cached" | args]
+  defp change_mode_args(_change, args), do: args
+
+  defp tag_changes(changes, source), do: Enum.map(changes, &Map.put(&1, :source, source))
 
   defp parse_lines(output, _operation) do
     {:ok, String.split(output, ~r/\R/, trim: true)}

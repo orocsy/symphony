@@ -133,6 +133,33 @@ defmodule SymphonyElixir.ExtensionsAuditBudgetTest do
     assert Enum.any?(findings, &match?(%Finding{code: :kernel_patch_fingerprint_mismatch, field: @orchestrator}, &1))
   end
 
+  test "rejects a staged kernel patch hidden by baseline worktree content" do
+    %{root: root, baseline: baseline, files: files} = create_budget_fixture!()
+    target = Path.join(root, @orchestrator)
+
+    File.write!(target, "defmodule Fixture.Orchestrator do\n  def hidden, do: :unsafe\nend\n")
+    git!(root, ["add", @orchestrator])
+    File.write!(target, files[@orchestrator])
+
+    assert {:error, findings} = ExtensionsAudit.verify_budget(root)
+    assert Enum.any?(findings, &match?(%Finding{code: :kernel_patch_fingerprint_mismatch, field: @orchestrator}, &1))
+
+    File.write!(target, "defmodule Fixture.Orchestrator do\n  def hook, do: :continue\nend\n")
+    fingerprint = patch_sha256!(root, @orchestrator)
+    write_budget_manifest!(root, baseline, %{String.duplicate("d", 64) => fingerprint})
+    git!(root, ["add", @orchestrator])
+
+    assert {:ok, report} = ExtensionsAudit.verify_budget(root)
+    assert report.changed_kernel_files == [@orchestrator]
+    assert report.changed_lines == 1
+
+    File.write!(target, files[@orchestrator])
+
+    assert {:ok, report} = ExtensionsAudit.verify_budget(root)
+    assert report.changed_kernel_files == [@orchestrator]
+    assert report.changed_lines == 1
+  end
+
   test "accepts an exact registered patch and rejects a different patch below the ceiling" do
     %{root: root, baseline: baseline} = create_budget_fixture!()
     target = Path.join(root, @orchestrator)
