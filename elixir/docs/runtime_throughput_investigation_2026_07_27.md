@@ -224,7 +224,14 @@ redispatched:
   no-delta state, so certified micro commits do not hide the next MIU
   instructions and an uncertified microcommit is never discarded.
 - `integration-check` contracts retain integration mode before generic pending
-  MIU classification.
+  MIU classification, and their final prompts omit implementation/MIU-commit
+  guidance that would contradict the integration-check task.
+- Pending-MIU commit classification is one immutable post-branch-sync snapshot
+  binding MIU id/scope, certification base SHA, current HEAD, and concrete paths.
+  It distinguishes no committed delta, an entirely in-scope committed delta, an
+  invalid delta containing undeclared paths, and unknown evidence. Invalid or
+  unknown evidence fails closed instead of granting permission to restart.
+  Recovery prompts use a concrete in-scope committed path, including glob scopes.
 - Fresh preflight names the exact next MIU and its first write target.
 - Contract compilation rejects MIU read or write scopes fully covered by
   `denied_scope`, before a worker starts. It returns validation errors for

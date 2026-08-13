@@ -194,22 +194,60 @@ defmodule SymphonyElixir.ValidationController do
 
   def certified_miu_ids(_issue, _workspace), do: []
 
-  @spec pending_miu_committed_delta?(Issue.t(), String.t()) :: boolean()
-  def pending_miu_committed_delta?(%Issue{} = issue, workspace) when is_binary(workspace) do
+  @type pending_miu_commit_state ::
+          :no_pending_miu
+          | {:no_committed_delta, map()}
+          | {:committed_delta, map()}
+          | {:invalid_delta, map()}
+          | {:unknown, term()}
+
+  @spec pending_miu_commit_state(Issue.t(), String.t()) :: pending_miu_commit_state()
+  def pending_miu_commit_state(%Issue{} = issue, workspace) when is_binary(workspace) do
     with {:ok, compiled} <- structured_contract(issue),
          {:ok, head_sha} <- git(workspace, ["rev-parse", "HEAD"]),
          completed_ids <- valid_certified_miu_ids(issue, workspace, compiled, head_sha) |> MapSet.new(),
          miu_id when is_binary(miu_id) <-
            Enum.find(compiled.miu_ids, &(not MapSet.member?(completed_ids, &1))),
+         %{} = miu <- Enum.find(compiled.contract["mius"], &(&1["id"] == miu_id)),
          {:ok, base_head_sha} <-
            pending_miu_base_sha(issue, workspace, compiled, head_sha, miu_id),
          {:ok, changed_paths} <- changed_paths(workspace, base_head_sha, head_sha) do
-      changed_paths != []
+      {in_scope_paths, out_of_scope_paths} =
+        Enum.split_with(changed_paths, fn path ->
+          Enum.any?(miu["write_scope"], &path_matches_scope?(path, &1))
+        end)
+
+      snapshot = %{
+        miu_id: miu_id,
+        write_scope: miu["write_scope"],
+        validations: miu["validations"],
+        base_head_sha: base_head_sha,
+        head_sha: head_sha,
+        changed_paths: changed_paths,
+        in_scope_paths: in_scope_paths,
+        out_of_scope_paths: out_of_scope_paths
+      }
+
+      cond do
+        changed_paths == [] -> {:no_committed_delta, snapshot}
+        out_of_scope_paths != [] -> {:invalid_delta, snapshot}
+        true -> {:committed_delta, snapshot}
+      end
     else
-      _ -> false
+      nil -> :no_pending_miu
+      :none -> {:unknown, :pending_miu_base_unavailable}
+      {:error, reason} -> {:unknown, reason}
+      other -> {:unknown, {:pending_miu_state_unavailable, other}}
     end
   rescue
-    _error -> false
+    error -> {:unknown, {:pending_miu_state_exception, Exception.message(error)}}
+  end
+
+  def pending_miu_commit_state(_issue, _workspace), do: {:unknown, :invalid_pending_miu_state_request}
+
+  @spec pending_miu_committed_delta?(Issue.t(), String.t()) :: boolean()
+  def pending_miu_committed_delta?(%Issue{} = issue, workspace) when is_binary(workspace) do
+    match?({:committed_delta, _snapshot}, pending_miu_commit_state(issue, workspace))
   end
 
   def pending_miu_committed_delta?(_issue, _workspace), do: false

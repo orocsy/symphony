@@ -7042,13 +7042,19 @@ defmodule SymphonyElixir.CoreTest do
 
       on_exit(fn -> Application.delete_env(:symphony_elixir, :github_api_runner) end)
 
-      assert {:ok, %{"mode" => "fresh_implementation"} = preflight} =
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
+      assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "unknown"
       assert get_in(preflight, ["requirements", "integration_branch"]) == contract_branch
       assert get_in(preflight, ["review", "pr_number"]) == 110
       assert preflight["branch"] == contract_branch
       assert get_in(preflight, ["review", "feedback"]) == []
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Fail closed"
+      refute prompt =~ "create its micro commit"
+      refute prompt =~ "After your focused implementation, create one clean local micro commit"
     after
       File.rm_rf(test_root)
     end
@@ -8824,6 +8830,17 @@ defmodule SymphonyElixir.CoreTest do
         })
       )
 
+      assert {:ok, resolved_correction_preflight} =
+               SymphonyElixir.DispatchPreflight.read_for_prompt(workspace)
+
+      assert resolved_correction_preflight["open_corrections"] == []
+
+      assert resolved_correction_preflight["first_task"] ==
+               resolved_correction_preflight["base_first_task"]
+
+      refute resolved_correction_preflight["first_task"] =~
+               "Browser validation failed in the worker sandbox"
+
       File.write!(
         Path.join(inbox_dir, "correction_controller_validation.json"),
         Jason.encode!(%{
@@ -8861,6 +8878,8 @@ defmodule SymphonyElixir.CoreTest do
       assert controller_prompt =~ "Validation output:"
       assert controller_prompt =~ "owns exactly one responsive screen slot"
       assert controller_prompt =~ "Expect test to fail"
+      refute String.starts_with?(controller_prompt, "Runtime Contract execution gate:")
+      refute controller_prompt =~ "After your focused implementation, create one clean local micro commit"
 
       for index <- 1..5 do
         File.write!(
@@ -8972,6 +8991,7 @@ defmodule SymphonyElixir.CoreTest do
       assert preflight["first_task"] =~ "tests/e2e/desktop-discover.spec.ts"
       assert preflight["first_task"] =~ "Do not recover or revalidate already certified MIUs"
       refute preflight["first_task"] =~ "dirty"
+      assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "no_committed_delta"
 
       prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
       assert prompt =~ "Implement only MIU `COD-276-MIU-2`"
@@ -9042,6 +9062,11 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
 
       refute preflight["first_task"] =~ "Start with MIU"
+
+      prompt = PromptBuilder.build_prompt(issue, workspace: workspace)
+      assert prompt =~ "Mode: integration check"
+      refute prompt =~ "Implement only MIU `COD-INTEGRATION-MIU-1`"
+      refute prompt =~ "create one clean local micro commit"
     after
       File.rm_rf(test_root)
     end
@@ -9080,7 +9105,7 @@ defmodule SymphonyElixir.CoreTest do
         mius:
           - id: COD-PENDING-MIU-1
             write_scope:
-              - tests/unit/pending.test.ts
+              - tests/unit/**
             validations:
               - git diff --check
         final_validations:
@@ -9134,18 +9159,35 @@ defmodule SymphonyElixir.CoreTest do
                SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
 
       assert pushed_preflight["first_task"] =~ "committed but uncertified MIU `COD-PENDING-MIU-1`"
+      assert pushed_preflight["first_task"] =~ "tests/unit/pending.test.ts"
+      refute pushed_preflight["first_task"] =~ "path `tests/unit/**`"
       refute pushed_preflight["first_task"] =~ "dirty test-spec checkpoint"
+
+      assert get_in(pushed_preflight, ["pending_miu_commit_state", "miu_id"]) ==
+               "COD-PENDING-MIU-1"
+
+      {committed_head_sha, 0} =
+        System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true)
+
+      assert get_in(pushed_preflight, ["pending_miu_commit_state", "head_sha"]) ==
+               String.trim(committed_head_sha)
 
       prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
       assert prompt =~ "Local handoff recovery checkpoint"
       refute prompt =~ "Mode: fresh implementation"
+      assert prompt =~ "committed but uncertified MIU `COD-PENDING-MIU-1`"
+      refute prompt =~ "After your focused implementation, create one clean local micro commit"
+      refute prompt =~ "create its micro commit"
 
       File.rm_rf!(Path.join(workspace, ".orocsy/delivery"))
 
+      origin = Path.join(test_root, "origin.git")
+      {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+
       {_output, 0} =
         System.cmd(
           "git",
-          ["remote", "add", "origin", "https://example.org/repo.git"],
+          ["remote", "add", "origin", origin],
           cd: workspace,
           stderr_to_stdout: true
         )
@@ -9153,15 +9195,7 @@ defmodule SymphonyElixir.CoreTest do
       {_output, 0} =
         System.cmd(
           "git",
-          ["update-ref", "refs/remotes/origin/#{issue.branch_name}", "HEAD"],
-          cd: workspace,
-          stderr_to_stdout: true
-        )
-
-      {_output, 0} =
-        System.cmd(
-          "git",
-          ["branch", "--set-upstream-to", "origin/#{issue.branch_name}", issue.branch_name],
+          ["push", "-u", "origin", issue.branch_name],
           cd: workspace,
           stderr_to_stdout: true
         )
@@ -9175,6 +9209,201 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, %{"mode" => "handoff_recovery"}} =
                SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
+
+      File.write!(Path.join(workspace, "README.md"), "# Test\n\nUndeclared change.\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add undeclared change"], cd: workspace, stderr_to_stdout: true)
+
+      assert {:invalid_delta, invalid_snapshot} =
+               SymphonyElixir.ValidationController.pending_miu_commit_state(
+                 revised_issue,
+                 workspace
+               )
+
+      assert invalid_snapshot.out_of_scope_paths == ["README.md"]
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = invalid_preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, revised_issue)
+
+      assert get_in(invalid_preflight, ["pending_miu_commit_state", "status"]) ==
+               "invalid_delta"
+
+      invalid_prompt = PromptBuilder.build_prompt(revised_issue, workspace: workspace)
+      assert invalid_prompt =~ "undeclared path(s): `README.md`"
+      refute invalid_prompt =~ "create its micro commit"
+      refute invalid_prompt =~ "After your focused implementation, create one clean local micro commit"
+
+      preflight_path = Path.join(workspace, ".orocsy/delivery/state/dispatch-preflight.json")
+      tampered_preflight = preflight_path |> File.read!() |> Jason.decode!()
+      File.write!(preflight_path, Jason.encode!(Map.put(tampered_preflight, "controller_signature", "invalid")))
+
+      issue_without_explicit_base = %Issue{
+        revised_issue
+        | description:
+            String.replace(
+              revised_issue.description,
+              "certification_base_sha: #{base_sha}\n",
+              ""
+            )
+      }
+
+      assert {:unknown, _reason} =
+               SymphonyElixir.ValidationController.pending_miu_commit_state(
+                 issue_without_explicit_base,
+                 workspace
+               )
+
+      assert {:error, {:invalid_certification_preflight, :invalid_controller_signature}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue_without_explicit_base)
+
+      tampered_prompt = PromptBuilder.build_prompt(issue_without_explicit_base, workspace: workspace)
+      refute tampered_prompt =~ "Runtime Contract execution gate:"
+      refute tampered_prompt =~ "After your focused implementation, create one clean local micro commit"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "dispatch preflight synchronizes a remote pending MIU commit before classification" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-pending-miu-remote-sync-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      origin = Path.join(test_root, "origin.git")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        review_monitor_enabled: false
+      )
+
+      issue = %Issue{
+        id: "issue-cod-pending-remote-sync",
+        identifier: "COD-PENDING-SYNC",
+        title: "Preserve remote pending MIU commit",
+        state: "In Progress",
+        branch_name: "orocsy/cod-pending-sync",
+        description: """
+        ## Runtime Contract
+
+        ```yaml
+        schema_version: 1
+        ticket_type: implementation
+        base_branch: main
+        integration_branch: orocsy/cod-pending-sync
+        dependencies: []
+        mius:
+          - id: COD-PENDING-SYNC-MIU-1
+            write_scope:
+              - tests/unit/**
+            validations:
+              - git diff --check
+        final_validations:
+          - git diff --check
+        review:
+          authority: github_codex
+          require_current_head: true
+        ```
+        """
+      }
+
+      assert {_output, 0} = System.cmd("git", ["init", "--bare", origin], stderr_to_stdout: true)
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      {_output, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
+      File.write!(Path.join(workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["remote", "add", "origin", origin], cd: workspace)
+      {_output, 0} = System.cmd("git", ["push", "-u", "origin", "main"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: workspace)
+      {_output, 0} = System.cmd("git", ["push", "-u", "origin", issue.branch_name], cd: workspace)
+      File.write!(Path.join(workspace, ".git/info/exclude"), ".orocsy/\n", [:append])
+      {base_sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+      base_sha = String.trim(base_sha)
+
+      issue = %Issue{
+        issue
+        | description:
+            String.replace(
+              issue.description,
+              "integration_branch: orocsy/cod-pending-sync",
+              "integration_branch: orocsy/cod-pending-sync\ncertification_base_sha: #{base_sha}"
+            )
+      }
+
+      assert {:ok, %{"mode" => "fresh_implementation"}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      remote_writer = Path.join(test_root, "remote-writer")
+      {_output, 0} = System.cmd("git", ["clone", origin, remote_writer], stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: remote_writer)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: remote_writer)
+      {_output, 0} = System.cmd("git", ["switch", issue.branch_name], cd: remote_writer)
+      remote_target = Path.join(remote_writer, "tests/unit/pending.test.ts")
+      File.mkdir_p!(Path.dirname(remote_target))
+      File.write!(remote_target, "test('remote pending', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/pending.test.ts"], cd: remote_writer)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Implement pending MIU remotely"], cd: remote_writer)
+      {_output, 0} = System.cmd("git", ["push", "origin", issue.branch_name], cd: remote_writer)
+      {remote_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: remote_writer)
+
+      assert {:ok, %{"mode" => "handoff_recovery"} = preflight} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      assert get_in(preflight, ["pending_miu_commit_state", "status"]) == "committed_delta"
+      assert get_in(preflight, ["pending_miu_commit_state", "head_sha"]) == String.trim(remote_head)
+      assert preflight["first_task"] =~ "tests/unit/pending.test.ts"
+      {local_head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+      assert String.trim(local_head) == String.trim(remote_head)
+
+      local_target = Path.join(workspace, "tests/unit/local-followup.test.ts")
+      File.write!(local_target, "test('local followup', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/local-followup.test.ts"], cd: workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add local followup"], cd: workspace)
+
+      remote_followup = Path.join(remote_writer, "tests/unit/remote-followup.test.ts")
+      File.write!(remote_followup, "test('remote followup', () => {})\n")
+      {_output, 0} = System.cmd("git", ["add", "tests/unit/remote-followup.test.ts"], cd: remote_writer)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Add remote followup"], cd: remote_writer)
+      {_output, 0} = System.cmd("git", ["push", "origin", issue.branch_name], cd: remote_writer)
+
+      assert {:error, {:authoritative_branch_fast_forward_failed, _exit_code, _output}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      missing_origin = Path.join(test_root, "missing-origin.git")
+      {_output, 0} = System.cmd("git", ["remote", "set-url", "origin", missing_origin], cd: workspace)
+
+      assert {:error, {:authoritative_branch_fetch_failed, _exit_code, _output}} =
+               SymphonyElixir.DispatchPreflight.prepare(workspace, issue)
+
+      no_origin_workspace = Path.join(test_root, "no-origin-workspace")
+      {_output, 0} = System.cmd("git", ["init", "-b", "main", no_origin_workspace], stderr_to_stdout: true)
+      {_output, 0} = System.cmd("git", ["config", "user.email", "symphony@example.test"], cd: no_origin_workspace)
+      {_output, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: no_origin_workspace)
+      File.write!(Path.join(no_origin_workspace, "README.md"), "# Test\n")
+      {_output, 0} = System.cmd("git", ["add", "README.md"], cd: no_origin_workspace)
+      {_output, 0} = System.cmd("git", ["commit", "-m", "Initial"], cd: no_origin_workspace)
+
+      assert {:error, {:authoritative_branch_unavailable, "orocsy/cod-pending-sync"}} =
+               SymphonyElixir.DispatchPreflight.prepare(no_origin_workspace, issue)
+
+      {_output, 0} = System.cmd("git", ["switch", "-c", issue.branch_name], cd: no_origin_workspace)
+      File.write!(Path.join(no_origin_workspace, "README.md"), "# Dirty\n")
+
+      assert {:ok, preflight_on_dirty_authoritative_branch} =
+               SymphonyElixir.DispatchPreflight.prepare(no_origin_workspace, issue)
+
+      assert preflight_on_dirty_authoritative_branch["branch"] == issue.branch_name
+
+      {_output, 0} = System.cmd("git", ["switch", "main"], cd: no_origin_workspace)
+
+      assert {:error, {:authoritative_branch_mismatch, "main", "orocsy/cod-pending-sync"}} =
+               SymphonyElixir.DispatchPreflight.prepare(no_origin_workspace, issue)
     after
       File.rm_rf(test_root)
     end

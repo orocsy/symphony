@@ -41,6 +41,8 @@ codex:
   # Symphony disables broad tools and rejects broad-discovery commands before Codex can run them.
   # Structured contracts route by ticket type and certified MIU lifecycle before generic Git
   # handoff heuristics. A committed but uncertified MIU delta is recovered; it is not restarted.
+  # Git/evidence uncertainty and undeclared commits fail closed. One post-sync lifecycle snapshot
+  # binds MIU/base/HEAD/paths and drives both mode and prompt without downstream recomputation.
   # Review rework can admit only `git log -N --oneline [--decorate|--no-decorate]` for N=1..20
   # when no earlier operator-configured forbidden pattern rejects that exact metadata-only command.
   # Observer token telemetry is written under .orocsy/delivery/token-telemetry and never controls

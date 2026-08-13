@@ -77,7 +77,10 @@ while their own MIU is pending. For other structured contracts, a clean pending
 MIU starts `fresh_implementation` only when `HEAD` has no committed delta after
 the MIU certification base. A committed but uncertified delta stays in
 `handoff_recovery`, allowing validation and certification without reimplementing
-the same MIU.
+the same MIU. The lifecycle snapshot is computed after branch synchronization and
+binds the pending MIU, scope, base SHA, head SHA, and concrete paths for both mode
+and prompt generation. Evidence failures and undeclared committed paths fail
+closed; committed recovery names an actual in-scope path rather than a wildcard.
 
 After each worker turn, observer-only token telemetry refreshes
 `.orocsy/delivery/token-telemetry/issue-aggregate.json`. The aggregate exposes
