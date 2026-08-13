@@ -81,6 +81,12 @@ Every worker turn should end with one of these token-aware outcomes:
 | `blocked_no_durable_progress` | Token spend exceeded the progress window and no durable proof exists. | Park with Orocsy correction and attach telemetry summary. |
 | `blocked_hidden_interaction` | Permission, MCP elicitation, unsafe command, or interactive prompt. | Park with Orocsy correction. |
 
+No-progress spend may accumulate across consecutive summaries for the same issue,
+thread, and running window. A summary with current-turn durable progress resets that
+accumulator: `durable_progress_events`, `dirty_files`, or `new_commits` must contain
+evidence. Later no-progress spend starts a new window and cannot be combined with
+spend from before the reset.
+
 ## Low-Level Data Model
 
 ### Token Span

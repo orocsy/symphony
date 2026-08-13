@@ -948,6 +948,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert command ==
                "git diff --stat --no-ext-diff --no-textconv -- src/features/landing/GuestStartScreen.tsx"
+
       assert pattern =~ "git\\s+diff\\s+--stat"
 
       events = delivery_events!(workspace)

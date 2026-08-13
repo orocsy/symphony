@@ -3618,11 +3618,9 @@ defmodule SymphonyElixir.Orchestrator do
         |> String.split("\n", trim: true)
         |> Enum.reduce(0, fn line, total ->
           with {:ok, %{} = summary} <- Jason.decode(line),
-               true <- summary["status"] == "blocked_no_durable_progress",
                true <- worker_summary_same_thread?(summary, thread_id),
-               true <- worker_summary_matches_running_entry?(summary, running_entry),
-               counted_tokens when is_integer(counted_tokens) <- integer_like(summary["counted_guard_tokens"]) do
-            total + counted_tokens
+               true <- worker_summary_matches_running_entry?(summary, running_entry) do
+            accumulate_worker_summary_counted_tokens(summary, total)
           else
             _ -> total
           end
@@ -3636,6 +3634,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp accumulated_worker_summary_counted_tokens(_workspace, _running_entry, _current_summary), do: 0
+
+  defp accumulate_worker_summary_counted_tokens(%{} = summary, total) do
+    cond do
+      worker_summary_durable_progress?(summary) ->
+        0
+
+      summary["status"] == "blocked_no_durable_progress" ->
+        add_worker_summary_counted_tokens(summary, total)
+
+      true ->
+        total
+    end
+  end
+
+  defp add_worker_summary_counted_tokens(%{} = summary, total) do
+    case integer_like(summary["counted_guard_tokens"]) do
+      counted_tokens when is_integer(counted_tokens) -> total + counted_tokens
+      _ -> total
+    end
+  end
+
+  defp worker_summary_durable_progress?(%{} = summary) do
+    Enum.any?(["durable_progress_events", "dirty_files", "new_commits"], fn key ->
+      match?([_ | _], summary[key])
+    end)
+  end
+
+  defp worker_summary_durable_progress?(_summary), do: false
 
   defp worker_summary_same_thread?(%{} = summary, thread_id) when is_binary(thread_id) and thread_id != "" do
     summary["thread_id"] == thread_id

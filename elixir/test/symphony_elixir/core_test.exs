@@ -12086,6 +12086,116 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "normal no-progress accumulation restarts after durable progress" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-no-progress-reset-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        codex_stall_timeout_ms: 0,
+        codex_durable_progress_timeout_ms: 30_000,
+        codex_durable_progress_min_tokens: 15_000,
+        codex_durable_progress_first_event_max_tokens: 120_000
+      )
+
+      issue_id = "issue-normal-no-progress-reset"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-NORMAL-NO-PROGRESS-RESET",
+        state: "In Progress",
+        title: "Reset no-progress accounting after progress",
+        description: "Durable progress starts a new no-progress accounting window.",
+        labels: []
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      running_started_at =
+        DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second)
+
+      workers_dir = Path.join(workspace, ".orocsy/delivery/token-telemetry")
+      File.mkdir_p!(workers_dir)
+
+      summary = fn turn, status, counted_tokens, progress_events ->
+        started_at = DateTime.add(running_started_at, turn * 10, :second)
+
+        Jason.encode!(%{
+          "schema_version" => 1,
+          "issue" => issue.identifier,
+          "linear_issue_id" => issue.id,
+          "worker_session_id" => "thread-reset-turn-#{turn}",
+          "thread_id" => "thread-reset",
+          "turn_id" => "turn-#{turn}",
+          "turn" => turn,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "ended_at" => DateTime.to_iso8601(DateTime.add(started_at, 5, :second)),
+          "status" => status,
+          "total_tokens" => counted_tokens,
+          "input_tokens" => counted_tokens,
+          "cached_input_tokens" => 0,
+          "output_tokens" => 0,
+          "counted_guard_tokens" => counted_tokens,
+          "durable_progress_events" => progress_events,
+          "dirty_files" => [],
+          "new_commits" => [],
+          "top_phases" => [%{"phase" => "command", "total_tokens" => counted_tokens}],
+          "loop_signatures" => if(status == "blocked_no_durable_progress", do: ["no_durable_progress"], else: [])
+        })
+      end
+
+      File.write!(
+        Path.join(workers_dir, "workers.jsonl"),
+        Enum.join(
+          [
+            summary.(1, "blocked_no_durable_progress", 10_000, []),
+            summary.(2, "completed", 2_000, ["tool.finished"]),
+            summary.(3, "blocked_no_durable_progress", 9_000, [])
+          ],
+          "\n"
+        ) <> "\n"
+      )
+
+      ref = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{
+          issue_id => %{
+            pid: nil,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            started_at: running_started_at,
+            workspace_path: workspace,
+            session_id: "thread-reset-turn-3",
+            codex_total_tokens: 9_000,
+            codex_cached_input_tokens: 0
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      assert {:noreply, state} =
+               Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+      refute Map.has_key?(state.running, issue_id)
+      assert %{attempt: 1} = state.retry_attempts[issue_id]
+      assert Workspace.open_blocking_corrections_in_workspace(workspace) == []
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "normally completed worker preserves validation blocker before first-event block" do
     test_root =
       Path.join(

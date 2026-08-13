@@ -672,6 +672,9 @@ Important nuance:
   such as `blocked_no_durable_progress`, the orchestrator MUST classify that guard before scheduling
   the continuation retry. Validation failures remain the most actionable retryable class, then
   first-durable-event budget failures, then no-durable-progress or handoff-recovery handling.
+- Consecutive no-progress token accounting MUST restart after a matching worker summary records
+  durable progress (a current-turn durable event, dirty file, or new commit). Spend from before that
+  progress boundary MUST NOT be combined with later no-progress spend to park a normal completion.
 
 ### 7.2 Run Attempt Lifecycle
 
