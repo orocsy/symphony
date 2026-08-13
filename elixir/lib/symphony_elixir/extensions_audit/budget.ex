@@ -69,6 +69,7 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
   @hook_keys ~w(id max_changed_lines prototype_patch_sha256)
   @sha1_pattern ~r/^[0-9a-f]{40}$/
   @sha256_pattern ~r/^[0-9a-f]{64}$/
+  @orocsy_module_token ~r/\bOrocsy\b/
   @finding_order [
     :kernel_path_unregistered,
     :kernel_file_deleted,
@@ -441,12 +442,23 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
              diff_args(["--cached", "--name-status"], manifest.baseline_commit, manifest.kernel_root),
              "listing staged kernel divergence"
            ),
-         {:ok, index_changes} <- parse_name_status(index_status_output) do
+         {:ok, index_changes} <- parse_name_status(index_status_output),
+         {:ok, head_status_output} <-
+           git_success(
+             git,
+             repo_root,
+             diff_args(["--name-status"], manifest.baseline_commit, manifest.kernel_root, head),
+             "listing committed kernel divergence"
+           ),
+         {:ok, head_changes} <- parse_name_status(head_status_output) do
       {:ok,
        %{
          head: head,
          kernel_paths: MapSet.new(kernel_paths),
-         changes: tag_changes(worktree_changes, :worktree) ++ tag_changes(index_changes, :index)
+         changes:
+           tag_changes(worktree_changes, :worktree) ++
+             tag_changes(index_changes, :index) ++
+             tag_changes(head_changes, :head, head)
        }}
     else
       false -> budget_git_error("Git evidence did not match the requested repository or object type")
@@ -495,8 +507,13 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
 
   defp build_budget_result(manifest, evidence, pinned_changes, file_results, manifest_path_findings) do
     file_results = merge_file_results(file_results)
-    changed_paths = MapSet.new(Enum.map(pinned_changes, & &1.path))
-    required_findings = required_findings(manifest.files, changed_paths)
+
+    effective_paths =
+      pinned_changes
+      |> Enum.filter(&(&1.source == :worktree))
+      |> MapSet.new(& &1.path)
+
+    required_findings = required_findings(manifest.files, effective_paths)
     changed_lines = Enum.sum(Enum.map(file_results, & &1.changed_lines))
     total_findings = total_findings(changed_lines, manifest.total_max_changed_lines)
 
@@ -558,7 +575,12 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
            git_success(
              git,
              repo_root,
-             diff_args(change_mode_args(change, ["--numstat"]), manifest.baseline_commit, file.path),
+             diff_args(
+               change_mode_args(change, ["--numstat"]),
+               manifest.baseline_commit,
+               file.path,
+               change_right(change)
+             ),
              "measuring registered kernel patch"
            ),
          {:ok, changed_lines} <- parse_numstat(numstat, file.path),
@@ -569,7 +591,8 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
              diff_args(
                change_mode_args(change, ["--full-index", "--unified=3"]),
                manifest.baseline_commit,
-               file.path
+               file.path,
+               change_right(change)
              ),
              "fingerprinting registered kernel patch"
            ) do
@@ -612,15 +635,22 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
     end
   end
 
-  defp diff_args(mode_args, baseline, path) do
+  defp diff_args(mode_args, baseline, path, right \\ nil) do
     ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"] ++
-      mode_args ++ [baseline, "--", path]
+      mode_args ++ [baseline] ++ List.wrap(right) ++ ["--", path]
   end
 
   defp change_mode_args(%{source: :index}, args), do: ["--cached" | args]
   defp change_mode_args(_change, args), do: args
 
+  defp change_right(%{source: :head, head: head}), do: head
+  defp change_right(_change), do: nil
+
   defp tag_changes(changes, source), do: Enum.map(changes, &Map.put(&1, :source, source))
+
+  defp tag_changes(changes, :head, head) do
+    Enum.map(changes, &Map.merge(&1, %{source: :head, head: head}))
+  end
 
   defp parse_lines(output, _operation) do
     {:ok, String.split(output, ~r/\R/, trim: true)}
@@ -690,7 +720,7 @@ defmodule SymphonyElixir.ExtensionsAudit.Budget do
     |> String.split(~r/\R/)
     |> Enum.any?(fn line ->
       String.starts_with?(line, "+") and not String.starts_with?(line, "+++") and
-        String.contains?(line, "SymphonyElixir.Orocsy")
+        Regex.match?(@orocsy_module_token, line)
     end)
   end
 

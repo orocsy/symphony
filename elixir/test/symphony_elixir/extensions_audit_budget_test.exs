@@ -160,6 +160,49 @@ defmodule SymphonyElixir.ExtensionsAuditBudgetTest do
     assert report.changed_lines == 1
   end
 
+  test "rejects a committed kernel patch hidden by baseline index and worktree content" do
+    %{root: root, files: files} = create_budget_fixture!()
+    target = Path.join(root, @orchestrator)
+
+    File.write!(target, "defmodule Fixture.Orchestrator do\n  def hidden, do: :unsafe\nend\n")
+    git!(root, ["add", @orchestrator])
+    git!(root, ["commit", "-m", "hide committed kernel patch"])
+
+    File.write!(target, files[@orchestrator])
+    git!(root, ["add", @orchestrator])
+
+    assert {:error, findings} = ExtensionsAudit.verify_budget(root)
+
+    assert Enum.any?(
+             findings,
+             &match?(%Finding{code: :kernel_patch_fingerprint_mismatch, field: @orchestrator}, &1)
+           )
+  end
+
+  test "requires a required patch in effective worktree content" do
+    %{root: root, baseline: baseline, files: files} = create_budget_fixture!()
+    target = Path.join(root, @orchestrator)
+
+    File.write!(target, "defmodule Fixture.Orchestrator do\n  def hook, do: :continue\nend\n")
+    fingerprint = patch_sha256!(root, @orchestrator)
+
+    write_budget_manifest!(root, baseline, %{
+      String.duplicate("d", 64) => fingerprint,
+      "required: false" => "required: true"
+    })
+
+    git!(root, ["add", @orchestrator])
+    git!(root, ["commit", "-m", "land required kernel patch"])
+    File.write!(target, files[@orchestrator])
+
+    assert {:error, findings} = ExtensionsAudit.verify_budget(root)
+
+    assert Enum.any?(
+             findings,
+             &match?(%Finding{code: :kernel_required_hook_missing, field: @orchestrator}, &1)
+           )
+  end
+
   test "accepts an exact registered patch and rejects a different patch below the ceiling" do
     %{root: root, baseline: baseline} = create_budget_fixture!()
     target = Path.join(root, @orchestrator)
@@ -211,6 +254,13 @@ defmodule SymphonyElixir.ExtensionsAuditBudgetTest do
     assert Enum.any?(findings, &match?(%Finding{code: :kernel_required_hook_missing}, &1))
 
     File.write!(target, "defmodule Fixture.Orchestrator do\n  alias SymphonyElixir.Orocsy.Policy\nend\n")
+    fingerprint = patch_sha256!(root, @orchestrator)
+
+    write_budget_manifest!(root, baseline, %{String.duplicate("d", 64) => fingerprint})
+    assert {:error, findings} = ExtensionsAudit.verify_budget(root)
+    assert Enum.any?(findings, &match?(%Finding{code: :kernel_direct_orocsy_dependency}, &1))
+
+    File.write!(target, "defmodule Fixture.Orchestrator do\n  alias SymphonyElixir.{Orocsy.Policy}\nend\n")
     fingerprint = patch_sha256!(root, @orchestrator)
 
     write_budget_manifest!(root, baseline, %{String.duplicate("d", 64) => fingerprint})
