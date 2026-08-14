@@ -1,8 +1,10 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1 implementation gate-green; independent implementation review pending
+Status: OXE-1.1a host/prototype reconciliation gate-green; independent review pending
 
 Date: 2026-08-13
+
+Last revised: 2026-08-14
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -32,6 +34,12 @@ mechanics or silently choose a different result. `:kernel_default` means “the
 extension made no decision; continue the already-existing OpenAI code path.” It
 is legal only for generic/no-op adapters. Orocsy adapters must return a typed
 decision or a typed failure.
+
+A post-implementation compatibility review found that the older `OXE-0.2`
+prototype fingerprints call a discarded facade contract and therefore cannot
+be activated with this host. The evidence and corrective boundary are recorded
+in
+[`openai_extension_oxe11a_host_prototype_reconciliation.md`](openai_extension_oxe11a_host_prototype_reconciliation.md).
 
 ## Observed Fixed Point
 
@@ -68,7 +76,7 @@ schema. Both would violate the already-reviewed patch authority.
 | `OXE-1.1` | facade, registry, public interfaces, shared failure types, no-op adapters | none | interface tests and closed-registry tests |
 | `OXE-1.2` | admission and workspace-ready delivery hooks | `orchestrator.ex`, `agent_runner.ex` | unchanged upstream core tests plus neutral-decision tests |
 | `OXE-1.3` | immutable turn context, authorization hook, observer hook | `codex/app_server.ex` | unchanged app-server tests plus recursive-context differential |
-| `OXE-1.4` | complete no-op conformance and manifest activation | manifest, audit fixtures, proof task, docs | all three registered files required; exact 40-line budget and full gate |
+| `OXE-1.4` | complete no-op conformance and manifest activation | manifest, audit fixtures, proof task, docs | all three registered files required; reviewed replacement budget and full gate |
 
 Dependencies are linear: `1.1 -> 1.2 -> 1.3 -> 1.4`. A later MIU may not
 absorb an earlier failure by widening a kernel patch.
@@ -137,12 +145,14 @@ module name. Slice 1 accepts only `noop`; later slices add the known `orocsy`
 name when its adapter exists.
 
 The registry is resolved from the decoded `WORKFLOW.md` front-matter map on the
-first admission facade call, before claim, workspace creation, or worker
-launch. The single orchestrator authority makes that first call serialized.
-The resolved value is stored by `ExtensionRegistry` as an immutable runtime
-term and cannot be replaced without a BEAM restart. This avoids an unregistered
-startup-file or kernel-schema edit while preserving the real invariant: no
-extension adapter can change during an in-flight run.
+first decision-facade call. The normal production path makes that call through
+admission before claim, workspace creation, or worker launch. Delivery and
+authorization may resolve the same closed configuration when pinned upstream
+modules are exercised directly; they do not depend on an orchestrator call
+having happened earlier. The resolved value is stored by `ExtensionRegistry`
+as an immutable runtime term and cannot be replaced without a BEAM restart.
+This avoids an unregistered startup-file or kernel-schema edit while preserving
+the real invariant: no extension adapter can change during an in-flight run.
 
 The facade does not accept a registry, adapter module, or catalog argument.
 Production adapter names are resolved through a build-time closed catalog; the
@@ -154,11 +164,12 @@ authority. Tests use it only for lifecycle isolation; they never read or
 replace registry storage directly.
 
 Workflow reload may change adapter options for future admissions and future
-Codex sessions. `OXE-1.1` validates and returns a fresh options snapshot from
-each registry lock while keeping adapter selection immutable. `OXE-1.2` and
-`OXE-1.3` must carry that snapshot and the registry revision into their owning
-admission/session contexts once those concrete context types exist. Changing
-an adapter selector after registry lock is a typed
+Codex sessions. `OXE-1.1` validates a fresh options snapshot during each
+registry lock while keeping adapter selection immutable. The generic facade
+does not expose raw options or registry lookup to kernel callers. `OXE-1.2` and
+`OXE-1.3` must define their concrete context types and enrich adapter contexts
+behind the facade with that snapshot and registry revision. Changing an
+adapter selector after registry lock is a typed
 `:extension_registry_restart_required` failure; it never hot-swaps a module
 and never falls back to no-op.
 
@@ -271,8 +282,12 @@ limit. Inventing a duration in the generic host would create false precision.
 
 ## Kernel Hook Ownership
 
-`OXE-1.2` and `OXE-1.3` must reproduce the reviewed prototype patches, not
-invent adjacent call sites.
+`OXE-1.2` and `OXE-1.3` must use the reviewed lifecycle call sites, not invent
+adjacent seams. They may not reproduce the current manifest fingerprints:
+`OXE-1.1a` proved those patches call an obsolete facade and do not compile
+against this host. Each owning MIU must create its context/differential RED
+tests, remeasure the exact compatible patch, and receive architecture review
+before revising its manifest entries.
 
 1. Admission: after the final issue refresh and before worker selection, call
    `Extensions.evaluate_admission/2`. `:kernel_default` continues into the
@@ -287,10 +302,11 @@ invent adjacent call sites.
    existing subscriber callback, call `Extensions.record/1`.
 
 `OXE-1.2` changes `required` to `true` only for `orchestrator.ex` and
-`agent_runner.ex`. `OXE-1.3` changes it for `codex/app_server.ex`. `OXE-1.4`
-proves all registered patches present together. A fingerprint mismatch stops
-the MIU and requires a new measured prototype plus architecture review; it is
-not fixed by editing the manifest to match unreviewed code.
+`agent_runner.ex`, after its reviewed manifest revision. `OXE-1.3` does the
+same for `codex/app_server.ex`. `OXE-1.4` proves all registered patches present
+together. A fingerprint mismatch stops the MIU and requires a new measured
+prototype plus architecture review; it is not fixed by editing the manifest to
+match unreviewed code.
 
 ## No-Op Differential Proof
 
@@ -409,9 +425,10 @@ support:
   new validated options snapshot for each future admission; the owning hook
   MIUs remain responsible for carrying that snapshot into their concrete
   contexts;
-- the first admission call owns the latch; delivery and authorization fail
-  closed before that call, while observation logs a sanitized unavailable
-  class and retains no decision return path;
+- any decision facade may establish the same validated immutable latch; the
+  production orchestrator still reaches admission first, while direct pinned
+  upstream delivery/authorization entry points no longer fail because of a
+  lifecycle-order artifact;
 - the facade normalizes raise, throw, exit, malformed returns, and typed adapter
   failures, stamping the selected adapter and registry revision itself;
 - production contains only the four `noop` selectors. Fixture selectors and
@@ -465,9 +482,22 @@ found three design-document gaps and corrected them before the red checkpoint:
 That design review did not by itself clear a kernel path, manifest requirement,
 or Orocsy adapter.
 
+The subsequent implementation review found a fourth, load-bearing gap: the
+recorded `OXE-0.2` admission and delivery patches pass the budget audit but
+call facade functions that do not exist in the production host. Reproducing
+those exact patches made compilation fail. The same review showed that direct
+upstream `AgentRunner` and app-server tests do not necessarily enter through
+admission first. `OXE-1.1a` therefore makes every decision facade capable of
+resolving the same closed registry, records the stale-fingerprint evidence, and
+keeps the manifest unchanged until a new exact prototype is independently
+reviewed.
+
 ## Next Action
 
 Run an independent two-axis implementation review against RED checkpoint
-`45335b7`, this trace, and the parent architecture. If it clears, create the
-`OXE-1.2` admission/delivery RED checkpoint without absorbing authorization,
-observer, Orocsy policy, or manifest-finalization scope.
+`45335b7`, the `OXE-1.1a` correction, this trace, and the parent architecture.
+If it clears, create the `OXE-1.2` admission/delivery RED checkpoint without
+absorbing authorization, observer, Orocsy policy, or manifest-finalization
+scope. That MIU must define its concrete context/options ownership and obtain a
+reviewed replacement for only the two admission/delivery manifest entries
+before landing either kernel hook.

@@ -57,19 +57,13 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert :ok == call(:record, [%{type: :notification}])
   end
 
-  test "fails closed when a decision interface runs before admission locks the registry" do
-    assert {:error, delivery_failure, []} =
-             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+  test "lazily locks valid configuration from either direct decision entry point" do
+    assert :kernel_default == call(:handle_delivery, [%{type: :workspace_ready}, %{}])
 
-    assert delivery_failure.code == :extension_registry_unavailable
-    assert delivery_failure.interface == :delivery_controller
+    reset_registry_if_available()
 
-    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
-    assert authorization_failure.code == :extension_registry_unavailable
-
-    log = capture_log(fn -> assert :ok == call(:record, [%{secret: "not-for-logs"}]) end)
-    assert log =~ "registry_unavailable"
-    refute log =~ "not-for-logs"
+    assert :kernel_default == call(:authorize, [%{kind: :shell}, %{}])
+    assert :ok == call(:record, [%{type: :notification}])
   end
 
   test "accepts valid typed decisions and stamps adapter failures at the facade" do
@@ -268,20 +262,39 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert malformed_log =~ "class=invalid_adapter_return"
   end
 
-  test "normalizes a missing workflow as an admission configuration failure" do
+  test "normalizes a missing workflow at every decision entry point" do
     workflow_path = Workflow.workflow_file_path()
     missing_path = Path.join(Path.dirname(workflow_path), "MISSING_OXE_WORKFLOW.md")
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
     Workflow.set_workflow_file_path(missing_path)
 
-    issue = %Issue{id: "issue-missing", identifier: "OXE-MISSING", state: "Todo"}
-    assert {:error, failure} = call(:evaluate_admission, [issue, %{}])
-    assert failure.code == :extension_configuration_unavailable
-    assert failure.reason == :workflow_unavailable
+    try do
+      issue = %Issue{id: "issue-missing", identifier: "OXE-MISSING", state: "Todo"}
+      assert {:error, admission_failure} = call(:evaluate_admission, [issue, %{}])
+      assert admission_failure.code == :extension_configuration_unavailable
+      assert admission_failure.interface == :dispatch_admission
+      assert admission_failure.reason == :workflow_unavailable
 
-    Workflow.set_workflow_file_path(workflow_path)
-    assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+      assert {:error, delivery_failure, []} =
+               call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+
+      assert delivery_failure.code == :extension_configuration_unavailable
+      assert delivery_failure.interface == :delivery_controller
+      assert delivery_failure.reason == :workflow_unavailable
+
+      assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+      assert authorization_failure.code == :extension_configuration_unavailable
+      assert authorization_failure.interface == :command_authorization
+      assert authorization_failure.reason == :workflow_unavailable
+
+      log = capture_log(fn -> assert :ok == call(:record, [%{secret: "not-for-logs"}]) end)
+      assert log =~ "registry_unavailable"
+      refute log =~ "not-for-logs"
+    after
+      Workflow.set_workflow_file_path(workflow_path)
+      assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+    end
   end
 
   test "keeps Orocsy dependencies outside the generic host tree" do

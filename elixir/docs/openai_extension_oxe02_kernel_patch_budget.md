@@ -1,6 +1,6 @@
 # OXE-0.2 Kernel Patch-Budget Audit Technical Trace
 
-Status: implementation and independent review cleared; production hook host not landed
+Status: audit implementation and independent review cleared; recorded hook fingerprints are historical pending OXE-1.1a-compatible replacements
 
 Date: 2026-08-13
 
@@ -28,6 +28,24 @@ no-op differential proof.
 Business invariant: every changed line in a pinned OpenAI kernel file is either
 byte-for-byte part of a reviewed hook patch or causes a deterministic audit
 failure before integration can proceed.
+
+## 2026-08-14 Production-Authority Amendment
+
+`OXE-1.1a` reproduced the registered admission and delivery patches against
+the production host. They pass this audit but fail compilation because the
+discarded prototype called `Extensions.admission/1` and
+`Extensions.delivery/2`, while the reviewed host exposes
+`evaluate_admission/2` and `handle_delivery/2` with typed
+`:kernel_default` results.
+
+The audit implementation and its fail-closed mechanics remain valid. The
+recorded fingerprints prove equality only to the historical throwaway
+prototype and must not be marked `required` or copied into production. Each
+hook-owning MIU must define its context/differential RED tests, remeasure the
+exact compatible facade call, and receive architecture review before changing
+the corresponding manifest fingerprint or ceiling. The reproduction and
+provisional measurements are in
+[`openai_extension_oxe11a_host_prototype_reconciliation.md`](openai_extension_oxe11a_host_prototype_reconciliation.md).
 
 ## Prototype Question
 
@@ -467,7 +485,8 @@ make all
 
 ## Next Action
 
-Review the Slice 1 host trace in
-[`openai_extension_oxe11_extension_host.md`](openai_extension_oxe11_extension_host.md),
-then create its kernel-free `OXE-1.1` red checkpoint. Production hook code
-remains absent until the later hook MIU traces are reviewed.
+Treat the implementation evidence above as the historical `OXE-0.2` audit
+checkpoint. Continue through the `OXE-1.1a` reconciliation and independent
+review before creating the `OXE-1.2` RED checkpoint. Production hook code
+remains absent until the owning MIU's replacement fingerprint and differential
+proof are reviewed.

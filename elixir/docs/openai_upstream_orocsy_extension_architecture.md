@@ -4,7 +4,7 @@ Status: Proposed, revision 2 after architecture review
 
 Date: 2026-07-28
 
-Last revised: 2026-08-13 for the OXE-1.1 neutral host contract
+Last revised: 2026-08-14 for the OXE-1.1a host/prototype reconciliation
 
 ## Decision
 
@@ -247,13 +247,16 @@ is intentional.
 
 The kernel receives one immutable extension registry. On the current pinned
 baseline it is resolved lazily from the decoded `WORKFLOW.md` front-matter map
-at the first pre-claim admission call, because changing application startup or
-the kernel configuration schema would exceed the reviewed patch authority. The
-single orchestrator serializes that first call. Once resolved, adapter
-selection is latched for the BEAM lifetime; a selector change fails with a
-typed restart-required result rather than replacing code in flight. Workflow
-reload may still change validated extension options for future issue
-admissions and future worker sessions.
+at the first decision-facade call, because changing application startup or the
+kernel configuration schema would exceed the reviewed patch authority. The
+normal production sequence still reaches the pre-claim admission facade first.
+Allowing delivery or authorization to resolve the same closed registry keeps
+the facade valid when pinned upstream modules are exercised directly, without
+moving lifecycle order into those modules. Once resolved, adapter selection is
+latched for the BEAM lifetime; a selector change fails with a typed
+restart-required result rather than replacing code in flight. Workflow reload
+may still change validated extension options for future issue admissions and
+future worker sessions.
 
 Suggested layout:
 
@@ -923,6 +926,15 @@ CI runs `mix extensions.audit` and fails when:
 The initial target is one facade call at each required lifecycle choke point,
 not policy logic in kernel files. The exact budget is set after the upstream
 hook prototype; increasing it requires architecture review.
+
+The `OXE-1.1a` compatibility probe found that the original `OXE-0.2`
+fingerprints call an earlier discarded facade and can pass the audit while
+failing to compile against the production host. The audit remains strict, but
+those fingerprints are historical prototype authority only and may not be
+activated as production hooks. Each hook-owning MIU must remeasure its exact
+current facade call after its context and differential RED tests exist, then
+receive architecture review before revising the manifest. See
+[`openai_extension_oxe11a_host_prototype_reconciliation.md`](openai_extension_oxe11a_host_prototype_reconciliation.md).
 
 The generic registry, immutable turn context, lifecycle events, no-op adapters,
 and hook points should be proposed to OpenAI upstream as a standalone

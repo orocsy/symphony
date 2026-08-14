@@ -1,20 +1,21 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1 review-cleared; OXE-0.1a cleared the full-suite landing gate; OXE-0.2 implementation and independent review cleared; OXE-1.1 implementation gate-green and pending independent review
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1a host/prototype reconciliation gate-green with independent review pending
 
 Date: 2026-07-29
 
-Last reviewed: 2026-08-13
+Last reviewed: 2026-08-14
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
 
 Scope: translate the approved migration direction into independently
 implementable technical units. This revision specifies the first Slice 0 unit,
-links the measured `OXE-0.2` kernel patch-budget trace, and links the reviewed
-`OXE-1.1` extension-host trace and red checkpoint. Other later units are named to make the
-dependency boundary explicit, but they are not implementation-ready until
-their own traces are added.
+links the measured `OXE-0.2` kernel patch-budget trace, the reviewed `OXE-1.1`
+extension-host trace and red checkpoint, and the `OXE-1.1a` correction that
+prevents obsolete prototype fingerprints from becoming production authority.
+Other later units are named to make the dependency boundary explicit, but they
+are not implementation-ready until their own traces are added.
 
 ## Decision
 
@@ -664,8 +665,19 @@ hook-owned context, event, and decision structs remain in their owning MIUs.
 Independent review corrected the startup-latch,
 decoded-workflow-input, and test-isolation boundaries. The resulting focused
 11-test red checkpoint at `45335b7` failed only because the generic host
-modules did not exist. The implementation is now gate-green: its focused suite
-passes 17 tests; exact `make all` passes 359 tests with six skipped, 100% total
-coverage, strict Credo clean, and zero Dialyzer errors. Both extension audits
-report zero changed kernel files and zero changed kernel lines. Independent
-implementation review is the remaining OXE-1.1 gate.
+modules did not exist. At checkpoint `a6d0393` its focused suite passed 17
+tests; exact `make all` passed 359 tests with six skipped, 100% total coverage,
+strict Credo clean, and zero Dialyzer errors. Both extension audits reported
+zero changed kernel files and zero changed kernel lines.
+
+The implementation review then reproduced a stronger authority failure: the
+current manifest's exact admission and delivery patches pass the budget audit
+but do not compile against the production facade. It also showed that direct
+pinned-upstream delivery and app-server tests do not necessarily enter through
+admission first. The support trace
+[`openai_extension_oxe11a_host_prototype_reconciliation.md`](openai_extension_oxe11a_host_prototype_reconciliation.md)
+records the RED/GREEN lifecycle correction and the provisional compatible
+probe. The manifest remains unchanged and fail-closed. Exact current hook
+fingerprints may be revised only after the owning context/differential RED
+tests and architecture review. The `OXE-1.1a` exact full gate is green;
+independent implementation review remains before `OXE-1.2` starts.

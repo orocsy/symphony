@@ -17,7 +17,7 @@ defmodule SymphonyElixir.Extensions do
 
   @spec evaluate_admission(Issue.t(), term()) :: DispatchAdmission.result()
   def evaluate_admission(%Issue{} = issue, context) do
-    with {:ok, registry} <- lock_registry() do
+    with {:ok, registry} <- lock_registry(:dispatch_admission) do
       registry.dispatch_admission
       |> safe_call(:evaluate, [issue, context])
       |> admission_result(registry)
@@ -26,7 +26,7 @@ defmodule SymphonyElixir.Extensions do
 
   @spec handle_delivery(term(), term()) :: DeliveryController.result()
   def handle_delivery(event, context) do
-    case ExtensionRegistry.current() do
+    case lock_registry(:delivery_controller) do
       {:ok, registry} ->
         registry.delivery_controller
         |> safe_call(:handle, [event, context])
@@ -39,7 +39,7 @@ defmodule SymphonyElixir.Extensions do
 
   @spec authorize(term(), term()) :: CommandAuthorization.result()
   def authorize(intent, context) do
-    with {:ok, registry} <- ExtensionRegistry.current() do
+    with {:ok, registry} <- lock_registry(:command_authorization) do
       registry.command_authorization
       |> safe_call(:authorize, [intent, context])
       |> authorization_result(registry)
@@ -59,7 +59,7 @@ defmodule SymphonyElixir.Extensions do
     :ok
   end
 
-  defp lock_registry do
+  defp lock_registry(interface) do
     case Workflow.current() do
       {:ok, %{config: config}} ->
         case ExtensionRegistry.lock(config) do
@@ -71,7 +71,7 @@ defmodule SymphonyElixir.Extensions do
         {:error,
          extension_failure(
            :extension_configuration_unavailable,
-           :dispatch_admission,
+           interface,
            nil,
            nil,
            :workflow_unavailable
