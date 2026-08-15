@@ -3,6 +3,8 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
 
   alias SymphonyElixir.ExtensionRegistry
   alias SymphonyElixir.Extensions
+  alias SymphonyElixir.Extensions.ControllerFailure
+  alias SymphonyElixir.Extensions.ExtensionFailure
 
   @fixture_recipient :oxe12_extension_fixture_recipient
   @orchestrator_name Module.concat(__MODULE__, Orchestrator)
@@ -20,7 +22,7 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
   end
 
   test "facade constructs the admission context with a fresh options snapshot" do
-    configure_extensions!("lifecycle_fixture", "noop", %{"marker" => "admission"})
+    configure_extensions!("lifecycle_fixture", "noop", %{"marker" => "first"})
     issue = issue("context-admission", "OXE-CTX-ADMISSION")
 
     assert :kernel_default == Extensions.evaluate_admission(issue, 2)
@@ -28,9 +30,20 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
 
     assert struct_module(context) == SymphonyElixir.Extensions.AdmissionContext
     assert context.attempt == 2
-    assert context.options == %{"marker" => "admission"}
+    assert context.options == %{"marker" => "first"}
     assert {:ok, registry} = ExtensionRegistry.current()
     assert context.registry_revision == registry.revision
+
+    configure_extensions!("lifecycle_fixture", "noop", %{"marker" => "reloaded"})
+
+    for {attempt, normalized} <- [{nil, 0}, {0, 0}, {-1, 0}] do
+      assert :kernel_default == Extensions.evaluate_admission(issue, attempt)
+      assert_receive {:oxe12_admission, ^issue, reloaded}
+      assert struct_module(reloaded) == SymphonyElixir.Extensions.AdmissionContext
+      assert reloaded.attempt == normalized
+      assert reloaded.options == %{"marker" => "reloaded"}
+      assert reloaded.registry_revision == registry.revision
+    end
   end
 
   test "facade constructs the workspace-ready event and delivery context" do
@@ -52,124 +65,86 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     assert context.options == %{"marker" => "delivery"}
     assert {:ok, registry} = ExtensionRegistry.current()
     assert context.registry_revision == registry.revision
+
+    nil_host_facts = {issue, workspace, nil, nil}
+    assert :kernel_default == Extensions.handle_delivery(:workspace_ready, nil_host_facts)
+    assert_receive {:oxe12_delivery, nil_host_event, nil_host_context}
+    assert nil_host_event.type == :workspace_ready
+    assert nil_host_context.worker_host == nil
+    assert nil_host_context.attempt == 0
+    assert nil_host_context.registry_revision == registry.revision
+  end
+
+  test "facade rejects malformed kernel facts before locking the registry" do
+    configure_extensions!("lifecycle_fixture", "lifecycle_fixture", %{})
+    issue = issue("invalid-facts", "OXE-INVALID-FACTS")
+
+    assert {:error,
+            %ExtensionFailure{
+              code: :invalid_kernel_input,
+              interface: :dispatch_admission,
+              adapter: nil,
+              registry_revision: nil,
+              reason: :attempt_invalid
+            }} = Extensions.evaluate_admission(issue, %{})
+
+    assert {:error,
+            %ControllerFailure{
+              code: :invalid_kernel_input,
+              interface: :delivery_controller,
+              adapter: nil,
+              registry_revision: nil,
+              reason: :workspace_ready_facts_invalid
+            }, []} =
+             Extensions.handle_delivery(
+               :workspace_ready,
+               {issue, "/tmp/invalid", nil, 0, :extra}
+             )
+
+    assert {:error, %ExtensionFailure{code: :extension_registry_unavailable}} =
+             ExtensionRegistry.current()
+
+    refute_receive {:oxe12_admission, _, _}
+    refute_receive {:oxe12_delivery, _, _}
   end
 
   test "admission rejection occurs before worker selection, claim, task, or workspace" do
-    stop_default_runtime!()
-    test_root = unique_root("admission-rejection")
-    workspace_root = Path.join(test_root, "workspaces")
+    assert_admission_blocks("reject", "admission-rejection", "OXE-ADMISSION-REJECT")
+  end
 
-    configure_extensions!(
-      "lifecycle_fixture",
-      "noop",
-      %{"admission_result" => "reject"},
-      tracker_kind: "memory",
-      workspace_root: workspace_root,
-      poll_interval_ms: 60_000,
-      hook_before_run: "exit 1"
-    )
-
-    issue = issue("admission-rejection", "OXE-ADMISSION-REJECT")
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-
-    {:ok, task_supervisor} = Task.Supervisor.start_link()
-
-    {:ok, orchestrator} =
-      Orchestrator.start_link(name: @orchestrator_name, task_supervisor: task_supervisor)
-
-    on_exit(fn ->
-      stop_if_alive(orchestrator)
-      stop_if_alive(task_supervisor)
-      File.rm_rf(test_root)
-    end)
-
-    assert_receive {:oxe12_admission, ^issue, context}, 1_000
-    assert context.attempt == 0
-    assert Task.Supervisor.children(task_supervisor) == []
-
-    state = :sys.get_state(orchestrator)
-    assert state.running == %{}
-    assert state.claimed == MapSet.new()
-    assert state.retry_attempts == %{}
-    refute File.exists?(Path.join(workspace_root, issue.identifier))
+  test "admission failure occurs before worker selection, claim, task, or workspace" do
+    assert_admission_blocks("error", "admission-error", "OXE-ADMISSION-ERROR")
   end
 
   test "no-op admission preserves the current dispatch and claim observation" do
-    stop_default_runtime!()
-    test_root = unique_root("admission-noop")
-    workspace_root = Path.join(test_root, "workspaces")
-    marker = Path.join(test_root, "before-run")
-    fifo = Path.join(test_root, "before-run-fifo")
+    assert_admission_dispatches("noop", nil, "admission-noop", "OXE-ADMISSION-NOOP")
+  end
 
-    configure_extensions!(
-      "noop",
-      "noop",
-      %{},
-      tracker_kind: "memory",
-      workspace_root: workspace_root,
-      poll_interval_ms: 60_000,
-      hook_before_run: "mkfifo \"#{fifo}\"; : > \"#{marker}\"; read _ < \"#{fifo}\"",
-      hook_timeout_ms: 60_000
+  test "explicit admission preserves the current dispatch and claim observation" do
+    assert_admission_dispatches(
+      "lifecycle_fixture",
+      "admit",
+      "admission-admit",
+      "OXE-ADMISSION-ADMIT"
     )
-
-    issue = issue("admission-noop", "OXE-ADMISSION-NOOP")
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-
-    {:ok, task_supervisor} = Task.Supervisor.start_link()
-
-    {:ok, orchestrator} =
-      Orchestrator.start_link(name: @orchestrator_name, task_supervisor: task_supervisor)
-
-    on_exit(fn ->
-      stop_if_alive(orchestrator)
-      stop_if_alive(task_supervisor)
-      File.rm_rf(test_root)
-    end)
-
-    assert eventually(fn -> File.exists?(marker) end)
-    assert [_worker] = Task.Supervisor.children(task_supervisor)
-
-    state = :sys.get_state(orchestrator)
-    assert Map.has_key?(state.running, issue.id)
-    assert MapSet.member?(state.claimed, issue.id)
-    assert File.dir?(Path.join(workspace_root, issue.identifier))
   end
 
   test "delivery failure preserves workspace and precedes before-run and Codex" do
-    test_root = unique_root("delivery-failure")
-    workspace_root = Path.join(test_root, "workspaces")
-    marker = Path.join(test_root, "before-run")
-    on_exit(fn -> File.rm_rf(test_root) end)
-
-    configure_extensions!(
-      "noop",
-      "lifecycle_fixture",
-      %{"delivery_result" => "error"},
-      workspace_root: workspace_root,
-      hook_before_run: ": > \"#{marker}\"",
-      codex_command: "false"
+    assert_delivery_stops(
+      "error",
+      "extension_delivery_failed",
+      "delivery-failure",
+      "OXE-DELIVERY-FAIL"
     )
+  end
 
-    issue = issue("delivery-failure", "OXE-DELIVERY-FAIL")
-
-    task =
-      Task.async(fn ->
-        try do
-          AgentRunner.run(issue, self(), attempt: 4)
-        rescue
-          error in RuntimeError -> {:raised, Exception.message(error)}
-        end
-      end)
-
-    assert_receive {:oxe12_delivery, event, context}, 1_000
-    assert event.type == :workspace_ready
-    assert context.issue == issue
-    assert context.attempt == 4
-    assert File.dir?(context.workspace)
-    refute File.exists?(marker)
-
-    assert {:raised, message} = Task.await(task, 1_000)
-    assert message =~ "fixture_delivery_stopped"
+  test "delivery decision is surfaced without entering before-run or Codex" do
+    assert_delivery_stops(
+      "decision",
+      "extension_delivery_decision",
+      "delivery-decision",
+      "OXE-DELIVERY-DECISION"
+    )
   end
 
   test "no-op delivery preserves the current before-run outcome" do
@@ -187,13 +162,169 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     )
 
     issue = issue("delivery-noop", "OXE-DELIVERY-NOOP")
+    issue_id = issue.id
+    parent = self()
 
-    assert_raise RuntimeError, ~r/workspace_hook_failed.*before_run/, fn ->
-      AgentRunner.run(issue, nil, attempt: 5)
-    end
+    task =
+      Task.async(fn ->
+        try do
+          AgentRunner.run(issue, parent, attempt: 5)
+        rescue
+          error in RuntimeError -> {:raised, Exception.message(error)}
+        end
+      end)
+
+    assert {:worker_runtime_info, ^issue_id, %{worker_host: nil, workspace_path: workspace_path}} = next_message()
+
+    assert {:raised, message} = Task.await(task, 1_000)
+    assert message =~ "workspace_hook_failed"
+    assert message =~ "before_run"
 
     assert File.exists?(marker)
+
+    assert {:ok, expected_workspace} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, issue.identifier))
+
+    assert workspace_path == expected_workspace
+    assert File.dir?(workspace_path)
+  end
+
+  defp assert_admission_blocks(result, id, identifier) do
+    stop_default_runtime!()
+    test_root = unique_root(id)
+    workspace_root = Path.join(test_root, "workspaces")
+    initial_issue = issue(id, identifier)
+    refreshed_issue = %{initial_issue | title: "refreshed after final tracker read"}
+
+    configure_extensions!(
+      "lifecycle_fixture",
+      "noop",
+      %{"admission_result" => result},
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 60_000,
+      hook_before_run: "exit 1"
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_issues,
+      issue_refresh_stream(initial_issue, refreshed_issue)
+    )
+
+    trace_new_worker_selection_calls!()
+    {task_supervisor, orchestrator} = start_runtime!(test_root)
+
+    assert_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
+                   1_000
+
+    assert_receive {:oxe12_admission, ^refreshed_issue, context}, 1_000
+    assert context.attempt == 0
+
+    refute_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
+                   50
+
+    assert Task.Supervisor.children(task_supervisor) == []
+
+    state = :sys.get_state(orchestrator)
+    assert state.running == %{}
+    assert state.claimed == MapSet.new()
+    assert state.retry_attempts == %{}
+    refute File.exists?(Path.join(workspace_root, refreshed_issue.identifier))
+  end
+
+  defp assert_admission_dispatches(selector, result, id, identifier) do
+    stop_default_runtime!()
+    test_root = unique_root(id)
+    workspace_root = Path.join(test_root, "workspaces")
+    marker = Path.join(test_root, "before-run")
+    fifo = Path.join(test_root, "before-run-fifo")
+    options = if result, do: %{"admission_result" => result}, else: %{}
+
+    configure_extensions!(
+      selector,
+      "noop",
+      options,
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 60_000,
+      hook_before_run: "mkfifo \"#{fifo}\"; : > \"#{marker}\"; read _ < \"#{fifo}\"",
+      hook_timeout_ms: 60_000
+    )
+
+    issue = issue(id, identifier)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    trace_new_worker_selection_calls!()
+    {task_supervisor, orchestrator} = start_runtime!(test_root)
+
+    assert_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
+                   1_000
+
+    if selector == "lifecycle_fixture" do
+      assert_receive {:oxe12_admission, ^issue, context}, 1_000
+      assert context.attempt == 0
+    end
+
+    assert_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
+                   1_000
+
+    assert eventually(fn -> File.exists?(marker) end)
+    assert [_worker] = Task.Supervisor.children(task_supervisor)
+
+    state = :sys.get_state(orchestrator)
+    assert Map.has_key?(state.running, issue.id)
+    assert MapSet.member?(state.claimed, issue.id)
     assert File.dir?(Path.join(workspace_root, issue.identifier))
+  end
+
+  defp assert_delivery_stops(result, outer_code, id, identifier) do
+    test_root = unique_root(id)
+    workspace_root = Path.join(test_root, "workspaces")
+    marker = Path.join(test_root, "before-run")
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    configure_extensions!(
+      "noop",
+      "lifecycle_fixture",
+      %{"delivery_result" => result},
+      workspace_root: workspace_root,
+      hook_before_run: ": > \"#{marker}\"",
+      codex_command: "false"
+    )
+
+    issue = issue(id, identifier)
+    issue_id = issue.id
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        try do
+          AgentRunner.run(issue, parent, attempt: 4)
+        rescue
+          error in RuntimeError -> {:raised, Exception.message(error)}
+        end
+      end)
+
+    assert {:worker_runtime_info, ^issue_id, %{worker_host: nil, workspace_path: workspace_path}} = next_message()
+
+    assert {:oxe12_delivery, event, context} = next_message()
+    assert event.type == :workspace_ready
+    assert context.issue == issue
+    assert context.workspace == workspace_path
+    assert context.attempt == 4
+    assert File.dir?(workspace_path)
+    refute File.exists?(marker)
+
+    assert {:raised, message} = Task.await(task, 1_000)
+    assert message =~ outer_code
+    assert_delivery_message(result, message)
+  end
+
+  defp assert_delivery_message("error", message), do: assert(message =~ "fixture_delivery_stopped")
+
+  defp assert_delivery_message("decision", message) do
+    assert message =~ "fixture_park"
+    assert message =~ "fixture_evidence"
   end
 
   defp configure_extensions!(admission, delivery, options, overrides \\ []) do
@@ -212,6 +343,49 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
 
     File.write!(path, String.replace(source, "---\n", "---\n#{stanza}", global: false))
     assert :ok = WorkflowStore.force_reload()
+  end
+
+  defp issue_refresh_stream(initial_issue, refreshed_issue) do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+    on_exit(fn -> stop_if_alive(counter) end)
+
+    Stream.map([:issue], fn :issue ->
+      call = Agent.get_and_update(counter, &{&1, &1 + 1})
+      if call < 2, do: initial_issue, else: refreshed_issue
+    end)
+  end
+
+  defp trace_new_worker_selection_calls! do
+    :erlang.trace_pattern({Orchestrator, :select_worker_host, 2}, true, [:local])
+    :erlang.trace(:new, true, [:call])
+
+    on_exit(fn ->
+      :erlang.trace(:new, false, [:call])
+      :erlang.trace_pattern({Orchestrator, :select_worker_host, 2}, false, [:local])
+    end)
+  end
+
+  defp start_runtime!(test_root) do
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+
+    {:ok, orchestrator} =
+      Orchestrator.start_link(name: @orchestrator_name, task_supervisor: task_supervisor)
+
+    on_exit(fn ->
+      stop_if_alive(orchestrator)
+      stop_if_alive(task_supervisor)
+      File.rm_rf(test_root)
+    end)
+
+    {task_supervisor, orchestrator}
+  end
+
+  defp next_message(timeout \\ 1_000) do
+    receive do
+      message -> message
+    after
+      timeout -> flunk("expected the next lifecycle message within #{timeout}ms")
+    end
   end
 
   defp issue(id, identifier) do

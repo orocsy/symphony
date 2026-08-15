@@ -82,14 +82,29 @@ defmodule SymphonyElixir.ExtensionLifecycleFixtures.DispatchAdmission do
   @behaviour SymphonyElixir.Extensions.DispatchAdmission
 
   alias SymphonyElixir.ExtensionLifecycleFixtures
+  alias SymphonyElixir.Extensions.ExtensionFailure
 
   @impl true
   def evaluate(issue, context) do
     :ok = ExtensionLifecycleFixtures.notify({:oxe12_admission, issue, context})
 
     case ExtensionLifecycleFixtures.option(context, "admission_result") do
-      "reject" -> {:reject, %{class: :fixture_rejection}}
-      _other -> :kernel_default
+      "admit" ->
+        {:admit, %{class: :fixture_admission}}
+
+      "reject" ->
+        {:reject, %{class: :fixture_rejection}}
+
+      "error" ->
+        {:error,
+         %ExtensionFailure{
+           code: :fixture_admission_failed,
+           interface: :dispatch_admission,
+           reason: :fixture_requested
+         }}
+
+      _other ->
+        :kernel_default
     end
   end
 end
@@ -107,6 +122,9 @@ defmodule SymphonyElixir.ExtensionLifecycleFixtures.DeliveryController do
     :ok = ExtensionLifecycleFixtures.notify({:oxe12_delivery, event, context})
 
     case ExtensionLifecycleFixtures.option(context, "delivery_result") do
+      "decision" ->
+        {:ok, :fixture_park, [%{type: :fixture_evidence}]}
+
       "error" ->
         {:error,
          %ControllerFailure{
