@@ -78,6 +78,7 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
   test "facade rejects malformed kernel facts before locking the registry" do
     configure_extensions!("lifecycle_fixture", "lifecycle_fixture", %{})
     issue = issue("invalid-facts", "OXE-INVALID-FACTS")
+    workspace = "/tmp/invalid"
 
     assert {:error,
             %ExtensionFailure{
@@ -88,18 +89,27 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
               reason: :attempt_invalid
             }} = Extensions.evaluate_admission(issue, %{})
 
-    assert {:error,
-            %ControllerFailure{
-              code: :invalid_kernel_input,
-              interface: :delivery_controller,
-              adapter: nil,
-              registry_revision: nil,
-              reason: :workspace_ready_facts_invalid
-            }, []} =
-             Extensions.handle_delivery(
-               :workspace_ready,
-               {issue, "/tmp/invalid", nil, 0, :extra}
-             )
+    invalid_delivery_inputs = [
+      {:unknown_event, {issue, workspace, nil, 0}},
+      {:workspace_ready, {issue, workspace, nil}},
+      {:workspace_ready, {issue, workspace, nil, 0, :extra}},
+      {:workspace_ready, %{}},
+      {:workspace_ready, {:not_an_issue, workspace, nil, 0}},
+      {:workspace_ready, {issue, 123, nil, 0}},
+      {:workspace_ready, {issue, workspace, 123, 0}},
+      {:workspace_ready, {issue, workspace, nil, %{}}}
+    ]
+
+    for {event, facts} <- invalid_delivery_inputs do
+      assert {:error,
+              %ControllerFailure{
+                code: :invalid_kernel_input,
+                interface: :delivery_controller,
+                adapter: nil,
+                registry_revision: nil,
+                reason: :workspace_ready_facts_invalid
+              }, []} = Extensions.handle_delivery(event, facts)
+    end
 
     assert {:error, %ExtensionFailure{code: :extension_registry_unavailable}} =
              ExtensionRegistry.current()
@@ -130,21 +140,11 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
   end
 
   test "delivery failure preserves workspace and precedes before-run and Codex" do
-    assert_delivery_stops(
-      "error",
-      "extension_delivery_failed",
-      "delivery-failure",
-      "OXE-DELIVERY-FAIL"
-    )
+    assert_delivery_stops("error", "delivery-failure", "OXE-DELIVERY-FAIL")
   end
 
   test "delivery decision is surfaced without entering before-run or Codex" do
-    assert_delivery_stops(
-      "decision",
-      "extension_delivery_decision",
-      "delivery-decision",
-      "OXE-DELIVERY-DECISION"
-    )
+    assert_delivery_stops("decision", "delivery-decision", "OXE-DELIVERY-DECISION")
   end
 
   test "no-op delivery preserves the current before-run outcome" do
@@ -194,12 +194,12 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     test_root = unique_root(id)
     workspace_root = Path.join(test_root, "workspaces")
     initial_issue = issue(id, identifier)
-    refreshed_issue = %{initial_issue | title: "refreshed after final tracker read"}
+    refreshed_issue = %{initial_issue | title: "refreshed secret title do-not-log"}
 
     configure_extensions!(
       "lifecycle_fixture",
       "noop",
-      %{"admission_result" => result},
+      %{"admission_result" => result, "secret" => "options-do-not-log"},
       tracker_kind: "memory",
       workspace_root: workspace_root,
       poll_interval_ms: 60_000,
@@ -213,25 +213,41 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     )
 
     trace_new_worker_selection_calls!()
-    {task_supervisor, orchestrator} = start_runtime!(test_root)
 
-    assert_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
-                   1_000
+    log =
+      capture_log(fn ->
+        {task_supervisor, orchestrator} = start_runtime!(test_root)
 
-    assert_receive {:oxe12_admission, ^refreshed_issue, context}, 1_000
-    assert context.attempt == 0
+        assert_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
+                       1_000
 
-    refute_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
-                   50
+        assert_receive {:oxe12_admission, ^refreshed_issue, context}, 1_000
+        assert context.attempt == 0
 
-    assert Task.Supervisor.children(task_supervisor) == []
+        refute_receive {:trace, ^orchestrator, :call, {Orchestrator, :select_worker_host, [_state, nil]}},
+                       50
 
-    state = :sys.get_state(orchestrator)
-    assert state.running == %{}
-    assert state.claimed == MapSet.new()
-    assert state.retry_attempts == %{}
-    refute File.exists?(Path.join(workspace_root, refreshed_issue.identifier))
+        assert Task.Supervisor.children(task_supervisor) == []
+
+        state = :sys.get_state(orchestrator)
+        assert state.running == %{}
+        assert state.claimed == MapSet.new()
+        assert state.retry_attempts == %{}
+        refute File.exists?(Path.join(workspace_root, refreshed_issue.identifier))
+      end)
+
+    assert_admission_log(result, log, refreshed_issue)
   end
+
+  defp assert_admission_log("error", log, issue) do
+    assert log =~ "extension admission failed"
+    assert log =~ "code=fixture_admission_failed"
+    assert log =~ "interface=dispatch_admission"
+    refute log =~ issue.title
+    refute log =~ "options-do-not-log"
+  end
+
+  defp assert_admission_log("reject", _log, _issue), do: :ok
 
   defp assert_admission_dispatches(selector, result, id, identifier) do
     stop_default_runtime!()
@@ -277,7 +293,7 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     assert File.dir?(Path.join(workspace_root, issue.identifier))
   end
 
-  defp assert_delivery_stops(result, outer_code, id, identifier) do
+  defp assert_delivery_stops(result, id, identifier) do
     test_root = unique_root(id)
     workspace_root = Path.join(test_root, "workspaces")
     marker = Path.join(test_root, "before-run")
@@ -316,15 +332,27 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     refute File.exists?(marker)
 
     assert {:raised, message} = Task.await(task, 1_000)
-    assert message =~ outer_code
-    assert_delivery_message(result, message)
+    reason = expected_delivery_reason(result, context)
+
+    assert message ==
+             "Agent run failed for issue_id=#{issue.id} " <>
+               "issue_identifier=#{issue.identifier}: #{inspect(reason)}"
   end
 
-  defp assert_delivery_message("error", message), do: assert(message =~ "fixture_delivery_stopped")
+  defp expected_delivery_reason("error", context) do
+    failure = %ControllerFailure{
+      code: :fixture_delivery_stopped,
+      interface: :delivery_controller,
+      adapter: SymphonyElixir.ExtensionLifecycleFixtures.DeliveryController,
+      registry_revision: context.registry_revision,
+      reason: :fixture_requested
+    }
 
-  defp assert_delivery_message("decision", message) do
-    assert message =~ "fixture_park"
-    assert message =~ "fixture_evidence"
+    {:extension_delivery_failed, failure, []}
+  end
+
+  defp expected_delivery_reason("decision", _context) do
+    {:extension_delivery_decision, :fixture_park, [%{type: :fixture_evidence}]}
   end
 
   defp configure_extensions!(admission, delivery, options, overrides \\ []) do

@@ -1,6 +1,6 @@
 # OXE-1.2 Admission And Workspace-Ready Delivery Hooks
 
-Status: first-review RED rework verified; re-review pending; implementation absent
+Status: independent-review RED rework verified; re-review pending; implementation absent
 
 Date: 2026-08-15
 
@@ -144,6 +144,10 @@ final `Issue` and before `do_dispatch_issue/4` selects a worker.
 Rejection and failure must leave `running`, `claimed`, and `retry_attempts`
 unchanged; create no task; select no worker; and create no workspace. Reporting
 and persistence belong to the future Orocsy admission adapter, not the kernel.
+An adapter failure writes one sanitized operator log with fixed metadata
+`extension admission failed code=<code> interface=<interface>`. It must not
+include the issue title/description, adapter reason, options, or inspected
+failure payload.
 
 The RED test supplies different initial and refreshed issue values through a
 stateful in-memory tracker stream. The fixture must receive the refreshed
@@ -184,7 +188,9 @@ The test sends runtime information and fixture observations to the same parent
 process. It consumes messages without selective receive: runtime information
 must be first, and the delivery fixture must be second. This pins the hook
 after runtime notification. Absence of the `before_run` marker pins its other
-side.
+side. The final assertion compares the complete deterministic `RuntimeError`
+message, including the exact tagged reason tuple, so an extra or reordered
+wrapper cannot pass by substring.
 
 ## RED Tests
 
@@ -204,7 +210,8 @@ The checkpoint adds test-only closed adapters and ten focused tests for:
 8. no-op delivery preserving the current runtime-info, workspace, and
    `before_run` outcome;
 9. same-registry option reload, nil/zero/negative attempt normalization, nil
-   host, and typed malformed/extra-facts rejection;
+   host, and a table of unknown tags, missing/extra tuple fields, maps, invalid
+   issue/path/host/attempt values, and typed pre-registry rejection;
 10. the budget manifest remaining unchanged and optional at RED; the first
    non-empty GREEN hook candidate must fail its stale fingerprint until the
    exact reviewed two-file patch is recorded and both owned paths become
