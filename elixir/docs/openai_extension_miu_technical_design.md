@@ -1,10 +1,10 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1a host/prototype reconciliation gate-green with independent review pending
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1a independent-review rework implemented with full gate green and re-review pending
 
 Date: 2026-07-29
 
-Last reviewed: 2026-08-14
+Last reviewed: 2026-08-15
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -679,5 +679,9 @@ admission first. The support trace
 records the RED/GREEN lifecycle correction and the provisional compatible
 probe. The manifest remains unchanged and fail-closed. Exact current hook
 fingerprints may be revised only after the owning context/differential RED
-tests and architecture review. The `OXE-1.1a` exact full gate is green;
-independent implementation review remains before `OXE-1.2` starts.
+tests and architecture review. The first `OXE-1.1a` exact full gate was green,
+but independent Spec review then found a non-atomic first-selection race. Its
+RED regression and direct malformed-config/drift coverage are now green;
+the exact post-rework `make all` gate passes 363 tests with zero failures, six
+skipped, 100% total coverage, strict Credo clean, and zero Dialyzer errors.
+Independent re-review remains before `OXE-1.2` starts.

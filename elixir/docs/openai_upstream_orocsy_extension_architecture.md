@@ -4,7 +4,7 @@ Status: Proposed, revision 2 after architecture review
 
 Date: 2026-07-28
 
-Last revised: 2026-08-14 for the OXE-1.1a host/prototype reconciliation
+Last revised: 2026-08-15 for the OXE-1.1a atomic host-latch correction
 
 ## Decision
 
@@ -253,7 +253,8 @@ normal production sequence still reaches the pre-claim admission facade first.
 Allowing delivery or authorization to resolve the same closed registry keeps
 the facade valid when pinned upstream modules are exercised directly, without
 moving lifecycle order into those modules. Once resolved, adapter selection is
-latched for the BEAM lifetime; a selector change fails with a typed
+atomically latched for the local BEAM lifetime; concurrent first decision calls
+cannot publish different selector sets. A selector change fails with a typed
 restart-required result rather than replacing code in flight. Workflow reload
 may still change validated extension options for future issue admissions and
 future worker sessions.

@@ -82,14 +82,11 @@ defmodule SymphonyElixir.ExtensionRegistry do
   @spec lock(map()) :: resolution()
   def lock(config) when is_map(config) do
     with {:ok, requested, options} <- resolve(config) do
-      case :persistent_term.get(@runtime_key, :unlocked) do
-        :unlocked ->
-          :persistent_term.put(@runtime_key, requested)
-          {:ok, requested, options}
-
-        %__MODULE__{} = locked ->
-          compare_locked(locked, requested, options)
-      end
+      :global.trans(
+        {@runtime_key, self()},
+        fn -> publish_or_compare(requested, options) end,
+        [node()]
+      )
     end
   end
 
@@ -232,6 +229,17 @@ defmodule SymphonyElixir.ExtensionRegistry do
       |> then(&("sha256:" <> &1))
 
     struct!(__MODULE__, Map.merge(adapters, %{schema_version: @schema_version, revision: revision}))
+  end
+
+  defp publish_or_compare(requested, options) do
+    case :persistent_term.get(@runtime_key, :unlocked) do
+      :unlocked ->
+        :persistent_term.put(@runtime_key, requested)
+        {:ok, requested, options}
+
+      %__MODULE__{} = locked ->
+        compare_locked(locked, requested, options)
+    end
   end
 
   defp compare_locked(locked, requested, options) do

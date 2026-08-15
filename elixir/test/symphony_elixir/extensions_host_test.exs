@@ -169,6 +169,65 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert failure.adapter == nil
   end
 
+  test "rejects invalid registry configuration from direct decision entry points" do
+    install_extensions!("noop", "not-installed", "noop", ["noop"])
+
+    assert {:error, delivery_failure, []} =
+             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+
+    assert delivery_failure.code == :unknown_adapter
+    assert delivery_failure.interface == :delivery_controller
+
+    reset_registry_if_available()
+    install_extensions!("noop", "noop", "not-installed", ["noop"])
+
+    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+    assert authorization_failure.code == :unknown_adapter
+    assert authorization_failure.interface == :command_authorization
+  end
+
+  test "rejects malformed options from direct decision entry points" do
+    malformed_options = """
+    extensions:
+      options: []
+    """
+
+    install_extension_stanza!(malformed_options)
+
+    assert {:error, delivery_failure, []} =
+             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+
+    assert delivery_failure.code == :invalid_type
+    assert delivery_failure.interface == :delivery_controller
+
+    reset_registry_if_available()
+    install_extension_stanza!(malformed_options)
+
+    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+    assert authorization_failure.code == :invalid_type
+    assert authorization_failure.interface == nil
+  end
+
+  test "fails direct decision entry points closed after selector drift" do
+    assert :kernel_default == call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+    install_extensions!("noop", "fixture", "noop", ["noop"])
+
+    assert {:error, delivery_failure, []} =
+             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+
+    assert delivery_failure.code == :extension_registry_restart_required
+    assert delivery_failure.interface == :delivery_controller
+
+    reset_registry_if_available()
+    install_extensions!("noop", "noop", "noop", ["noop"])
+    assert :kernel_default == call(:authorize, [%{kind: :shell}, %{}])
+    install_extensions!("noop", "noop", "fixture", ["noop"])
+
+    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+    assert authorization_failure.code == :extension_registry_restart_required
+    assert authorization_failure.interface == :command_authorization
+  end
+
   test "normalizes delivery and authorization adapter failures" do
     install_extensions!("fixture", "fixture", "fixture", [])
     issue = %Issue{id: "issue-failures", identifier: "OXE-FAILURES", state: "Todo"}
@@ -308,9 +367,6 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   defp call(function, arguments), do: apply(Extensions, function, arguments)
 
   defp install_extensions!(admission, delivery, authorization, observers) do
-    path = Workflow.workflow_file_path()
-    source = File.read!(path)
-
     stanza = """
     extensions:
       dispatch_admission: #{admission}
@@ -320,6 +376,13 @@ defmodule SymphonyElixir.ExtensionsHostTest do
       options:
         marker: fixture
     """
+
+    install_extension_stanza!(stanza)
+  end
+
+  defp install_extension_stanza!(stanza) do
+    path = Workflow.workflow_file_path()
+    source = File.read!(path)
 
     File.write!(path, String.replace(source, "---\n", "---\n#{stanza}", global: false))
     assert :ok = WorkflowStore.force_reload()

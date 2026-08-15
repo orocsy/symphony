@@ -1,8 +1,10 @@
 # OXE-1.1a Host And Hook-Prototype Reconciliation
 
-Status: implementation and full gate green; independent review pending
+Status: independent-review rework implemented; full gate green; re-review pending
 
 Date: 2026-08-14
+
+Last revised: 2026-08-15 after independent review
 
 Parent trace:
 `openai_extension_oxe11_extension_host.md`
@@ -74,7 +76,8 @@ directly without first calling the orchestrator admission seam.
 The corrected rule is:
 
 1. Every decision facade resolves the same decoded workflow configuration and
-   may establish the immutable adapter-selection latch.
+   may establish the immutable adapter-selection latch. Publication is
+   serialized on the local BEAM, so exactly one first selector set wins.
 2. The normal production path still reaches admission first, before claim,
    workspace creation, or model execution.
 3. Direct upstream module entry therefore receives the same validated no-op
@@ -152,10 +155,31 @@ applied, the focused host command ran 12 tests with two failures:
 After the generic facade change, the focused registry and host command passes
 17 tests with zero failures.
 
-The exact `make all` handoff gate then passed 359 tests with zero failures and
+The exact `make all` handoff gate for `d5da203` then passed 359 tests with zero
+failures and six skipped, 100% total coverage, strict Credo with no issues, and
+Dialyzer with zero errors. Both extension audits passed with zero changed
+kernel files and zero changed kernel lines.
+
+Independent Spec review then constructed two simultaneous first locks with
+different valid selector sets. Both returned success with different registry
+revisions because the original `persistent_term.get/2` and `put/2` pair was
+not atomic. The review also found that direct decision tests covered a missing
+workflow but not malformed options, targeted unknown selectors, or selector
+drift.
+
+The rework RED synchronized 32 callers across alternating `noop` and fixture
+registries. Before the fix it observed two published revisions on its first
+round. Registry publication now runs inside one local-node transaction; ten
+concurrent rounds publish exactly one revision. Direct delivery and
+authorization tests now reject targeted unknown selectors, malformed options,
+and restart-required selector drift. The focused registry/host suite passes 21
+tests with zero failures.
+
+The exact post-rework `make all` gate passes 363 tests with zero failures and
 six skipped, 100% total coverage, strict Credo with no issues, and Dialyzer
-with zero errors. Both extension audits pass with zero changed kernel files and
-zero changed kernel lines.
+with zero errors. The unchanged retry-timer characterization was also repeated
+four times under a hermetic offline resolver and passed every run; this keeps
+external DNS timing out of the gate without changing pinned upstream tests.
 
 ## Acceptance Conditions
 
@@ -169,12 +193,14 @@ zero changed kernel lines.
 5. The current manifest remains unchanged and continues to reject any
    non-matching provisional hook patch.
 6. Focused host tests, both extension audits, and exact `make all` pass.
-7. An independent two-axis review clears this correction before `OXE-1.2`
+7. First registry publication is atomic for concurrent decision facades; one
+   winner is immutable until BEAM restart.
+8. An independent two-axis re-review clears this correction before `OXE-1.2`
    revises a fingerprint or lands a kernel hook.
 
 ## Next Action
 
-Run independent review against `a6d0393` and this support MIU. If it clears,
+Run independent re-review against `a6d0393` and this support MIU. If it clears,
 create `OXE-1.2` RED tests for admission rejection, no-op admission, and
 workspace-ready delivery. Those tests must define the concrete contexts and
 options-snapshot ownership before the admission and delivery prototype is

@@ -80,6 +80,49 @@ defmodule SymphonyElixir.ExtensionRegistryTest do
     assert observer_failure.adapter =~ "DeliveryObserver"
   end
 
+  test "concurrent first locks publish exactly one adapter selection" do
+    for _round <- 1..10 do
+      ExtensionRegistry.reset_for_test()
+      parent = self()
+
+      tasks =
+        for index <- 1..32 do
+          config = if rem(index, 2) == 0, do: %{}, else: fixture_config(%{})
+
+          Task.async(fn ->
+            send(parent, {:lock_ready, self()})
+
+            receive do
+              :lock -> lock(config)
+            end
+          end)
+        end
+
+      for _task <- tasks do
+        assert_receive {:lock_ready, _pid}
+      end
+
+      Enum.each(tasks, &send(&1.pid, :lock))
+      results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+      published_revisions =
+        results
+        |> Enum.flat_map(fn
+          {:ok, registry, _options} ->
+            [registry.revision]
+
+          {:error, failure} ->
+            assert failure.code == :extension_registry_restart_required
+            []
+        end)
+        |> MapSet.new()
+
+      assert MapSet.size(published_revisions) == 1
+      assert {:ok, registry} = ExtensionRegistry.current()
+      assert MapSet.member?(published_revisions, registry.revision)
+    end
+  end
+
   test "publishes the four exact adapter callback contracts" do
     for {interface, expected_callbacks} <- @interfaces do
       assert Code.ensure_loaded?(interface)

@@ -1,10 +1,10 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1a host/prototype reconciliation gate-green; independent review pending
+Status: OXE-1.1a independent-review rework implemented; full gate green; re-review pending
 
 Date: 2026-08-13
 
-Last revised: 2026-08-14
+Last revised: 2026-08-15
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -379,7 +379,9 @@ fail because the host modules do not exist.
 2. The facade is the only public kernel-facing extension module.
 3. Raw configuration selects only compile-time-known names and defaults to
    no-op without creating atoms.
-4. Adapter selection is immutable after the first pre-claim admission call.
+4. The first decision-facade call atomically publishes one adapter selection,
+   which is immutable until BEAM restart. The normal production sequence still
+   reaches pre-claim admission first.
 5. Each no-op decision returns `:kernel_default`; observer returns `:ok`.
 6. Adapter failures are typed and cannot become neutral fallback decisions.
 7. Observer failure has no control return path.
@@ -421,10 +423,10 @@ The implementation then added only the generic host tree and test/build
 support:
 
 - `ExtensionRegistry.resolve/1` strictly decodes the closed catalog without
-  creating atoms, and `lock/1` latches only adapter selection while returning a
-  new validated options snapshot for each future admission; the owning hook
-  MIUs remain responsible for carrying that snapshot into their concrete
-  contexts;
+  creating atoms, and `lock/1` atomically latches only adapter selection while
+  returning a new validated options snapshot for each future admission; the
+  owning hook MIUs remain responsible for carrying that snapshot into their
+  concrete contexts;
 - any decision facade may establish the same validated immutable latch; the
   production orchestrator still reaches admission first, while direct pinned
   upstream delivery/authorization entry points no longer fail because of a
@@ -470,8 +472,9 @@ The two-axis review against the parent architecture and current upstream code
 found three design-document gaps and corrected them before the red checkpoint:
 
 1. The parent still said the registry arrived at application startup, but the
-   measured budget forbids that startup edit. Both documents now specify the
-   serialized first pre-claim latch.
+   measured budget forbids that startup edit. Both documents now specify an
+   atomic first-decision latch, with pre-claim admission first in the normal
+   production sequence.
 2. `WorkflowStore` retains a decoded front-matter map, not raw workflow bytes.
    Registry decoding now names the real input and does not claim duplicate-YAML
    evidence that the upstream loader has already discarded.
@@ -492,9 +495,20 @@ resolving the same closed registry, records the stale-fingerprint evidence, and
 keeps the manifest unchanged until a new exact prototype is independently
 reviewed.
 
+The first independent Spec review found that broadening the first entry point
+also exposed a pre-existing non-atomic check/write in `ExtensionRegistry.lock/1`:
+two concurrent valid configurations could both return success and the later
+write could replace the earlier selection. The rework serializes publication
+on the local BEAM and adds a synchronized concurrent-first-lock regression.
+Direct delivery and authorization coverage now also includes targeted unknown
+selectors, malformed options, and restart-required selector drift. Standards
+review reported no finding. The exact post-rework `make all` gate passes 363
+tests with zero failures and six skipped, 100% total coverage, strict Credo
+with no issues, and Dialyzer with zero errors; Spec re-review remains required.
+
 ## Next Action
 
-Run an independent two-axis implementation review against RED checkpoint
+Run an independent two-axis implementation re-review against RED checkpoint
 `45335b7`, the `OXE-1.1a` correction, this trace, and the parent architecture.
 If it clears, create the `OXE-1.2` admission/delivery RED checkpoint without
 absorbing authorization, observer, Orocsy policy, or manifest-finalization
