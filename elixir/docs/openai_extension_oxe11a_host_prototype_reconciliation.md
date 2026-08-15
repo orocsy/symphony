@@ -1,6 +1,6 @@
 # OXE-1.1a Host And Hook-Prototype Reconciliation
 
-Status: independent-review rework implemented; full gate green; re-review pending
+Status: cleared after independent re-review
 
 Date: 2026-08-14
 
@@ -181,6 +181,13 @@ with zero errors. The unchanged retry-timer characterization was also repeated
 four times under a hermetic offline resolver and passed every run; this keeps
 external DNS timing out of the gate without changing pinned upstream tests.
 
+Final independent Spec re-review repeated 100 synchronized first-lock races;
+every round produced one successful revision, one restart-required loser, and
+a current registry matching the winner. Standards re-review found no code,
+concurrency, configuration, documentation, or scope defect. The support MIU is
+therefore cleared. Its manifest remains intentionally unchanged because this
+MIU did not own a kernel-hook prototype.
+
 ## Acceptance Conditions
 
 1. No pinned kernel file changes in this support MIU.
@@ -196,12 +203,11 @@ external DNS timing out of the gate without changing pinned upstream tests.
 7. First registry publication is atomic for concurrent decision facades; one
    winner is immutable until BEAM restart.
 8. An independent two-axis re-review clears this correction before `OXE-1.2`
-   revises a fingerprint or lands a kernel hook.
+   revises a fingerprint or lands a kernel hook. Cleared at `0ea6f5f`.
 
 ## Next Action
 
-Run independent re-review against `a6d0393` and this support MIU. If it clears,
-create `OXE-1.2` RED tests for admission rejection, no-op admission, and
+Create `OXE-1.2` RED tests for admission rejection, no-op admission, and
 workspace-ready delivery. Those tests must define the concrete contexts and
 options-snapshot ownership before the admission and delivery prototype is
 remeasured. Revise only the two owned manifest entries after that exact

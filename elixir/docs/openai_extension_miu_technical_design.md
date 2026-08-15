@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1a independent-review rework implemented with full gate green and re-review pending
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 RED next
 
 Date: 2026-07-29
 
@@ -684,4 +684,7 @@ but independent Spec review then found a non-atomic first-selection race. Its
 RED regression and direct malformed-config/drift coverage are now green;
 the exact post-rework `make all` gate passes 363 tests with zero failures, six
 skipped, 100% total coverage, strict Credo clean, and zero Dialyzer errors.
-Independent re-review remains before `OXE-1.2` starts.
+Final independent re-review then repeated 100 synchronized races with exactly
+one published revision per round and found no surviving Spec or Standards
+issue. `OXE-1.1a` is cleared at `0ea6f5f`; `OXE-1.2` owns the next RED
+checkpoint.

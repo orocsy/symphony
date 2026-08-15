@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1a independent-review rework implemented; full gate green; re-review pending
+Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 RED next
 
 Date: 2026-08-13
 
@@ -504,13 +504,13 @@ Direct delivery and authorization coverage now also includes targeted unknown
 selectors, malformed options, and restart-required selector drift. Standards
 review reported no finding. The exact post-rework `make all` gate passes 363
 tests with zero failures and six skipped, 100% total coverage, strict Credo
-with no issues, and Dialyzer with zero errors; Spec re-review remains required.
+with no issues, and Dialyzer with zero errors. Final Spec re-review repeated
+100 synchronized races with exactly one published revision per round; final
+Standards re-review reported no finding. `OXE-1.1a` is cleared at `0ea6f5f`.
 
 ## Next Action
 
-Run an independent two-axis implementation re-review against RED checkpoint
-`45335b7`, the `OXE-1.1a` correction, this trace, and the parent architecture.
-If it clears, create the `OXE-1.2` admission/delivery RED checkpoint without
+Create the `OXE-1.2` admission/delivery RED checkpoint without
 absorbing authorization, observer, Orocsy policy, or manifest-finalization
 scope. That MIU must define its concrete context/options ownership and obtain a
 reviewed replacement for only the two admission/delivery manifest entries
