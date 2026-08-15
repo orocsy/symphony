@@ -56,3 +56,67 @@ defmodule SymphonyElixir.ExtensionHostFixtures.RaisingObserver do
 
   def record(_event), do: raise("observer token=do-not-log")
 end
+
+defmodule SymphonyElixir.ExtensionLifecycleFixtures do
+  @moduledoc false
+
+  @recipient :oxe12_extension_fixture_recipient
+
+  def notify(message) do
+    if recipient = Process.whereis(@recipient), do: send(recipient, message)
+    :ok
+  end
+
+  def option(context, key) when is_map(context) and is_binary(key) do
+    context
+    |> Map.get(:options, %{})
+    |> Map.get(key)
+  end
+
+  def option(_context, _key), do: nil
+end
+
+defmodule SymphonyElixir.ExtensionLifecycleFixtures.DispatchAdmission do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DispatchAdmission
+
+  alias SymphonyElixir.ExtensionLifecycleFixtures
+
+  @impl true
+  def evaluate(issue, context) do
+    :ok = ExtensionLifecycleFixtures.notify({:oxe12_admission, issue, context})
+
+    case ExtensionLifecycleFixtures.option(context, "admission_result") do
+      "reject" -> {:reject, %{class: :fixture_rejection}}
+      _other -> :kernel_default
+    end
+  end
+end
+
+defmodule SymphonyElixir.ExtensionLifecycleFixtures.DeliveryController do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryController
+
+  alias SymphonyElixir.ExtensionLifecycleFixtures
+  alias SymphonyElixir.Extensions.ControllerFailure
+
+  @impl true
+  def handle(event, context) do
+    :ok = ExtensionLifecycleFixtures.notify({:oxe12_delivery, event, context})
+
+    case ExtensionLifecycleFixtures.option(context, "delivery_result") do
+      "error" ->
+        {:error,
+         %ControllerFailure{
+           code: :fixture_delivery_stopped,
+           interface: :delivery_controller,
+           reason: :fixture_requested
+         }, []}
+
+      _other ->
+        :kernel_default
+    end
+  end
+end

@@ -22,11 +22,13 @@ if config_env() == :test do
     extension_adapter_catalog: %{
       dispatch_admission: %{
         "noop" => SymphonyElixir.Extensions.Noop.DispatchAdmission,
-        "fixture" => SymphonyElixir.ExtensionHostFixtures.DispatchAdmission
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.DispatchAdmission,
+        "lifecycle_fixture" => SymphonyElixir.ExtensionLifecycleFixtures.DispatchAdmission
       },
       delivery_controller: %{
         "noop" => SymphonyElixir.Extensions.Noop.DeliveryController,
-        "fixture" => SymphonyElixir.ExtensionHostFixtures.DeliveryController
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.DeliveryController,
+        "lifecycle_fixture" => SymphonyElixir.ExtensionLifecycleFixtures.DeliveryController
       },
       command_authorization: %{
         "noop" => SymphonyElixir.Extensions.Noop.CommandAuthorization,

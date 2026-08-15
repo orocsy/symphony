@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 RED next
+Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 RED verified
 
 Date: 2026-08-13
 
@@ -90,16 +90,22 @@ both production and in-memory test adapters exist.
 ## Deep Module And Seam
 
 `SymphonyElixir.Extensions` is the only module imported by pinned kernel files.
-Its interface is:
+The hook-owning MIUs narrow its kernel-facing inputs to closed lifecycle facts;
+the facade then constructs the typed adapter contexts. After `OXE-1.2`, its
+admission and delivery surface is:
 
 ```elixir
-@spec evaluate_admission(Issue.t(), AdmissionContext.t()) ::
+@type attempt :: non_neg_integer() | nil
+@type workspace_ready_facts ::
+        {Issue.t(), Path.t(), String.t() | nil, attempt()}
+
+@spec evaluate_admission(Issue.t(), attempt()) ::
         :kernel_default |
         {:admit, Admission.t()} |
         {:reject, Rejection.t()} |
         {:error, ExtensionFailure.t()}
 
-@spec handle_delivery(DeliveryEvent.t(), DeliveryContext.t()) ::
+@spec handle_delivery(:workspace_ready, workspace_ready_facts()) ::
         :kernel_default |
         {:ok, DeliveryDecision.t(), [DeliveryEvent.t()]} |
         {:error, ControllerFailure.t(), [DeliveryEvent.t()]}
@@ -115,8 +121,10 @@ Its interface is:
 ```
 
 The facade hides adapter lookup, registry-revision checks, exception capture,
-observer fan-out, failure normalization, and no-op delegation. Kernel callers
-learn none of those details.
+observer fan-out, failure normalization, typed context construction, the fresh
+options snapshot, and no-op delegation. Kernel callers learn none of those
+details. The exact `OXE-1.2` context fields and tuple order are fixed in
+`openai_extension_oxe12_admission_delivery_hooks.md`.
 
 Deletion test: deleting the facade would spread registry lookup, adapter
 selection, exception/failure normalization, and observer isolation into three
@@ -510,8 +518,9 @@ Standards re-review reported no finding. `OXE-1.1a` is cleared at `0ea6f5f`.
 
 ## Next Action
 
-Create the `OXE-1.2` admission/delivery RED checkpoint without
-absorbing authorization, observer, Orocsy policy, or manifest-finalization
-scope. That MIU must define its concrete context/options ownership and obtain a
-reviewed replacement for only the two admission/delivery manifest entries
-before landing either kernel hook.
+The `OXE-1.2` RED checkpoint is recorded in
+[`openai_extension_oxe12_admission_delivery_hooks.md`](openai_extension_oxe12_admission_delivery_hooks.md).
+Implement its facade enrichment and two lifecycle hooks without absorbing
+authorization, observer, Orocsy policy, or manifest-finalization scope. Then
+remeasure and review replacements for only the admission and delivery manifest
+entries before making either path required.

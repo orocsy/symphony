@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 RED next
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 RED verified
 
 Date: 2026-07-29
 
@@ -688,3 +688,12 @@ Final independent re-review then repeated 100 synchronized races with exactly
 one published revision per round and found no surviving Spec or Standards
 issue. `OXE-1.1a` is cleared at `0ea6f5f`; `OXE-1.2` owns the next RED
 checkpoint.
+
+The `OXE-1.2` trace is now recorded in
+[`openai_extension_oxe12_admission_delivery_hooks.md`](openai_extension_oxe12_admission_delivery_hooks.md).
+It fixes the closed kernel-facts inputs, concrete admission/delivery context
+schemas, and facade-owned options snapshot boundary before changing a pinned
+kernel file. Its focused six-test checkpoint has four expected failures only:
+two absent typed enrichments and two absent lifecycle calls. Both no-op
+differentials pass at RED. The stale manifest remains unchanged until the
+compatible GREEN patches are measured and independently reviewed.
