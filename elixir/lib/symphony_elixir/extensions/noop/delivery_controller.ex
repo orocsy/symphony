@@ -3,7 +3,10 @@ defmodule SymphonyElixir.Extensions.Noop.DeliveryController do
 
   @behaviour SymphonyElixir.Extensions.DeliveryController
 
+  alias SymphonyElixir.Extensions.DeliveryContext
+  alias SymphonyElixir.Extensions.DeliveryEvent
+
   @impl true
-  @spec handle(term(), term()) :: :kernel_default
-  def handle(_event, _context), do: :kernel_default
+  @spec handle(DeliveryEvent.t(), DeliveryContext.t()) :: :kernel_default
+  def handle(%DeliveryEvent{}, %DeliveryContext{}), do: :kernel_default
 end

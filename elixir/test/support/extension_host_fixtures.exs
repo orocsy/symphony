@@ -1,3 +1,29 @@
+defmodule SymphonyElixir.ExtensionHostFixtures do
+  @moduledoc false
+
+  @recipient :oxe11_extension_fixture_recipient
+
+  def notify(message) do
+    if recipient = Process.whereis(@recipient), do: send(recipient, message)
+    :ok
+  end
+
+  def option(context, key, default \\ nil) do
+    context
+    |> Map.fetch!(:options)
+    |> Map.get(key, default)
+  end
+
+  def action(context, key) do
+    case option(context, key) do
+      "raise" -> :raise
+      "throw" -> :throw
+      "exit" -> :exit
+      _other -> nil
+    end
+  end
+end
+
 defmodule SymphonyElixir.ExtensionHostFixtures.Action do
   @moduledoc false
 
@@ -11,10 +37,23 @@ defmodule SymphonyElixir.ExtensionHostFixtures.DispatchAdmission do
   @moduledoc false
 
   alias SymphonyElixir.ExtensionHostFixtures.Action
+  alias SymphonyElixir.Extensions.ExtensionFailure
 
   def evaluate(issue, context) do
-    send(context.test_pid, {:dispatch_admission, issue, context})
-    Action.run(Map.get(context, :action), Map.fetch!(context, :result))
+    :ok = SymphonyElixir.ExtensionHostFixtures.notify({:dispatch_admission, issue, context})
+
+    result =
+      case SymphonyElixir.ExtensionHostFixtures.option(context, "admission_result") do
+        "admit" -> {:admit, %{issue_id: issue.id}}
+        "error" -> {:error, %ExtensionFailure{code: :fixture_failure, interface: :dispatch_admission}}
+        "malformed" -> :malformed
+        _other -> :kernel_default
+      end
+
+    Action.run(
+      SymphonyElixir.ExtensionHostFixtures.action(context, "admission_action"),
+      result
+    )
   end
 end
 
@@ -22,10 +61,30 @@ defmodule SymphonyElixir.ExtensionHostFixtures.DeliveryController do
   @moduledoc false
 
   alias SymphonyElixir.ExtensionHostFixtures.Action
+  alias SymphonyElixir.Extensions.ControllerFailure
 
   def handle(event, context) do
-    send(context.test_pid, {:delivery_controller, event, context})
-    Action.run(Map.get(context, :action), Map.fetch!(context, :result))
+    :ok = SymphonyElixir.ExtensionHostFixtures.notify({:delivery_controller, event, context})
+
+    result =
+      case SymphonyElixir.ExtensionHostFixtures.option(context, "delivery_result") do
+        "continue" ->
+          {:ok, :continue, [%{type: :continued}]}
+
+        "error" ->
+          {:error, %ControllerFailure{code: :fixture_failure, interface: :delivery_controller}, [%{type: :evidence}]}
+
+        "malformed" ->
+          :malformed
+
+        _other ->
+          :kernel_default
+      end
+
+    Action.run(
+      SymphonyElixir.ExtensionHostFixtures.action(context, "delivery_action"),
+      result
+    )
   end
 end
 

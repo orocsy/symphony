@@ -2,13 +2,15 @@ defmodule SymphonyElixir.Extensions.DeliveryController do
   @moduledoc "Adapter contract for delivery lifecycle decisions."
 
   alias SymphonyElixir.Extensions.ControllerFailure
+  alias SymphonyElixir.Extensions.DeliveryContext
+  alias SymphonyElixir.Extensions.DeliveryEvent
 
-  @type event :: term()
   @type decision :: term()
+  @type emitted_event :: term()
   @type result ::
           :kernel_default
-          | {:ok, decision(), [event()]}
-          | {:error, ControllerFailure.t(), [event()]}
+          | {:ok, decision(), [emitted_event()]}
+          | {:error, ControllerFailure.t(), [emitted_event()]}
 
-  @callback handle(event(), term()) :: result()
+  @callback handle(DeliveryEvent.t(), DeliveryContext.t()) :: result()
 end

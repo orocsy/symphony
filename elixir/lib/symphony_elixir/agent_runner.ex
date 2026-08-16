@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Extensions, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -43,7 +43,8 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          with :ok <- deliver_workspace_ready(issue, workspace, worker_host, opts),
+               :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
@@ -52,6 +53,16 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp deliver_workspace_ready(issue, workspace, worker_host, opts) do
+    facts = {issue, workspace, worker_host, Keyword.get(opts, :attempt)}
+
+    case Extensions.handle_delivery(:workspace_ready, facts) do
+      :kernel_default -> :ok
+      {:error, failure, events} -> {:error, {:extension_delivery_failed, failure, events}}
+      {:ok, decision, events} -> {:error, {:extension_delivery_decision, decision, events}}
     end
   end
 

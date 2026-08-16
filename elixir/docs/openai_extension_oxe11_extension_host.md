@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 RED cleared at `e3b7844`
+Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 GREEN candidate locally verified with review pending
 
 Date: 2026-08-13
 
@@ -520,7 +520,8 @@ Standards re-review reported no finding. `OXE-1.1a` is cleared at `0ea6f5f`.
 
 The `OXE-1.2` RED checkpoint is recorded in
 [`openai_extension_oxe12_admission_delivery_hooks.md`](openai_extension_oxe12_admission_delivery_hooks.md).
-Implement its facade enrichment and two lifecycle hooks without absorbing
-authorization, observer, Orocsy policy, or manifest-finalization scope. Then
-remeasure and review replacements for only the admission and delivery manifest
-entries before making either path required.
+Its GREEN candidate now implements facade enrichment and both lifecycle hooks
+without absorbing authorization, observer, Orocsy policy, or
+manifest-finalization scope. Independently review the measured 24-line
+admission and 15-line delivery patches before the later manifest-owning
+checkpoint makes either path required.

@@ -1,6 +1,6 @@
 # OXE-1.2 Admission And Workspace-Ready Delivery Hooks
 
-Status: RED cleared at `e3b7844`; GREEN implementation absent
+Status: GREEN candidate locally verified; independent review pending; manifest intentionally stale
 
 Date: 2026-08-15
 
@@ -277,6 +277,32 @@ those values plus inspected failure, adapter, and registry metadata. Final
 Standards review found no scope, teardown, trace, mailbox-ordering, or
 determinism issue. The committed RED checkpoint is cleared for GREEN.
 
+## GREEN Candidate Evidence
+
+The first compatible GREEN candidate implements the facade-owned context/event
+construction and both reviewed lifecycle hooks. It also replaces the old host
+tests' caller-authored admission/delivery context escape hatch with option-driven
+test adapters, so the test suite exercises the narrowed kernel facts rather than
+preserving the discarded API.
+
+Local evidence before independent review:
+
+- the former RED suite passes ten tests with zero failures at seed zero;
+- the combined lifecycle, host, and registry suite passes 31 tests with zero
+  failures at seeds zero and one;
+- the unchanged core and orchestrator-status suites pass 95 tests;
+- the complete test suite passes 373 tests with zero failures and six skips;
+- exact `make all` passes those 373 tests with 100% total coverage, formatting,
+  public-spec coverage, strict Credo, and Dialyzer all clean;
+- baseline identity audit passes; budget audit fails closed only on the two
+  intentionally stale fingerprints and per-file ceilings.
+
+The exact baseline-to-candidate patches measure 24 changed lines in
+`orchestrator.ex` and 15 in `agent_runner.ex`, 39 total. That stays below the
+reviewed aggregate ceiling of 40 while honestly exceeding the obsolete
+prototype ceilings of 7 and 8. The manifest remains unchanged until independent
+architecture review clears those exact replacements.
+
 ## Acceptance Conditions
 
 1. RED fails because context enrichment and the two lifecycle hooks are absent,
@@ -299,6 +325,7 @@ determinism issue. The committed RED checkpoint is cleared for GREEN.
 
 ## Next Action
 
-Implement the facade enrichment and two hooks from the cleared `e3b7844` RED
-checkpoint, remeasure their patches, and request architecture review before
-editing `UPSTREAM_PATCH_BUDGET.yml`.
+Commit and independently review the exact GREEN candidate. If Spec and
+Standards both clear it, record the reviewed 24/15-line fingerprints and make
+both owned paths required in the later manifest-owning checkpoint; do not edit
+`UPSTREAM_PATCH_BUDGET.yml` during this implementation checkpoint.

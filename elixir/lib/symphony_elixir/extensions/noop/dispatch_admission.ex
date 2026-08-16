@@ -3,7 +3,10 @@ defmodule SymphonyElixir.Extensions.Noop.DispatchAdmission do
 
   @behaviour SymphonyElixir.Extensions.DispatchAdmission
 
+  alias SymphonyElixir.Extensions.AdmissionContext
+  alias SymphonyElixir.Tracker.Issue
+
   @impl true
-  @spec evaluate(term(), term()) :: :kernel_default
-  def evaluate(_issue, _context), do: :kernel_default
+  @spec evaluate(Issue.t(), AdmissionContext.t()) :: :kernel_default
+  def evaluate(%Issue{}, %AdmissionContext{}), do: :kernel_default
 end

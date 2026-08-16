@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Extensions, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -907,12 +907,30 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case refresh_issue_for_dispatch(issue) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        admit_and_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
 
       {:skip, _reason} ->
         state
 
       {:error, _reason} ->
+        state
+    end
+  end
+
+  defp admit_and_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+    case Extensions.evaluate_admission(issue, attempt) do
+      :kernel_default ->
+        do_dispatch_issue(state, issue, attempt, preferred_worker_host)
+
+      {:admit, _admission} ->
+        do_dispatch_issue(state, issue, attempt, preferred_worker_host)
+
+      {:reject, _rejection} ->
+        state
+
+      {:error, failure} ->
+        Logger.error("extension admission failed code=#{failure.code} interface=#{failure.interface}")
+
         state
     end
   end
@@ -1184,7 +1202,7 @@ defmodule SymphonyElixir.Orchestrator do
          worker_slots_available?(state, metadata[:worker_host]) do
       case refresh_issue_for_dispatch(issue) do
         {:ok, %Issue{} = refreshed_issue} ->
-          {:noreply, do_dispatch_issue(state, refreshed_issue, attempt, metadata[:worker_host])}
+          {:noreply, admit_and_dispatch_issue(state, refreshed_issue, attempt, metadata[:worker_host])}
 
         {:skip, :missing} ->
           {:noreply, release_issue_claim(state, issue.id)}

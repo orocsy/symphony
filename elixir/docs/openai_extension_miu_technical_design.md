@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 RED cleared at `e3b7844`
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 GREEN candidate locally verified with review pending
 
 Date: 2026-07-29
 
@@ -703,3 +703,13 @@ contract after the failure-log test required one fixed-metadata line and
 excluded every seeded secret plus inspected adapter/failure metadata. Final
 Standards review found no scope, teardown, tracing, ordering, or determinism
 issue. The RED checkpoint is cleared for GREEN implementation.
+
+The first GREEN candidate now passes the ten-test lifecycle suite, the combined
+31-test lifecycle/host/registry suite, 95 unchanged core/status tests, and the
+complete 373-test suite with six skips. Formatting, public specs, and strict
+Credo are clean; exact `make all` also records 100% total coverage and zero
+Dialyzer errors. Its exact kernel patches measure 24 admission lines and 15
+delivery lines, remaining within the 40-line aggregate ceiling while exceeding
+the obsolete prototype per-file ceilings. Baseline verification is green and
+the unchanged manifest rejects both new fingerprints as designed. Independent
+GREEN review owns the next gate; manifest promotion remains deferred.

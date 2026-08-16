@@ -3,13 +3,16 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
   alias SymphonyElixir.ExtensionRegistry
   alias SymphonyElixir.Extensions
-  alias SymphonyElixir.Extensions.ControllerFailure
   alias SymphonyElixir.Extensions.ExtensionFailure
   alias SymphonyElixir.Extensions.ObserverFailure
 
+  @fixture_recipient :oxe11_extension_fixture_recipient
   @production_modules [
     SymphonyElixir.Extensions,
     SymphonyElixir.ExtensionRegistry,
+    SymphonyElixir.Extensions.AdmissionContext,
+    SymphonyElixir.Extensions.DeliveryContext,
+    SymphonyElixir.Extensions.DeliveryEvent,
     SymphonyElixir.Extensions.DispatchAdmission,
     SymphonyElixir.Extensions.DeliveryController,
     SymphonyElixir.Extensions.CommandAuthorization,
@@ -22,24 +25,29 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
   setup do
     reset_registry_if_available()
+    refute Process.whereis(@fixture_recipient)
+    Process.register(self(), @fixture_recipient)
     on_exit(&reset_registry_if_available/0)
   end
 
   test "routes every facade operation through the locked registry" do
     install_extensions!("fixture", "fixture", "fixture", ["fixture"])
     issue = %Issue{id: "issue-1", identifier: "OXE-1", state: "Todo"}
-    event = %{type: :workspace_ready, test_pid: self()}
+    facts = delivery_facts(issue)
+    event = %{type: :notification, test_pid: self()}
     intent = %{kind: :shell, command: "git status"}
 
-    admission_context = %{test_pid: self(), result: :kernel_default}
-    delivery_context = %{test_pid: self(), result: :kernel_default}
     turn_context = %{test_pid: self(), result: :allow}
 
-    assert :kernel_default == call(:evaluate_admission, [issue, admission_context])
-    assert_receive {:dispatch_admission, ^issue, ^admission_context}
+    assert :kernel_default == call(:evaluate_admission, [issue, 0])
+    assert_receive {:dispatch_admission, ^issue, admission_context}
+    assert admission_context.options == %{"marker" => "fixture"}
 
-    assert :kernel_default == call(:handle_delivery, [event, delivery_context])
-    assert_receive {:delivery_controller, ^event, ^delivery_context}
+    assert :kernel_default == call(:handle_delivery, [:workspace_ready, facts])
+    assert_receive {:delivery_controller, delivery_event, delivery_context}
+    assert delivery_event.type == :workspace_ready
+    assert delivery_context.issue == issue
+    assert delivery_context.options == %{"marker" => "fixture"}
 
     assert :allow == call(:authorize, [intent, turn_context])
     assert_receive {:command_authorization, ^intent, ^turn_context}
@@ -51,14 +59,15 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   test "returns kernel_default through every production no-op decision interface" do
     issue = %Issue{id: "issue-2", identifier: "OXE-2", state: "Todo"}
 
-    assert :kernel_default == call(:evaluate_admission, [issue, %{}])
-    assert :kernel_default == call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+    assert :kernel_default == call(:evaluate_admission, [issue, 0])
+    assert :kernel_default == call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
     assert :kernel_default == call(:authorize, [%{kind: :shell}, %{}])
     assert :ok == call(:record, [%{type: :notification}])
   end
 
   test "lazily locks valid configuration from either direct decision entry point" do
-    assert :kernel_default == call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+    issue = %Issue{id: "issue-lazy", identifier: "OXE-LAZY", state: "Todo"}
+    assert :kernel_default == call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     reset_registry_if_available()
 
@@ -67,20 +76,18 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   end
 
   test "accepts valid typed decisions and stamps adapter failures at the facade" do
-    install_extensions!("fixture", "fixture", "fixture", [])
+    install_extensions!("fixture", "fixture", "fixture", [], %{
+      "admission_result" => "admit",
+      "delivery_result" => "continue"
+    })
+
     issue = %Issue{id: "issue-typed", identifier: "OXE-TYPED", state: "Todo"}
 
     assert {:admit, %{issue_id: "issue-typed"}} =
-             call(:evaluate_admission, [
-               issue,
-               %{test_pid: self(), result: {:admit, %{issue_id: "issue-typed"}}}
-             ])
+             call(:evaluate_admission, [issue, 0])
 
     assert {:ok, :continue, [%{type: :continued}]} =
-             call(:handle_delivery, [
-               %{type: :workspace_ready},
-               %{test_pid: self(), result: {:ok, :continue, [%{type: :continued}]}}
-             ])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert {:allow_once, %{lease: "one"}} =
              call(:authorize, [
@@ -88,27 +95,19 @@ defmodule SymphonyElixir.ExtensionsHostTest do
                %{test_pid: self(), result: {:allow_once, %{lease: "one"}}}
              ])
 
-    admission_failure = %ExtensionFailure{code: :fixture_failure, interface: :dispatch_admission}
+    configure_extension_options!(%{
+      "admission_result" => "error",
+      "delivery_result" => "error"
+    })
 
     assert {:error, stamped_admission} =
-             call(:evaluate_admission, [
-               issue,
-               %{test_pid: self(), result: {:error, admission_failure}}
-             ])
+             call(:evaluate_admission, [issue, 0])
 
     assert stamped_admission.adapter == SymphonyElixir.ExtensionHostFixtures.DispatchAdmission
     assert String.starts_with?(stamped_admission.registry_revision, "sha256:")
 
-    delivery_failure = %ControllerFailure{code: :fixture_failure, interface: :delivery_controller}
-
     assert {:error, stamped_delivery, [%{type: :evidence}]} =
-             call(:handle_delivery, [
-               %{type: :workspace_ready},
-               %{
-                 test_pid: self(),
-                 result: {:error, delivery_failure, [%{type: :evidence}]}
-               }
-             ])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert stamped_delivery.adapter == SymphonyElixir.ExtensionHostFixtures.DeliveryController
     assert String.starts_with?(stamped_delivery.registry_revision, "sha256:")
@@ -131,20 +130,21 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   end
 
   test "rejects malformed adapter returns instead of falling back" do
-    install_extensions!("fixture", "fixture", "fixture", [])
+    install_extensions!("fixture", "fixture", "fixture", [], %{
+      "admission_result" => "malformed",
+      "delivery_result" => "malformed"
+    })
+
     issue = %Issue{id: "issue-3", identifier: "OXE-3", state: "Todo"}
 
     assert {:error, admission_failure} =
-             call(:evaluate_admission, [issue, %{test_pid: self(), result: :malformed}])
+             call(:evaluate_admission, [issue, 0])
 
     assert admission_failure.code == :invalid_adapter_return
     assert admission_failure.interface == :dispatch_admission
 
     assert {:error, delivery_failure, []} =
-             call(:handle_delivery, [
-               %{type: :workspace_ready},
-               %{test_pid: self(), result: :malformed}
-             ])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert delivery_failure.code == :invalid_adapter_return
     assert delivery_failure.interface == :delivery_controller
@@ -163,7 +163,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     install_extensions!("not-installed", "noop", "noop", ["noop"])
     issue = %Issue{id: "issue-invalid", identifier: "OXE-INVALID", state: "Todo"}
 
-    assert {:error, failure} = call(:evaluate_admission, [issue, %{}])
+    assert {:error, failure} = call(:evaluate_admission, [issue, 0])
     assert failure.code == :unknown_adapter
     assert failure.interface == :dispatch_admission
     assert failure.adapter == nil
@@ -171,9 +171,10 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
   test "rejects invalid registry configuration from direct decision entry points" do
     install_extensions!("noop", "not-installed", "noop", ["noop"])
+    issue = %Issue{id: "issue-invalid-direct", identifier: "OXE-INVALID-DIRECT", state: "Todo"}
 
     assert {:error, delivery_failure, []} =
-             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert delivery_failure.code == :unknown_adapter
     assert delivery_failure.interface == :delivery_controller
@@ -192,10 +193,12 @@ defmodule SymphonyElixir.ExtensionsHostTest do
       options: []
     """
 
+    issue = %Issue{id: "issue-options", identifier: "OXE-OPTIONS", state: "Todo"}
+
     install_extension_stanza!(malformed_options)
 
     assert {:error, delivery_failure, []} =
-             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert delivery_failure.code == :invalid_type
     assert delivery_failure.interface == :delivery_controller
@@ -209,11 +212,12 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   end
 
   test "fails direct decision entry points closed after selector drift" do
-    assert :kernel_default == call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+    issue = %Issue{id: "issue-drift", identifier: "OXE-DRIFT", state: "Todo"}
+    assert :kernel_default == call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
     install_extensions!("noop", "fixture", "noop", ["noop"])
 
     assert {:error, delivery_failure, []} =
-             call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert delivery_failure.code == :extension_registry_restart_required
     assert delivery_failure.interface == :delivery_controller
@@ -229,20 +233,17 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   end
 
   test "normalizes delivery and authorization adapter failures" do
-    install_extensions!("fixture", "fixture", "fixture", [])
+    install_extensions!("fixture", "fixture", "fixture", [], %{
+      "delivery_action" => "raise"
+    })
+
     issue = %Issue{id: "issue-failures", identifier: "OXE-FAILURES", state: "Todo"}
 
     assert :kernel_default ==
-             call(:evaluate_admission, [
-               issue,
-               %{test_pid: self(), result: :kernel_default}
-             ])
+             call(:evaluate_admission, [issue, 0])
 
     assert {:error, delivery_failure, []} =
-             call(:handle_delivery, [
-               %{type: :workspace_ready},
-               %{test_pid: self(), action: :raise, result: :kernel_default}
-             ])
+             call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
     assert delivery_failure.code == :adapter_failure
     assert delivery_failure.reason == :raise
@@ -262,11 +263,10 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     issue = %Issue{id: "issue-4", identifier: "OXE-4", state: "Todo"}
 
     for action <- [:raise, :throw, :exit] do
+      configure_extension_options!(%{"admission_action" => Atom.to_string(action)})
+
       assert {:error, failure} =
-               call(:evaluate_admission, [
-                 issue,
-                 %{test_pid: self(), action: action, result: :kernel_default}
-               ])
+               call(:evaluate_admission, [issue, 0])
 
       assert failure.code == :adapter_failure
       assert failure.interface == :dispatch_admission
@@ -281,7 +281,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert :kernel_default ==
              call(:evaluate_admission, [
                %Issue{id: "issue-5", identifier: "OXE-5", state: "Todo"},
-               %{test_pid: self(), result: :kernel_default}
+               0
              ])
 
     log = capture_log(fn -> assert :ok == call(:record, [event]) end)
@@ -296,10 +296,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     issue = %Issue{id: "issue-observer", identifier: "OXE-OBSERVER", state: "Todo"}
 
     assert :kernel_default ==
-             call(:evaluate_admission, [
-               issue,
-               %{test_pid: self(), result: :kernel_default}
-             ])
+             call(:evaluate_admission, [issue, 0])
 
     observer_failure = %ObserverFailure{code: :fixture_failure, interface: :delivery_observer}
 
@@ -330,13 +327,13 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
     try do
       issue = %Issue{id: "issue-missing", identifier: "OXE-MISSING", state: "Todo"}
-      assert {:error, admission_failure} = call(:evaluate_admission, [issue, %{}])
+      assert {:error, admission_failure} = call(:evaluate_admission, [issue, 0])
       assert admission_failure.code == :extension_configuration_unavailable
       assert admission_failure.interface == :dispatch_admission
       assert admission_failure.reason == :workflow_unavailable
 
       assert {:error, delivery_failure, []} =
-               call(:handle_delivery, [%{type: :workspace_ready}, %{}])
+               call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
       assert delivery_failure.code == :extension_configuration_unavailable
       assert delivery_failure.interface == :delivery_controller
@@ -366,18 +363,44 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
   defp call(function, arguments), do: apply(Extensions, function, arguments)
 
-  defp install_extensions!(admission, delivery, authorization, observers) do
+  defp install_extensions!(
+         admission,
+         delivery,
+         authorization,
+         observers,
+         options \\ %{"marker" => "fixture"}
+       ) do
     stanza = """
     extensions:
       dispatch_admission: #{admission}
       delivery_controller: #{delivery}
       command_authorization: #{authorization}
       observers: [#{Enum.join(observers, ", ")}]
-      options:
-        marker: fixture
+      options: #{Jason.encode!(options)}
     """
 
     install_extension_stanza!(stanza)
+  end
+
+  defp configure_extension_options!(options) do
+    path = Workflow.workflow_file_path()
+    source = File.read!(path)
+
+    updated =
+      Regex.replace(
+        ~r/^  options: .*$/m,
+        source,
+        "  options: #{Jason.encode!(options)}",
+        global: false
+      )
+
+    refute updated == source
+    File.write!(path, updated)
+    assert :ok = WorkflowStore.force_reload()
+  end
+
+  defp delivery_facts(issue) do
+    {issue, "/tmp/#{issue.identifier}", nil, 0}
   end
 
   defp install_extension_stanza!(stanza) do

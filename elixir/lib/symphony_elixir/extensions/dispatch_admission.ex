@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Extensions.DispatchAdmission do
   @moduledoc "Adapter contract for pre-claim issue admission."
 
+  alias SymphonyElixir.Extensions.AdmissionContext
   alias SymphonyElixir.Extensions.ExtensionFailure
   alias SymphonyElixir.Tracker.Issue
 
@@ -10,5 +11,5 @@ defmodule SymphonyElixir.Extensions.DispatchAdmission do
           | {:reject, term()}
           | {:error, ExtensionFailure.t()}
 
-  @callback evaluate(Issue.t(), term()) :: result()
+  @callback evaluate(Issue.t(), AdmissionContext.t()) :: result()
 end
