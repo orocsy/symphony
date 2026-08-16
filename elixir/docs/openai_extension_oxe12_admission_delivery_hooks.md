@@ -1,6 +1,6 @@
 # OXE-1.2 Admission And Workspace-Ready Delivery Hooks
 
-Status: independent-review RED rework verified; re-review pending; implementation absent
+Status: RED cleared at `e3b7844`; GREEN implementation absent
 
 Date: 2026-08-15
 
@@ -266,6 +266,17 @@ runtime info, creates the workspace, and reaches the existing failing
 and failures are therefore localized to the missing facade enrichment, input
 validation, and lifecycle hooks.
 
+Final independent Spec review at `e3b7844` reproduced the ten-test/eight-failure
+differential and found no surviving requirement gap. It verified the refreshed
+issue and exact placement evidence, all facade result branches, closed-input
+matrix, option reload, attempt normalization, runtime-info ordering, and exact
+delivery wrappers. The last review repair gives the admission fixture distinct
+secret-bearing title, description, options, and adapter reason values; the RED
+assertion permits exactly one fixed-metadata failure log line and excludes
+those values plus inspected failure, adapter, and registry metadata. Final
+Standards review found no scope, teardown, trace, mailbox-ordering, or
+determinism issue. The committed RED checkpoint is cleared for GREEN.
+
 ## Acceptance Conditions
 
 1. RED fails because context enrichment and the two lifecycle hooks are absent,
@@ -288,7 +299,6 @@ validation, and lifecycle hooks.
 
 ## Next Action
 
-Commit the test-only fixtures, RED lifecycle/context tests, and this trace.
-Then implement the facade enrichment and two hooks, remeasure their patches,
-and request architecture review before
+Implement the facade enrichment and two hooks from the cleared `e3b7844` RED
+checkpoint, remeasure their patches, and request architecture review before
 editing `UPSTREAM_PATCH_BUDGET.yml`.

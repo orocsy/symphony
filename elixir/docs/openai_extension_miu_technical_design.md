@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 RED rework verified with re-review pending
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 RED cleared at `e3b7844`
 
 Date: 2026-07-29
 
@@ -697,4 +697,9 @@ kernel file. After first-round review hardened exact call-site ordering,
 decision branches, snapshot refresh, normalization, and malformed inputs, its
 focused ten-test checkpoint has eight expected semantic failures. Both no-op
 differentials pass at RED. The stale manifest remains unchanged until the
-compatible GREEN patches are measured and independently reviewed.
+compatible GREEN patches are measured and independently reviewed. Final Spec
+review at `e3b7844` reproduced the differential and cleared the complete
+contract after the failure-log test required one fixed-metadata line and
+excluded every seeded secret plus inspected adapter/failure metadata. Final
+Standards review found no scope, teardown, tracing, ordering, or determinism
+issue. The RED checkpoint is cleared for GREEN implementation.
