@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 GREEN candidate locally verified with review pending
+Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 GREEN review rework in progress
 
 Date: 2026-08-13
 

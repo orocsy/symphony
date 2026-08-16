@@ -1,6 +1,6 @@
 # OXE-1.2 Admission And Workspace-Ready Delivery Hooks
 
-Status: GREEN candidate locally verified; independent review pending; manifest intentionally stale
+Status: GREEN review rework in progress; manifest intentionally stale
 
 Date: 2026-08-15
 
@@ -138,12 +138,16 @@ final `Issue` and before `do_dispatch_issue/4` selects a worker.
 | --- | --- |
 | `:kernel_default` | enter the exact existing `do_dispatch_issue/4` branch |
 | `{:admit, _admission}` | enter that same dispatch branch |
-| `{:reject, _rejection}` | return the unchanged scheduler state |
-| `{:error, _failure}` | log a sanitized failure and return unchanged state |
+| `{:reject, _rejection}` | do not dispatch; release any inherited retry claim |
+| `{:error, _failure}` | log a sanitized failure; do not dispatch; release any inherited retry claim |
 
-Rejection and failure must leave `running`, `claimed`, and `retry_attempts`
-unchanged; create no task; select no worker; and create no workspace. Reporting
-and persistence belong to the future Orocsy admission adapter, not the kernel.
+For a fresh dispatch, rejection and failure leave `running`, `claimed`, and
+`retry_attempts` unchanged. A fired retry has already removed its retry entry
+but still carries the previous worker's claim; rejection or failure must release
+that inherited claim so the issue is not permanently hidden from polling. Both
+paths create no task, perform no final worker selection, and create no
+workspace. Reporting and persistence belong to the future Orocsy admission
+adapter, not the kernel.
 An adapter failure writes one sanitized operator log with fixed metadata
 `extension admission failed code=<code> interface=<interface>`. It must not
 include the issue title/description, adapter reason, options, or inspected
@@ -194,7 +198,7 @@ wrapper cannot pass by substring.
 
 ## RED Tests
 
-The checkpoint adds test-only closed adapters and ten focused tests for:
+The checkpoint adds test-only closed adapters and eleven focused tests for:
 
 1. admission input normalization and facade-owned revision/options enrichment;
 2. workspace-ready event and delivery-context construction;
@@ -213,9 +217,11 @@ The checkpoint adds test-only closed adapters and ten focused tests for:
    host, and a table of unknown tags, missing/extra tuple fields, maps, invalid
    issue/path/host/attempt values, and typed pre-registry rejection;
 10. the budget manifest remaining unchanged and optional at RED; the first
-   non-empty GREEN hook candidate must fail its stale fingerprint until the
-   exact reviewed two-file patch is recorded and both owned paths become
-   required.
+    non-empty GREEN hook candidate must fail its stale fingerprint until the
+    exact reviewed two-file patch is recorded and both owned paths become
+    required.
+11. retry rejection and failure both release the inherited claim while creating
+    no running worker or replacement retry entry.
 
 The test adapters are available only in `MIX_ENV=test`. They communicate with
 one registered non-async test process and derive their deterministic result
@@ -287,21 +293,34 @@ preserving the discarded API.
 
 Local evidence before independent review:
 
-- the former RED suite passes ten tests with zero failures at seed zero;
-- the combined lifecycle, host, and registry suite passes 31 tests with zero
+- the cleared ten-test RED contract plus the retry-claim review regression pass
+  eleven tests with zero failures at seed zero;
+- the combined lifecycle, host, and registry suite passes 32 tests with zero
   failures at seeds zero and one;
 - the unchanged core and orchestrator-status suites pass 95 tests;
-- the complete test suite passes 373 tests with zero failures and six skips;
-- exact `make all` passes those 373 tests with 100% total coverage, formatting,
+- the complete test suite passes 374 tests with zero failures and six skips;
+- exact `make all` passes those 374 tests with 100% total coverage, formatting,
   public-spec coverage, strict Credo, and Dialyzer all clean;
-- baseline identity audit passes; budget audit fails closed only on the two
-  intentionally stale fingerprints and per-file ceilings.
+- baseline identity audit passes; budget audit fails closed only on the
+  intentionally stale file/hook fingerprints for the two owned paths and their
+  per-file ceilings.
 
 The exact baseline-to-candidate patches measure 24 changed lines in
 `orchestrator.ex` and 15 in `agent_runner.ex`, 39 total. That stays below the
 reviewed aggregate ceiling of 40 while honestly exceeding the obsolete
 prototype ceilings of 7 and 8. The manifest remains unchanged until independent
 architecture review clears those exact replacements.
+
+First-round Standards review found that a fired retry had already popped its
+retry entry but retained its old claim, so returning an unchanged state on
+reject/error would strand the issue outside both polling and retry. Spec review
+required the correction to be an explicit contract revision and rejected a
+test that entered below the real retry-pop boundary. The rework releases only
+that inherited claim and drives both reject/error cases through the production
+`handle_info({:retry_issue, issue_id, retry_token}, state)` ingress with a real
+token and retry entry. Fresh-dispatch state behavior remains unchanged. The
+generic host test adapters now also declare their narrowed behaviors and
+implementations for compile-time drift checking.
 
 ## Acceptance Conditions
 
@@ -310,8 +329,9 @@ architecture review clears those exact replacements.
 2. Only the two owned kernel files may change in GREEN.
 3. Kernel code references only `SymphonyElixir.Extensions`.
 4. Options and registry revision never cross into a pinned kernel file.
-5. Admission reject/error creates no worker selection, task, claim, or
-   workspace; admit/default preserves the dispatch branch.
+5. Admission reject/error creates no final worker selection, task, or workspace;
+   fresh dispatch creates no claim and retry dispatch releases its inherited
+   claim; admit/default preserves the dispatch branch.
 6. Delivery failure and non-default decision preserve the workspace, use exact
    tagged outer failures, and start neither `before_run` nor Codex.
 7. Same-selector reload reaches a new options snapshot with one registry

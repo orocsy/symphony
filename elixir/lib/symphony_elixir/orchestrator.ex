@@ -926,12 +926,12 @@ defmodule SymphonyElixir.Orchestrator do
         do_dispatch_issue(state, issue, attempt, preferred_worker_host)
 
       {:reject, _rejection} ->
-        state
+        release_issue_claim(state, issue.id)
 
       {:error, failure} ->
         Logger.error("extension admission failed code=#{failure.code} interface=#{failure.interface}")
 
-        state
+        release_issue_claim(state, issue.id)
     end
   end
 

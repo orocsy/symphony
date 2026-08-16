@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 GREEN candidate locally verified with review pending
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 GREEN review rework in progress
 
 Date: 2026-07-29
 
@@ -704,12 +704,19 @@ excluded every seeded secret plus inspected adapter/failure metadata. Final
 Standards review found no scope, teardown, tracing, ordering, or determinism
 issue. The RED checkpoint is cleared for GREEN implementation.
 
-The first GREEN candidate now passes the ten-test lifecycle suite, the combined
-31-test lifecycle/host/registry suite, 95 unchanged core/status tests, and the
-complete 373-test suite with six skips. Formatting, public specs, and strict
+The GREEN review rework passes the eleven-test lifecycle suite, the combined
+32-test lifecycle/host/registry suite, 95 unchanged core/status tests, and the
+complete 374-test suite with six skips. Formatting, public specs, and strict
 Credo are clean; exact `make all` also records 100% total coverage and zero
 Dialyzer errors. Its exact kernel patches measure 24 admission lines and 15
 delivery lines, remaining within the 40-line aggregate ceiling while exceeding
 the obsolete prototype per-file ceilings. Baseline verification is green and
-the unchanged manifest rejects both new fingerprints as designed. Independent
-GREEN review owns the next gate; manifest promotion remains deferred.
+the unchanged manifest rejects the new owned-path/hook fingerprints as
+designed. First-round Standards review found that retry rejection/failure could
+preserve a popped retry's claim indefinitely; the rework releases that
+inherited claim, adds both
+retry-path regressions, and compiler-checks the narrowed test adapters against
+their behaviors. Spec review additionally required explicit contract wording
+and rejected a test below the real retry-pop seam; the replacement test enters
+through the production retry-token handler with a populated retry entry.
+Re-review owns the next gate; manifest promotion remains deferred.

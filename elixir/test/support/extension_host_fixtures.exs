@@ -36,9 +36,12 @@ end
 defmodule SymphonyElixir.ExtensionHostFixtures.DispatchAdmission do
   @moduledoc false
 
+  @behaviour SymphonyElixir.Extensions.DispatchAdmission
+
   alias SymphonyElixir.ExtensionHostFixtures.Action
   alias SymphonyElixir.Extensions.ExtensionFailure
 
+  @impl true
   def evaluate(issue, context) do
     :ok = SymphonyElixir.ExtensionHostFixtures.notify({:dispatch_admission, issue, context})
 
@@ -60,9 +63,12 @@ end
 defmodule SymphonyElixir.ExtensionHostFixtures.DeliveryController do
   @moduledoc false
 
+  @behaviour SymphonyElixir.Extensions.DeliveryController
+
   alias SymphonyElixir.ExtensionHostFixtures.Action
   alias SymphonyElixir.Extensions.ControllerFailure
 
+  @impl true
   def handle(event, context) do
     :ok = SymphonyElixir.ExtensionHostFixtures.notify({:delivery_controller, event, context})
 

@@ -126,6 +126,53 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     assert_admission_blocks("error", "admission-error", "OXE-ADMISSION-ERROR")
   end
 
+  test "retry admission rejection or failure releases the inherited claim" do
+    stop_default_runtime!()
+
+    for result <- ["reject", "error"] do
+      id = "retry-admission-#{result}"
+      issue = issue(id, "OXE-RETRY-#{String.upcase(result)}")
+      test_root = unique_root(id)
+      on_exit(fn -> File.rm_rf(test_root) end)
+
+      configure_extensions!(
+        "lifecycle_fixture",
+        "noop",
+        %{"admission_result" => result},
+        tracker_kind: "memory",
+        workspace_root: Path.join(test_root, "workspaces")
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      retry_token = make_ref()
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 10,
+        claimed: MapSet.new([issue.id]),
+        retry_attempts: %{
+          issue.id => %{
+            attempt: 3,
+            retry_token: retry_token,
+            identifier: issue.identifier,
+            error: "agent exited",
+            worker_host: nil,
+            workspace_path: nil
+          }
+        }
+      }
+
+      assert {:noreply, updated_state} =
+               Orchestrator.handle_info({:retry_issue, issue.id, retry_token}, state)
+
+      assert_receive {:oxe12_admission, ^issue, context}
+      assert context.attempt == 3
+      refute MapSet.member?(updated_state.claimed, issue.id)
+      refute Map.has_key?(updated_state.running, issue.id)
+      refute Map.has_key?(updated_state.retry_attempts, issue.id)
+    end
+  end
+
   test "no-op admission preserves the current dispatch and claim observation" do
     assert_admission_dispatches("noop", nil, "admission-noop", "OXE-ADMISSION-NOOP")
   end
