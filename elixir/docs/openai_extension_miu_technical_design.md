@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 RED design next
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 RED cleared, GREEN next
 
 Date: 2026-07-29
 
@@ -724,3 +724,15 @@ OXE-1.2 is cleared with exact 24/15-line measurements; manifest promotion
 remains deferred to OXE-1.4 so all three registered kernel patches become
 authority atomically. OXE-1.3 context/differential RED design owns the next
 gate.
+
+The OXE-1.3 technical contract is recorded in
+[`openai_extension_oxe13_turn_authorization.md`](openai_extension_oxe13_turn_authorization.md).
+It fixes the facade-captured immutable turn snapshot, six closed parsed
+approval/tool products, pinned v0.128.0 request-scoped response mappings,
+capture-failure protocol, and recursive context boundary before any
+`app_server.ex` edit. Independent review split observer activation to an
+internal OXE-1.3a review subcheckpoint because the parent architecture requires
+a bounded asynchronous handoff and versioned correlation envelope; synchronous
+callback fan-out is not accepted. This does not change the four top-level MIUs.
+Final Spec and Standards review clear the 57-test authorization RED checkpoint;
+GREEN owns the next checkpoint. The manifest remains unchanged.

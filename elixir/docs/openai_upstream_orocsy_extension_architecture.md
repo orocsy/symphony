@@ -1332,7 +1332,9 @@ The next Slice 1 trace is
 ordered MIUs and starts with a kernel-free facade, immutable closed registry,
 four public interfaces, and neutral no-op adapters. It also makes the neutral
 `:kernel_default` result explicit so no-op mode can preserve upstream mechanics
-without duplicating them inside adapters.
+without duplicating them inside adapters. The top-level OXE-1.3 MIU uses two
+internal reviewed subcheckpoints—authorization, then bounded observation—so
+that split does not change the four-MIU decomposition.
 
 ## Approval Gate
 

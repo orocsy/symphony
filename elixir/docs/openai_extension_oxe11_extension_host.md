@@ -1,10 +1,10 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 RED design next
+Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 RED cleared, GREEN next; observer split to internal OXE-1.3a
 
 Date: 2026-08-13
 
-Last revised: 2026-08-15
+Last revised: 2026-08-16
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -18,10 +18,13 @@ Depends on:
 
 ## Decision
 
-Build Slice 1 as four ordered MIUs. Start with a deep extension-host module
+At the OXE-1.1 fixed point, build Slice 1 from a deep extension-host module
 whose interface is four facade operations, a closed immutable registry, four
 public adapter interfaces, and neutral no-op adapters. Do not change a pinned
-kernel file in `OXE-1.1`.
+kernel file in `OXE-1.1`. OXE-1.3 later adds two public kernel lifecycle
+helpers, `capture_turn/1` and `bind_turn/2`, without adding a fifth adapter
+interface. These make six public facade functions over the same four adapter
+interfaces.
 
 The kernel hooks and their no-op differential proofs land only in the later
 MIUs that own those exact registered paths. Orocsy behavior remains absent
@@ -75,11 +78,16 @@ schema. Both would violate the already-reviewed patch authority.
 | --- | --- | --- | --- |
 | `OXE-1.1` | facade, registry, public interfaces, shared failure types, no-op adapters | none | interface tests and closed-registry tests |
 | `OXE-1.2` | admission and workspace-ready delivery hooks | `orchestrator.ex`, `agent_runner.ex` | unchanged upstream core tests plus neutral-decision tests |
-| `OXE-1.3` | immutable turn context, authorization hook, observer hook | `codex/app_server.ex` | unchanged app-server tests plus recursive-context differential |
+| `OXE-1.3` | immutable turn context and authorization hook | `codex/app_server.ex` | unchanged app-server tests plus recursive-context differential |
+| `OXE-1.3a` (internal review subcheckpoint) | bounded observer dispatcher, versioned envelope, app-server observer hook | `codex/app_server.ex` plus extension-owned dispatcher/envelope | full/hung/failing queue differential plus identical subscriber sequence |
 | `OXE-1.4` | complete no-op conformance and manifest activation | manifest, audit fixtures, proof task, docs | all three registered files required; reviewed replacement budget and full gate |
 
-Dependencies are linear: `1.1 -> 1.2 -> 1.3 -> 1.4`. A later MIU may not
-absorb an earlier failure by widening a kernel patch.
+The four top-level dependencies remain `1.1 -> 1.2 -> 1.3 -> 1.4`.
+Top-level OXE-1.3 has two ordered internal review gates: authorization `1.3`
+then observer `1.3a`. The split was required because a synchronous observer
+callback violates the parent architecture's bounded-asynchronous/non-blocking
+contract. A later MIU may not absorb an earlier failure by widening a kernel
+patch.
 
 The private `DeliveryPolicy`, `DeliveryExecutor`, `PromptComposer`,
 `ValidationRunner`, and `EvidenceNotary` roles remain documented contracts in
@@ -110,7 +118,13 @@ admission and delivery surface is:
         {:ok, DeliveryDecision.t(), [DeliveryEvent.t()]} |
         {:error, ControllerFailure.t(), [DeliveryEvent.t()]}
 
-@spec authorize(CommandIntent.t(), TurnContext.t()) ::
+@spec capture_turn({Issue.t(), Path.t(), String.t() | nil, String.t()}) ::
+        {:ok, TurnSeed.t()} | {:error, ExtensionFailure.t()}
+
+@spec bind_turn(TurnSeed.t(), String.t()) ::
+        {:ok, TurnContext.t()} | {:error, ExtensionFailure.t()}
+
+@spec authorize({String.t(), map()}, TurnContext.t()) ::
         :kernel_default |
         :allow |
         {:allow_once, AuthorizationLease.t()} |
@@ -120,18 +134,27 @@ admission and delivery surface is:
 @spec record(DeliveryEvent.t()) :: :ok
 ```
 
-The facade hides adapter lookup, registry-revision checks, exception capture,
+The facade hides protocol-to-`CommandIntent` parsing, adapter lookup,
+registry-revision checks, exception capture,
 observer fan-out, failure normalization, typed context construction, the fresh
 options snapshot, and no-op delegation. Kernel callers learn none of those
 details. The exact `OXE-1.2` context fields and tuple order are fixed in
-`openai_extension_oxe12_admission_delivery_hooks.md`.
+`openai_extension_oxe12_admission_delivery_hooks.md`. OXE-1.3's fifth and sixth
+facade functions capture immutable authority and bind the server-returned turn
+id; neither routes an adapter callback. The existing observer input remains the
+closed workspace-ready `DeliveryEvent`; the internal OXE-1.3a review
+subcheckpoint must revise that surface to its versioned envelope before adding
+the app-server observer hook.
 
 Deletion test: deleting the facade would spread registry lookup, adapter
 selection, exception/failure normalization, and observer isolation into three
 pinned kernel files. The module therefore earns its seam.
 
-Tests use the same four facade operations as kernel callers. They do not call
-private routing functions or inspect registry storage.
+Tests use the same public facade functions as kernel callers. OXE-1.1 tests use
+the original four; OXE-1.3 adds `capture_turn/1` and `bind_turn/2`. They do not
+call private routing functions or inspect registry storage. Deleting either
+lifecycle helper forces the pinned client to resolve registry/options authority
+or construct adapter-visible context, so both earn the public facade seam.
 
 ## Registry Authority And Lifetime
 
@@ -246,8 +269,9 @@ and no worker-authored authority Boolean. Contexts are immutable values. Their
 first schema contains only facts needed by the owning Slice 1 hook. `OXE-1.1`
 does not invent placeholder fields merely to fill the structs: the red tests
 exercise the interface modules and facade with explicit fixture terms, while
-`OXE-1.2` and `OXE-1.3` add the reviewed hook-specific context/event schemas
-before their kernel call sites land. A later field requires a documented
+`OXE-1.2`, `OXE-1.3`, and its internal `OXE-1.3a` subcheckpoint add their
+reviewed hook-specific context/intent/envelope schemas before their kernel call
+sites land. A later field requires a documented
 interface revision rather than an untyped catch-all map.
 
 ## Neutral Adapters
@@ -282,16 +306,19 @@ or telemetry. They are deterministic and allocation-bounded.
 Decision-adapter failure never becomes `:kernel_default`. Observer failure
 never becomes a controller decision.
 
-`OXE-1.1` does not claim timeout containment: neither the reviewed architecture
-nor this host MIU defines an observer process boundary or timeout budget.
-`OXE-1.3` must either define and test that boundary before the observer hook
-lands or keep the callback synchronous and document the resulting operational
-limit. Inventing a duration in the generic host would create false precision.
+`OXE-1.1` does not claim timeout containment: neither the fixed-point host nor
+its tests define an observer process boundary or timeout budget. Independent
+OXE-1.3 design review rejected a synchronous app-server observer hook. OXE-1.3a
+must define and test a bounded asynchronous handoff, queue saturation, hung
+callback containment, sanitized loss signal, and shutdown/drain semantics
+before the observer hook lands. Inventing only a callback duration would not
+satisfy the non-blocking architecture.
 
 ## Kernel Hook Ownership
 
-`OXE-1.2` and `OXE-1.3` must use the reviewed lifecycle call sites, not invent
-adjacent seams. They may not reproduce the current manifest fingerprints:
+`OXE-1.2`, `OXE-1.3`, and its internal `OXE-1.3a` subcheckpoint must use the
+reviewed lifecycle call sites, not invent adjacent seams. They may not reproduce
+the current manifest fingerprints:
 `OXE-1.1a` proved those patches call an obsolete facade and do not compile
 against this host. Each owning MIU must create its context/differential RED
 tests, remeasure the exact compatible patch, and receive architecture review
@@ -306,11 +333,14 @@ before revising its manifest entries.
 3. Authorization: capture one `TurnContext` at turn start and carry that same
    immutable value through every recursive app-server receive-loop path. Call
    `Extensions.authorize/2` only for parsed approval/tool intents.
-4. Observer: after an immutable app-server event is assembled and before the
-   existing subscriber callback, call `Extensions.record/1`.
+4. Observer (internal `OXE-1.3a` only): after an immutable app-server event is assembled,
+   submit its versioned envelope to a bounded asynchronous dispatcher before
+   the existing subscriber callback. Full, hung, or failed observer work must
+   not block or alter the subscriber.
 
-`OXE-1.2` and `OXE-1.3` record independently reviewed replacement measurements
-without changing manifest authority piecemeal. `OXE-1.4` atomically revises the
+`OXE-1.2`, `OXE-1.3`, and the internal `OXE-1.3a` subcheckpoint record
+independently reviewed replacement measurements without changing manifest
+authority piecemeal. `OXE-1.4` atomically revises the
 three registered fingerprints/ceilings, makes all three paths required, and
 proves them present together. A fingerprint mismatch stops the MIU and requires
 a new measured candidate plus architecture review; it is not fixed by editing
@@ -339,9 +369,10 @@ an approval request and prove both that the same `TurnContext` identity reaches
 the facade and that `:kernel_default` preserves the old auto-approve versus
 approval-required result.
 
-The observer fixture runs three cases: disabled, no-op, and raising observer.
-All three must produce the same controller/authorization decision and existing
-subscriber sequence. Only the raising case adds one sanitized operator log.
+The OXE-1.3a observer fixture runs disabled, no-op, full-queue, hung, raising,
+throwing, and exiting cases. All must produce the same
+controller/authorization decision and existing subscriber sequence. Failure or
+loss adds only the documented sanitized operator evidence.
 
 ## Red-First Test Plan
 
@@ -374,8 +405,8 @@ fail because the host modules do not exist.
 - no-op admission and delivery match the pre-hook branch observations;
 - recursive app-server notifications preserve one immutable turn context;
 - no-op authorization preserves both auto-approve and approval-required cases;
-- observer disabled/failed/no-op cases have identical decisions and subscriber
-  ordering;
+- OXE-1.3a observer disabled/full/hung/failed/no-op cases have identical
+  decisions and subscriber ordering;
 - `mix extensions.audit --only budget` fails until each owned manifest path is
   required and matches its reviewed fingerprint;
 - direct imports from a pinned kernel file to any adapter fail;
@@ -487,8 +518,11 @@ found three design-document gaps and corrected them before the red checkpoint:
    Registry decoding now names the real input and does not claim duplicate-YAML
    evidence that the upstream loader has already discarded.
 3. Fixture routing and a BEAM-lifetime latch need an explicit test boundary.
-   The production facade remains four operations with no injection argument;
-   only the test build gets a closed fixture catalog and reset helper.
+   The OXE-1.1 production facade remains four operations with no injection
+   argument; only the test build gets a closed fixture catalog and reset
+   helper. OXE-1.3 later adds the separately documented `capture_turn/1` and
+   `bind_turn/2` kernel lifecycle helpers without changing the four adapter
+   interfaces.
 
 That design review did not by itself clear a kernel path, manifest requirement,
 or Orocsy adapter.
@@ -521,8 +555,18 @@ Standards re-review reported no finding. `OXE-1.1a` is cleared at `0ea6f5f`.
 The `OXE-1.2` RED checkpoint is recorded in
 [`openai_extension_oxe12_admission_delivery_hooks.md`](openai_extension_oxe12_admission_delivery_hooks.md).
 Its GREEN candidate now implements facade enrichment and both lifecycle hooks
-without absorbing authorization, observer, Orocsy policy, or
+without absorbing authorization, observer dispatch, Orocsy policy, or
 manifest-finalization scope. Final review clears its measured 24-line admission
 and 15-line delivery patches at `943fbdd`. Begin OXE-1.3's immutable turn
-context, authorization, and observer RED design; the later manifest-owning
-checkpoint will activate all reviewed paths together.
+context and authorization RED design; OXE-1.3a owns observation, and the later
+manifest-owning checkpoint will activate all reviewed paths together.
+
+The OXE-1.3 contract is recorded in
+[`openai_extension_oxe13_turn_authorization.md`](openai_extension_oxe13_turn_authorization.md).
+It owns one facade-captured turn snapshot, six closed parsed intent products,
+request-scoped allow/deny protocol mappings, and capture-failure behavior.
+Observer activation is split to OXE-1.3a so the required bounded asynchronous
+handoff and versioned correlation envelope receive their own RED/GREEN gate.
+Final Spec and Standards review clear the authorization-only OXE-1.3 RED
+checkpoint at 57 tests: 56 expected semantic failures and one passing no-op
+differential. No production module, pinned kernel path, or manifest changed.

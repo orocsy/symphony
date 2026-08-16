@@ -32,7 +32,8 @@ if config_env() == :test do
       },
       command_authorization: %{
         "noop" => SymphonyElixir.Extensions.Noop.CommandAuthorization,
-        "fixture" => SymphonyElixir.ExtensionHostFixtures.CommandAuthorization
+        "fixture" => SymphonyElixir.ExtensionHostFixtures.CommandAuthorization,
+        "turn_fixture" => SymphonyElixir.ExtensionTurnFixtures.CommandAuthorization
       },
       observers: %{
         "noop" => SymphonyElixir.Extensions.Noop.DeliveryObserver,

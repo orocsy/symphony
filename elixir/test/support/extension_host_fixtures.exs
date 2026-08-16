@@ -203,3 +203,90 @@ defmodule SymphonyElixir.ExtensionLifecycleFixtures.DeliveryController do
     end
   end
 end
+
+defmodule SymphonyElixir.ExtensionTurnFixtures do
+  @moduledoc false
+
+  @recipient :oxe13_extension_fixture_recipient
+
+  def notify(message) do
+    if recipient = Process.whereis(@recipient), do: send(recipient, message)
+    :ok
+  end
+
+  def option(value, key) when is_map(value) and is_binary(key) do
+    value
+    |> Map.get(:options, %{})
+    |> Map.get(key)
+  end
+
+  def option(_value, _key), do: nil
+end
+
+defmodule SymphonyElixir.ExtensionTurnFixtures.CommandAuthorization do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.CommandAuthorization
+
+  alias SymphonyElixir.ExtensionHostFixtures.Action
+  alias SymphonyElixir.Extensions.ExtensionFailure
+  alias SymphonyElixir.ExtensionTurnFixtures
+
+  @impl true
+  def authorize(intent, context) do
+    :ok = ExtensionTurnFixtures.notify({:oxe13_authorization, self(), intent, context})
+    :ok = wait_if_paused(context)
+
+    context
+    |> authorization_action()
+    |> Action.run(authorization_result(context))
+  end
+
+  defp wait_if_paused(context) do
+    if ExtensionTurnFixtures.option(context, "authorization_pause") do
+      receive do
+        :oxe13_continue -> :ok
+      after
+        1_000 -> raise "OXE-1.3 authorization fixture timed out"
+      end
+    else
+      :ok
+    end
+  end
+
+  defp authorization_result(context) do
+    case ExtensionTurnFixtures.option(context, "authorization_result") do
+      "allow" ->
+        :allow
+
+      "allow_once" ->
+        {:allow_once, %{class: :fixture_lease}}
+
+      "deny" ->
+        {:deny, %{code: :fixture_denied}}
+
+      "error" ->
+        {:error,
+         %ExtensionFailure{
+           code: :fixture_authorization_failed,
+           interface: :command_authorization,
+           reason: %{secret: "authorization-reason-do-not-log"}
+         }}
+
+      "malformed" ->
+        :malformed
+
+      _other ->
+        :kernel_default
+    end
+  end
+
+  defp authorization_action(context) do
+    case ExtensionTurnFixtures.option(context, "authorization_action") do
+      "raise" -> :raise
+      "throw" -> :throw
+      "exit" -> :exit
+      _other -> nil
+    end
+  end
+end
