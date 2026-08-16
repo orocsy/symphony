@@ -3,7 +3,10 @@ defmodule SymphonyElixir.Extensions.Noop.CommandAuthorization do
 
   @behaviour SymphonyElixir.Extensions.CommandAuthorization
 
+  alias SymphonyElixir.Extensions.CommandIntent
+  alias SymphonyElixir.Extensions.TurnContext
+
   @impl true
-  @spec authorize(term(), term()) :: :kernel_default
+  @spec authorize(CommandIntent.t(), TurnContext.t()) :: :kernel_default
   def authorize(_intent, _context), do: :kernel_default
 end

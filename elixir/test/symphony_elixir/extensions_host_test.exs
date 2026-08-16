@@ -3,7 +3,6 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
   alias SymphonyElixir.ExtensionRegistry
   alias SymphonyElixir.Extensions
-  alias SymphonyElixir.Extensions.ExtensionFailure
   alias SymphonyElixir.Extensions.ObserverFailure
 
   @fixture_recipient :oxe11_extension_fixture_recipient
@@ -11,11 +10,16 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     SymphonyElixir.Extensions,
     SymphonyElixir.ExtensionRegistry,
     SymphonyElixir.Extensions.AdmissionContext,
+    SymphonyElixir.Extensions.AppServerAuthorization,
+    SymphonyElixir.Extensions.CommandIntent,
+    SymphonyElixir.Extensions.CommandIntentParser,
     SymphonyElixir.Extensions.DeliveryContext,
     SymphonyElixir.Extensions.DeliveryEvent,
     SymphonyElixir.Extensions.DispatchAdmission,
     SymphonyElixir.Extensions.DeliveryController,
     SymphonyElixir.Extensions.CommandAuthorization,
+    SymphonyElixir.Extensions.TurnContext,
+    SymphonyElixir.Extensions.TurnSeed,
     SymphonyElixir.Extensions.DeliveryObserver,
     SymphonyElixir.Extensions.Noop.DispatchAdmission,
     SymphonyElixir.Extensions.Noop.DeliveryController,
@@ -31,26 +35,38 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   end
 
   test "routes every facade operation through the locked registry" do
-    install_extensions!("fixture", "fixture", "fixture", ["fixture"])
+    install_extensions!("fixture", "fixture", "fixture", ["fixture"], %{
+      "authorization_result" => "allow",
+      "marker" => "fixture"
+    })
+
     issue = %Issue{id: "issue-1", identifier: "OXE-1", state: "Todo"}
     facts = delivery_facts(issue)
     event = %{type: :notification, test_pid: self()}
-    intent = %{kind: :shell, command: "git status"}
-
-    turn_context = %{test_pid: self(), result: :allow}
 
     assert :kernel_default == call(:evaluate_admission, [issue, 0])
     assert_receive {:dispatch_admission, ^issue, admission_context}
-    assert admission_context.options == %{"marker" => "fixture"}
+
+    assert admission_context.options == %{
+             "authorization_result" => "allow",
+             "marker" => "fixture"
+           }
 
     assert :kernel_default == call(:handle_delivery, [:workspace_ready, facts])
     assert_receive {:delivery_controller, delivery_event, delivery_context}
     assert delivery_event.type == :workspace_ready
     assert delivery_context.issue == issue
-    assert delivery_context.options == %{"marker" => "fixture"}
 
-    assert :allow == call(:authorize, [intent, turn_context])
-    assert_receive {:command_authorization, ^intent, ^turn_context}
+    assert delivery_context.options == %{
+             "authorization_result" => "allow",
+             "marker" => "fixture"
+           }
+
+    turn_context = capture_turn_context!(issue)
+    request = authorization_request()
+    assert :allow == call(:authorize, [request, turn_context])
+    assert_receive {:command_authorization, intent, ^turn_context}
+    assert %Extensions.CommandIntent{} = intent
 
     assert :ok == call(:record, [event])
     assert_receive {:delivery_observer, ^event}
@@ -58,10 +74,13 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
   test "returns kernel_default through every production no-op decision interface" do
     issue = %Issue{id: "issue-2", identifier: "OXE-2", state: "Todo"}
+    context = capture_turn_context!(issue)
+    intent = closed_authorization_intent()
 
     assert :kernel_default == call(:evaluate_admission, [issue, 0])
     assert :kernel_default == call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
-    assert :kernel_default == call(:authorize, [%{kind: :shell}, %{}])
+    assert :kernel_default == authorize_for(issue)
+    assert :kernel_default == Extensions.Noop.CommandAuthorization.authorize(intent, context)
     assert :ok == call(:record, [%{type: :notification}])
   end
 
@@ -71,13 +90,14 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
     reset_registry_if_available()
 
-    assert :kernel_default == call(:authorize, [%{kind: :shell}, %{}])
+    assert :kernel_default == authorize_for(issue)
     assert :ok == call(:record, [%{type: :notification}])
   end
 
   test "accepts valid typed decisions and stamps adapter failures at the facade" do
     install_extensions!("fixture", "fixture", "fixture", [], %{
       "admission_result" => "admit",
+      "authorization_result" => "allow_once",
       "delivery_result" => "continue"
     })
 
@@ -89,14 +109,11 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert {:ok, :continue, [%{type: :continued}]} =
              call(:handle_delivery, [:workspace_ready, delivery_facts(issue)])
 
-    assert {:allow_once, %{lease: "one"}} =
-             call(:authorize, [
-               %{kind: :shell},
-               %{test_pid: self(), result: {:allow_once, %{lease: "one"}}}
-             ])
+    assert {:allow_once, %{lease: "one"}} = authorize_for(issue)
 
     configure_extension_options!(%{
       "admission_result" => "error",
+      "authorization_result" => "error",
       "delivery_result" => "error"
     })
 
@@ -112,16 +129,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert stamped_delivery.adapter == SymphonyElixir.ExtensionHostFixtures.DeliveryController
     assert String.starts_with?(stamped_delivery.registry_revision, "sha256:")
 
-    authorization_failure = %ExtensionFailure{
-      code: :fixture_failure,
-      interface: :command_authorization
-    }
-
-    assert {:error, stamped_authorization} =
-             call(:authorize, [
-               %{kind: :shell},
-               %{test_pid: self(), result: {:error, authorization_failure}}
-             ])
+    assert {:error, stamped_authorization} = authorize_for(issue)
 
     assert stamped_authorization.adapter ==
              SymphonyElixir.ExtensionHostFixtures.CommandAuthorization
@@ -132,6 +140,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   test "rejects malformed adapter returns instead of falling back" do
     install_extensions!("fixture", "fixture", "fixture", [], %{
       "admission_result" => "malformed",
+      "authorization_result" => "malformed",
       "delivery_result" => "malformed"
     })
 
@@ -149,11 +158,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert delivery_failure.code == :invalid_adapter_return
     assert delivery_failure.interface == :delivery_controller
 
-    assert {:error, authorization_failure} =
-             call(:authorize, [
-               %{kind: :shell},
-               %{test_pid: self(), result: :malformed}
-             ])
+    assert {:error, authorization_failure} = authorize_for(issue)
 
     assert authorization_failure.code == :invalid_adapter_return
     assert authorization_failure.interface == :command_authorization
@@ -182,7 +187,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     reset_registry_if_available()
     install_extensions!("noop", "noop", "not-installed", ["noop"])
 
-    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+    assert {:error, authorization_failure} = capture_turn(issue)
     assert authorization_failure.code == :unknown_adapter
     assert authorization_failure.interface == :command_authorization
   end
@@ -206,7 +211,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     reset_registry_if_available()
     install_extension_stanza!(malformed_options)
 
-    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+    assert {:error, authorization_failure} = capture_turn(issue)
     assert authorization_failure.code == :invalid_type
     assert authorization_failure.interface == nil
   end
@@ -224,16 +229,20 @@ defmodule SymphonyElixir.ExtensionsHostTest do
 
     reset_registry_if_available()
     install_extensions!("noop", "noop", "noop", ["noop"])
-    assert :kernel_default == call(:authorize, [%{kind: :shell}, %{}])
+    context = capture_turn_context!(issue)
+    assert :kernel_default == call(:authorize, [authorization_request(), context])
     install_extensions!("noop", "noop", "fixture", ["noop"])
 
-    assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+    assert {:error, authorization_failure} =
+             call(:authorize, [authorization_request(), context])
+
     assert authorization_failure.code == :extension_registry_restart_required
     assert authorization_failure.interface == :command_authorization
   end
 
   test "normalizes delivery and authorization adapter failures" do
     install_extensions!("fixture", "fixture", "fixture", [], %{
+      "authorization_action" => "throw",
       "delivery_action" => "raise"
     })
 
@@ -248,11 +257,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
     assert delivery_failure.code == :adapter_failure
     assert delivery_failure.reason == :raise
 
-    assert {:error, authorization_failure} =
-             call(:authorize, [
-               %{kind: :shell},
-               %{test_pid: self(), action: :throw, result: :allow}
-             ])
+    assert {:error, authorization_failure} = authorize_for(issue)
 
     assert authorization_failure.code == :adapter_failure
     assert authorization_failure.reason == :throw
@@ -339,7 +344,7 @@ defmodule SymphonyElixir.ExtensionsHostTest do
       assert delivery_failure.interface == :delivery_controller
       assert delivery_failure.reason == :workflow_unavailable
 
-      assert {:error, authorization_failure} = call(:authorize, [%{kind: :shell}, %{}])
+      assert {:error, authorization_failure} = capture_turn(issue)
       assert authorization_failure.code == :extension_configuration_unavailable
       assert authorization_failure.interface == :command_authorization
       assert authorization_failure.reason == :workflow_unavailable
@@ -362,6 +367,49 @@ defmodule SymphonyElixir.ExtensionsHostTest do
   end
 
   defp call(function, arguments), do: apply(Extensions, function, arguments)
+
+  defp authorize_for(issue) do
+    context = capture_turn_context!(issue)
+    call(:authorize, [authorization_request(), context])
+  end
+
+  defp capture_turn(issue) do
+    call(:capture_turn, [
+      {issue, "/tmp/#{issue.identifier}", nil, "thread-host-fixture"}
+    ])
+  end
+
+  defp capture_turn_context!(issue) do
+    assert {:ok, seed} = capture_turn(issue)
+    assert {:ok, context} = call(:bind_turn, [seed, "turn-host-fixture"])
+    context
+  end
+
+  defp authorization_request do
+    {"item/fileChange/requestApproval",
+     %{
+       "id" => 501,
+       "method" => "item/fileChange/requestApproval",
+       "params" => %{
+         "itemId" => "item-host-fixture",
+         "threadId" => "thread-host-fixture",
+         "turnId" => "turn-host-fixture"
+       }
+     }}
+  end
+
+  defp closed_authorization_intent do
+    %Extensions.CommandIntent{
+      request_id: 501,
+      operation: %Extensions.CommandIntent.FileChangeApproval{
+        grant_root: nil,
+        item_id: "item-host-fixture",
+        reason: nil,
+        thread_id: "thread-host-fixture",
+        turn_id: "turn-host-fixture"
+      }
+    }
+  end
 
   defp install_extensions!(
          admission,

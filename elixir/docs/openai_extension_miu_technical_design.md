@@ -1,10 +1,10 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 RED cleared, GREEN next
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 GREEN gate passed, independent review pending
 
 Date: 2026-07-29
 
-Last reviewed: 2026-08-15
+Last reviewed: 2026-08-16
 
 Parent architecture:
 `openai_upstream_orocsy_extension_architecture.md`, revision 2
@@ -735,4 +735,12 @@ internal OXE-1.3a review subcheckpoint because the parent architecture requires
 a bounded asynchronous handoff and versioned correlation envelope; synchronous
 callback fan-out is not accepted. This does not change the four top-level MIUs.
 Final Spec and Standards review clear the 57-test authorization RED checkpoint;
-GREEN owns the next checkpoint. The manifest remains unchanged.
+the authorization-only GREEN candidate now passes the combined 74-test
+authorization/host suite and exact `make all`: 433 tests, zero failures, six
+skips, 100.00% total coverage, strict Credo clean, and zero Dialyzer errors.
+The exact `codex/app_server.ex` patch measures 61 changed lines with fingerprint
+`8a2c7cbe484e7123a136133f3dbec09f88c586191195e61a4a905963369776e`;
+the provisional three-file aggregate is 100 lines. The manifest remains
+unchanged and rejects the three replacement measurements as designed.
+Independent GREEN review is the remaining authorization gate before OXE-1.3a
+observer RED design begins.

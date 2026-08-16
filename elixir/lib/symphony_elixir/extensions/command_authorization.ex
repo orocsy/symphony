@@ -1,7 +1,9 @@
 defmodule SymphonyElixir.Extensions.CommandAuthorization do
   @moduledoc "Adapter contract for one parsed command authorization intent."
 
+  alias SymphonyElixir.Extensions.CommandIntent
   alias SymphonyElixir.Extensions.ExtensionFailure
+  alias SymphonyElixir.Extensions.TurnContext
 
   @type result ::
           :kernel_default
@@ -10,5 +12,5 @@ defmodule SymphonyElixir.Extensions.CommandAuthorization do
           | {:deny, term()}
           | {:error, ExtensionFailure.t()}
 
-  @callback authorize(term(), term()) :: result()
+  @callback authorize(CommandIntent.t(), TurnContext.t()) :: result()
 end

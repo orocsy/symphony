@@ -656,8 +656,9 @@ Rules:
   immutable admission/turn snapshot.
 - `CommandIntent` is a tagged union for shell commands, dynamic tool calls,
   tracker mutations, and provider-native operations.
-- An immutable `TurnContext` is captured once at session/turn start and passed
-  through the app-server receive loop with each authorization request.
+- Immutable turn authority is captured before `turn/start`, bound to the
+  server-returned turn id immediately afterward, and passed through the
+  app-server receive loop with each authorization request.
 - Write scope implies read authority for the same MIU target.
 - Existing targets must resolve to regular files inside the workspace.
 - Missing creatable targets may receive one exact-path containment probe.
@@ -674,10 +675,14 @@ scope-blocked result containing the requested path, operation, and reason. The
 delivery policy parks for contract-owner review. The implementation worker may
 request authority; it may not grant itself authority.
 
-The kernel client only parses the app-server request, captures the immutable
-context, and calls `SymphonyElixir.Extensions.authorize/2`. Import-graph
-walking, TypeScript alias resolution, test-to-source inference, review-derived
-scope, and Orocsy policy derivation remain behind the Orocsy adapter.
+The kernel client forwards closed lifecycle and decoded request facts through
+`SymphonyElixir.Extensions.capture_turn/3` and
+`SymphonyElixir.Extensions.handle_turn_authorization/3`. The deep facade owns
+capture/bind failure disposition, parses the closed `CommandIntent`, calls
+`authorize/2`, maps non-default decisions to the pinned protocol, and invokes
+the exact existing fallback for `:kernel_default`. Import-graph walking,
+TypeScript alias resolution, test-to-source inference, review-derived scope,
+and Orocsy policy derivation remain behind the Orocsy adapter.
 
 The generic immutable-context/authorization callback should be proposed
 upstream before the local hot receive loop is forked. Until accepted upstream,

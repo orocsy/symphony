@@ -1,6 +1,6 @@
 # OXE-1.3 Immutable Turn Authorization
 
-Status: RED cleared; GREEN implementation next
+Status: GREEN implemented and exact gate green; independent GREEN review pending
 
 Date: 2026-08-16
 
@@ -39,12 +39,15 @@ fifth Slice 1 MIU, and must clear before `OXE-1.4` can activate the manifest.
 ## Facade Boundary
 
 The four adapter interfaces remain admission, delivery, authorization, and
-observation. OXE-1.1 began with four public facade functions, one for each
-interface. `capture_turn/1` and `bind_turn/2` add two kernel-facing lifecycle
-helpers, making six public facade functions without adding an adapter
-interface. They own workflow/registry/option snapshot construction and
-server-returned turn correlation so the pinned client never performs adapter
-lookup or constructs adapter-visible structs:
+observation. OXE-1.1 began with four public facade function/arities, one for
+each interface. OXE-1.3 adds four kernel-facing lifecycle and protocol-bridge
+function/arities without adding an adapter interface: `capture_turn/1`,
+`capture_turn/3`, `bind_turn/2`, and `handle_turn_authorization/3`. The facade
+therefore exposes eight public function/arities under seven operation names.
+The added entry points own workflow/registry/option snapshot construction,
+server-returned turn correlation, capture/bind failure disposition, protocol
+response construction, and no-op delegation so the pinned client never
+performs adapter lookup or constructs adapter-visible structs:
 
 ```elixir
 @type worker_host :: String.t() | nil
@@ -57,9 +60,22 @@ lookup or constructs adapter-visible structs:
 @spec bind_turn(TurnSeed.t(), String.t()) ::
         {:ok, TurnContext.t()} | {:error, ExtensionFailure.t()}
 
+@spec capture_turn(turn_facts(), (-> term()), (-> :ok)) ::
+        {:ok, String.t(), TurnContext.t()} | {:error, term()}
+
 @spec authorize(app_server_request_facts(), TurnContext.t()) ::
         CommandAuthorization.result()
+
+@spec handle_turn_authorization(
+        app_server_authorization_facts(), TurnContext.t(), function()
+      ) :: AppServerAuthorization.result()
 ```
+
+`capture_turn/1`, `bind_turn/2`, and `authorize/2` define the typed extension
+boundary. The two arity-three functions are deep kernel bridges: they compose
+those typed operations with the pinned client's existing start/receive-loop
+lifecycle while keeping lifecycle error handling and JSON-RPC response mapping
+out of `codex/app_server.ex`. They do not route a fifth adapter callback.
 
 `capture_turn/1` resolves the immutable registry and a fresh options snapshot
 once per `AppServer.run_turn/4`, before the kernel sends `turn/start`. The
@@ -71,9 +87,10 @@ workspace and thread-id binaries, and a nil or non-empty binary worker host;
 tuple arity alone is not sufficient.
 
 `turn/start` is the first point at which the server returns the current turn
-id. Immediately afterward, before any subscriber message or receive-loop
-entry, the kernel calls `bind_turn/2`. The facade validates the id and converts
-the `TurnSeed` into the immutable adapter-visible `TurnContext`. This two-phase
+id. `capture_turn/3` captures before invoking the supplied start callback and,
+immediately after a successful start, calls `bind_turn/2` before any subscriber
+message or receive-loop entry. The facade validates the id and converts the
+`TurnSeed` into the immutable adapter-visible `TurnContext`. This two-phase
 construction is required: capturing after `turn/start` would make configuration
 failure too late, while omitting `turn_id` would allow a request from another
 turn to borrow the active policy snapshot.
@@ -90,8 +107,9 @@ and returns
 The caller may still call idempotent `stop_session/1`, but it may not reuse the
 invalidated session.
 
-The kernel-facing `authorize/2` accepts the decoded method/payload facts and a
-facade-created bound context. The facade validates the targeted schema,
+`handle_turn_authorization/3` accepts the pinned client's decoded request facts,
+the facade-created bound context, and its existing no-op fallback. It delegates
+closed decision work to `authorize/2`. The facade validates the targeted schema,
 requires request `threadId`/`turnId` (or legacy `conversationId`) to match that
 context, and constructs the closed `CommandIntent` before invoking the adapter;
 neither the complete JSON-RPC payload nor its `params` map crosses that
@@ -338,9 +356,10 @@ the pinned Elixir client.
 
 ## Immutable Recursion
 
-The current receive loop carries only the derived `auto_approve_requests`
-Boolean. GREEN replaces that recursive value with one turn-authority product
-containing the existing Boolean and the captured `TurnContext`. Every
+Before OXE-1.3, the receive loop carried only the derived
+`auto_approve_requests` Boolean. GREEN replaces that recursive value with one
+turn-authority product containing the existing Boolean and the captured
+`TurnContext`. Every
 `receive_loop`, partial-line, decoded-message, approval, and unhandled-message
 recursion carries the same value. No recursive branch re-reads workflow options
 or reconstructs the context.
@@ -428,14 +447,32 @@ app-server/host/registry suite passes 40 tests. Formatter, public-spec checking,
 and strict Credo are clean. No production module or pinned kernel file changes
 in this RED checkpoint.
 
+## GREEN Evidence
+
+The authorization-only implementation keeps the observer surface inactive and
+changes no manifest authority. The exact combined authorization/host command
+passes 74 tests. The complete repository gate passes 433 tests with zero
+failures and six skips, 100.00% total coverage, public specs, strict Credo, and
+Dialyzer with zero errors. The baseline audit remains green.
+
+The new boundary coverage includes omitted and nil optional protocol fields,
+every retained malformed field class, empty worker host, invalid seed/context,
+registry revision drift, pre-receive-loop start failure, and unsafe-id port
+closure for both live and already-closed ports. These cases keep malformed
+evidence out of the adapter rather than adding coverage exclusions.
+
 ## Manifest Boundary
 
 `OXE-1.3` changes neither `UPSTREAM_PATCH_BUDGET.yml` nor the already reviewed
-OXE-1.2 evidence. After GREEN, remeasure only
-`elixir/lib/symphony_elixir/codex/app_server.ex`. Record the exact replacement
-fingerprint and line count in this trace after architecture review. OXE-1.4
-atomically promotes all three reviewed paths and revises the aggregate ceiling;
-piecemeal authority is forbidden.
+OXE-1.2 evidence. The implemented
+`elixir/lib/symphony_elixir/codex/app_server.ex` patch measures 61 changed lines
+(44 additions, 17 deletions) with replacement fingerprint
+`8a2c7cbe484e7123a136133f3dbec09f88c586191195e61a4a905963369776e`.
+Together with the reviewed 24-line orchestrator and 15-line agent-runner
+patches, the provisional aggregate is 100 changed kernel lines. The stale
+40-line manifest rejects all three replacement fingerprints and ceilings as
+designed. OXE-1.4 atomically promotes the independently reviewed paths and
+revises the aggregate ceiling; piecemeal authority is forbidden.
 
 ## Independent Review Disposition
 
@@ -454,6 +491,11 @@ reviewed fixed candidate contains no production or manifest edit: 57 focused
 tests reproduce 56 expected semantic RED failures and one passing no-op
 differential; the unchanged app-server/host/registry baseline passes 40 tests;
 formatter, public specs, strict Credo, and diff checking are clean.
+
+The GREEN candidate now satisfies the executable contract and exact repository
+gate with the measured 61-line seam. Its production code and measurement still
+require the independent GREEN Spec/Standards pass named by acceptance condition
+11; this document does not treat the local gate as that independent clearance.
 
 ## Acceptance Conditions
 
@@ -482,8 +524,8 @@ formatter, public specs, strict Credo, and diff checking are clean.
 
 ## Next Action
 
-Implement the authorization-only GREEN candidate. Change only the generic host
-modules plus the owned pinned path `codex/app_server.ex`; keep the manifest and
-observer surface unchanged. Make all 57 focused tests green, preserve the
-40-test baseline, remeasure the exact kernel delta, then obtain independent
-GREEN review before the internal OXE-1.3a subcheckpoint begins.
+Obtain independent GREEN Spec/Standards review of the authorization-only
+candidate and its measured 61-line AppServer seam. If review clears it, begin
+the internal OXE-1.3a RED design for a bounded asynchronous observer dispatcher
+and versioned envelope. Keep the manifest unchanged until OXE-1.4 promotes all
+three reviewed kernel patches atomically.

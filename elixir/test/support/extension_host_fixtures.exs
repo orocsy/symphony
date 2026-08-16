@@ -98,11 +98,47 @@ defmodule SymphonyElixir.ExtensionHostFixtures.CommandAuthorization do
   @moduledoc false
 
   alias SymphonyElixir.ExtensionHostFixtures.Action
+  alias SymphonyElixir.Extensions.ExtensionFailure
 
+  @behaviour SymphonyElixir.Extensions.CommandAuthorization
+
+  @impl true
   def authorize(intent, context) do
-    send(context.test_pid, {:command_authorization, intent, context})
-    Action.run(Map.get(context, :action), Map.fetch!(context, :result))
+    :ok = SymphonyElixir.ExtensionHostFixtures.notify({:command_authorization, intent, context})
+
+    context
+    |> SymphonyElixir.ExtensionHostFixtures.option("authorization_action")
+    |> fixture_action()
+    |> Action.run(authorization_result(context))
   end
+
+  defp authorization_result(context) do
+    case SymphonyElixir.ExtensionHostFixtures.option(context, "authorization_result") do
+      "allow" ->
+        :allow
+
+      "allow_once" ->
+        {:allow_once, %{lease: "one"}}
+
+      "error" ->
+        {:error,
+         %ExtensionFailure{
+           code: :fixture_failure,
+           interface: :command_authorization
+         }}
+
+      "malformed" ->
+        :malformed
+
+      _other ->
+        :kernel_default
+    end
+  end
+
+  defp fixture_action("raise"), do: :raise
+  defp fixture_action("throw"), do: :throw
+  defp fixture_action("exit"), do: :exit
+  defp fixture_action(_other), do: nil
 end
 
 defmodule SymphonyElixir.ExtensionHostFixtures.DeliveryObserver do

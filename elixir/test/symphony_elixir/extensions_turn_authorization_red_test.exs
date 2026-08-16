@@ -223,6 +223,165 @@ defmodule SymphonyElixir.ExtensionsTurnAuthorizationRedTest do
     refute_receive {:oxe13_authorization, _, _, _}
   end
 
+  test "facade covers optional protocol fields and rejects every retained boundary shape" do
+    configure_extensions!(%{})
+    current_issue = issue("parser-boundaries", "OXE-PARSER-BOUNDARIES")
+
+    assert {:ok, seed} =
+             call(:capture_turn, [
+               {current_issue, "/tmp/parser-boundaries", nil, "thread-protocol"}
+             ])
+
+    assert {:ok, context} = call(:bind_turn, [seed, "turn-protocol"])
+
+    {command_method, command_payload} = protocol_case(:command_execution).request
+
+    omitted_command_payload =
+      update_in(command_payload, ["params"], fn params ->
+        Map.drop(params, [
+          "approvalId",
+          "command",
+          "commandActions",
+          "cwd",
+          "networkApprovalContext",
+          "proposedExecpolicyAmendment",
+          "proposedNetworkPolicyAmendments",
+          "reason"
+        ])
+      end)
+
+    assert :kernel_default == Extensions.authorize({command_method, omitted_command_payload}, context)
+
+    assert_receive {:oxe13_authorization, _pid,
+                    %Extensions.CommandIntent{
+                      operation: %Extensions.CommandIntent.CommandExecution{
+                        approval_id: nil,
+                        command: nil,
+                        command_actions: nil,
+                        cwd: nil,
+                        network_approval: nil,
+                        proposed_execpolicy_amendment: nil,
+                        proposed_network_policy_amendments: nil,
+                        reason: nil
+                      }
+                    }, ^context}
+
+    nil_command_payload =
+      command_payload
+      |> put_in(["params", "commandActions"], nil)
+      |> put_in(["params", "networkApprovalContext"], nil)
+      |> put_in(["params", "proposedExecpolicyAmendment"], nil)
+      |> put_in(["params", "proposedNetworkPolicyAmendments"], nil)
+
+    assert :kernel_default == Extensions.authorize({command_method, nil_command_payload}, context)
+    assert_receive {:oxe13_authorization, _pid, %Extensions.CommandIntent{}, ^context}
+
+    {tool_method, tool_payload} = protocol_case(:tool_approval).request
+
+    optional_boolean_payload =
+      update_in(tool_payload, ["params", "questions"], fn questions ->
+        Enum.map(questions, &Map.drop(&1, ["isOther", "isSecret"]))
+      end)
+
+    assert :kernel_default == Extensions.authorize({tool_method, optional_boolean_payload}, context)
+    assert_receive {:oxe13_authorization, _pid, %Extensions.CommandIntent{}, ^context}
+
+    invalid_cases = [
+      {{command_method, Map.put(command_payload, "method", "item/fileChange/requestApproval")}, :request_method_mismatch},
+      {mutate_params(command_method, command_payload, &Map.put(&1, "approvalId", 17)), :optional_binary_invalid},
+      {mutate_params(command_method, command_payload, &Map.put(&1, "cwd", "relative")), :absolute_path_invalid},
+      {mutate_params(command_method, command_payload, &Map.put(&1, "cwd", 17)), :optional_binary_invalid},
+      {mutate_params(command_method, command_payload, &Map.put(&1, "networkApprovalContext", [])), :network_approval_invalid},
+      {mutate_params(command_method, command_payload, fn params ->
+         Map.put(params, "proposedNetworkPolicyAmendments", ["not-an-amendment"])
+       end), :network_amendment_invalid},
+      {mutate_params(command_method, command_payload, fn params ->
+         Map.put(params, "proposedExecpolicyAmendment", ["git", 17])
+       end), :string_list_invalid},
+      {mutate_params(command_method, command_payload, fn params ->
+         Map.put(params, "proposedExecpolicyAmendment", "git")
+       end), :string_list_invalid},
+      {mutate_params(command_method, command_payload, &Map.put(&1, "commandActions", %{})), :optional_list_invalid},
+      {mutate_protocol_request(:legacy_exec_command, &Map.delete(&1, "command")), :string_list_invalid},
+      {mutate_protocol_request(:legacy_exec_command, &Map.put(&1, "command", ["git", 17])), :string_list_invalid},
+      {mutate_protocol_request(:legacy_exec_command, &Map.put(&1, "parsedCmd", %{})), :required_list_invalid},
+      {mutate_protocol_request(:legacy_apply_patch, &Map.put(&1, "fileChanges", [])), :file_changes_invalid},
+      {mutate_protocol_request(:dynamic_tool_call, &Map.put(&1, "arguments", :not_json)), :json_invalid},
+      {mutate_protocol_request(:tool_approval, fn params ->
+         update_in(params, ["questions", Access.at(0), "options"], fn _options -> [] end)
+       end), :approval_options_empty},
+      {mutate_protocol_request(:tool_approval, fn params ->
+         put_in(params, ["questions", Access.at(0), "isOther"], "false")
+       end), :optional_boolean_invalid}
+    ]
+
+    for {request, reason} <- invalid_cases do
+      assert {:error,
+              %ExtensionFailure{
+                code: :command_intent_invalid,
+                interface: :command_authorization,
+                reason: ^reason
+              }} = Extensions.authorize(request, context)
+    end
+
+    refute_receive {:oxe13_authorization, _, _, _}
+  end
+
+  test "facade rejects mutated authority and preserves start and closed-port boundaries" do
+    configure_extensions!(%{})
+    current_issue = issue("authority-boundaries", "OXE-AUTHORITY-BOUNDARIES")
+    facts = {current_issue, "/tmp/authority-boundaries", nil, "thread-protocol"}
+
+    assert {:ok, seed} = call(:capture_turn, [facts])
+
+    assert {:error, %ExtensionFailure{reason: :turn_seed_invalid}} =
+             call(:bind_turn, [%{seed | options: []}, "turn-protocol"])
+
+    assert {:ok, context} = call(:bind_turn, [seed, "turn-protocol"])
+    request = protocol_case(:file_change).request
+
+    assert {:error, %ExtensionFailure{reason: :turn_context_invalid}} =
+             Extensions.authorize(request, %{context | options: []})
+
+    assert {:error,
+            %ExtensionFailure{
+              code: :extension_registry_restart_required,
+              reason: :turn_registry_revision_changed
+            }} = Extensions.authorize(request, %{context | registry_revision: "sha256:forged"})
+
+    assert {:error, :fixture_start_failed} =
+             call(:capture_turn, [
+               facts,
+               fn -> {:error, :fixture_start_failed} end,
+               fn -> flunk("a pre-start failure must not invalidate a valid session") end
+             ])
+
+    port = Port.open({:spawn_executable, "/bin/cat"}, [:binary])
+    Port.close(port)
+    test_pid = self()
+
+    unsafe_request =
+      protocol_case(:command_execution).request
+      |> then(fn {method, payload} -> {method, Map.delete(payload, "id")} end)
+
+    {method, payload} = unsafe_request
+
+    on_message = fn event -> send(test_pid, {:closed_port_event, event}) end
+    tool_executor = fn _tool, _arguments -> %{} end
+
+    facts =
+      {port, method, payload, Jason.encode!(payload), on_message, %{}, tool_executor, false}
+
+    fallback = fn _, _, _, _, _, _, _, _ ->
+      flunk("unsafe authorization must not use the kernel fallback")
+    end
+
+    assert {:unsafe_input_required, %{code: :command_intent_invalid, interface: :command_authorization}} =
+             call(:handle_turn_authorization, [facts, context, fallback])
+
+    assert_receive {:closed_port_event, %{event: :authorization_invalid, code: :command_intent_invalid}}
+  end
+
   test "turn capture normalizes unavailable workflow and invalid extension options" do
     workflow_path = Workflow.workflow_file_path()
     fixture_root = unique_root("capture-configuration")
@@ -717,7 +876,11 @@ defmodule SymphonyElixir.ExtensionsTurnAuthorizationRedTest do
     fixture =
       setup_fake_turn!("recursive", :recursive,
         approval_policy: "never",
-        options: %{"authorization_pause" => true, "marker" => "first"}
+        options: %{
+          "authorization_pause" => true,
+          "authorization_result" => "allow",
+          "marker" => "first"
+        }
       )
 
     test_pid = self()
@@ -744,7 +907,12 @@ defmodule SymphonyElixir.ExtensionsTurnAuthorizationRedTest do
     assert_closed_intent(first_intent, protocol_case(:command_execution))
     assert first_context.options["marker"] == "first"
 
-    configure_extension_options!(%{"authorization_pause" => true, "marker" => "second"})
+    configure_extension_options!(%{
+      "authorization_pause" => true,
+      "authorization_result" => "allow",
+      "marker" => "second"
+    })
+
     send(first_pid, :oxe13_continue)
 
     assert {:oxe13_subscriber, %{event: :approval_auto_approved, decision: "accept"}} =
@@ -1311,6 +1479,16 @@ defmodule SymphonyElixir.ExtensionsTurnAuthorizationRedTest do
     }
   end
 
+  defp mutate_protocol_request(protocol_name, mutate_params) do
+    protocol = protocol_case(protocol_name)
+    {method, payload} = protocol.request
+    mutate_params(method, payload, mutate_params)
+  end
+
+  defp mutate_params(method, payload, mutate_params) do
+    {method, update_in(payload, ["params"], mutate_params)}
+  end
+
   defp mutate_request_id(protocol_name, case_name, request_id) do
     protocol = protocol_case(protocol_name)
     {method, payload} = protocol.request
@@ -1365,10 +1543,19 @@ defmodule SymphonyElixir.ExtensionsTurnAuthorizationRedTest do
       |> put_in(["params", "networkApprovalContext", "protocol"], wire_protocol)
       |> put_in(["params", "proposedNetworkPolicyAmendments", Access.at(0), "action"], wire_action)
 
-    expected_operation =
+    expected_network_approval = %{
+      protocol.expected_operation.network_approval
+      | protocol: normalized_protocol
+    }
+
+    [first_amendment] = protocol.expected_operation.proposed_network_policy_amendments
+    expected_amendments = [%{first_amendment | action: normalized_action}]
+
+    expected_operation = %{
       protocol.expected_operation
-      |> put_in([:network_approval, :protocol], normalized_protocol)
-      |> put_in([:proposed_network_policy_amendments, Access.at(0), :action], normalized_action)
+      | network_approval: expected_network_approval,
+        proposed_network_policy_amendments: expected_amendments
+    }
 
     %{protocol | request: {method, payload}, expected_operation: expected_operation}
   end

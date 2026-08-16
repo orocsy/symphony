@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, Extensions, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -78,6 +78,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace,
+          worker_host: worker_host,
           dynamic_tool_binding: dynamic_tool_binding
         },
         prompt,
@@ -91,8 +92,16 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-      {:ok, turn_id} ->
+    turn_facts = {issue, workspace, worker_host, thread_id}
+
+    case Extensions.capture_turn(
+           turn_facts,
+           fn ->
+             start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy)
+           end,
+           fn -> stop_port(port) end
+         ) do
+      {:ok, turn_id, turn_context} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -107,7 +116,9 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        authority = {auto_approve_requests, turn_context}
+
+        case await_turn_completion(port, on_message, tool_executor, authority) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -118,6 +129,14 @@ defmodule SymphonyElixir.Codex.AppServer do
                thread_id: thread_id,
                turn_id: turn_id
              }}
+
+          {:error,
+           {:turn_input_required,
+            %{
+              code: :command_intent_invalid,
+              interface: :command_authorization
+            }} = reason} ->
+            {:error, reason}
 
           {:error, reason} ->
             Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
@@ -134,6 +153,12 @@ defmodule SymphonyElixir.Codex.AppServer do
 
             {:error, reason}
         end
+
+      {:error, {:extension_turn_context_failed, _code, :command_authorization} = reason} ->
+        {:error, reason}
+
+      {:error, {:extension_turn_binding_failed, _code, :command_authorization} = reason} ->
+        {:error, reason}
 
       {:error, reason} ->
         Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
@@ -498,20 +523,18 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests
+         {auto_approve_requests, turn_context} = authority
        ) do
     metadata = metadata_from_message(port, payload)
 
-    case maybe_handle_approval_request(
-           port,
-           method,
-           payload,
-           payload_string,
-           on_message,
-           metadata,
-           tool_executor,
-           auto_approve_requests
-         ) do
+    authorization_result =
+      Extensions.handle_turn_authorization(
+        {port, method, payload, payload_string, on_message, metadata, tool_executor, auto_approve_requests},
+        turn_context,
+        &maybe_handle_approval_request/8
+      )
+
+    case authorization_result do
       :input_required ->
         emit_message(
           on_message,
@@ -523,7 +546,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, authority)
+
+      {:unsafe_input_required, failure} ->
+        stop_port(port)
+        {:error, {:turn_input_required, failure}}
 
       :approval_required ->
         emit_message(
@@ -557,7 +584,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          receive_loop(port, on_message, timeout_ms, "", tool_executor, authority)
         end
     end
   end

@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 RED cleared, GREEN next; observer split to internal OXE-1.3a
+Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 GREEN gate passed, independent review pending; observer split to internal OXE-1.3a
 
 Date: 2026-08-13
 
@@ -21,10 +21,11 @@ Depends on:
 At the OXE-1.1 fixed point, build Slice 1 from a deep extension-host module
 whose interface is four facade operations, a closed immutable registry, four
 public adapter interfaces, and neutral no-op adapters. Do not change a pinned
-kernel file in `OXE-1.1`. OXE-1.3 later adds two public kernel lifecycle
-helpers, `capture_turn/1` and `bind_turn/2`, without adding a fifth adapter
-interface. These make six public facade functions over the same four adapter
-interfaces.
+kernel file in `OXE-1.1`. OXE-1.3 later adds four public kernel lifecycle and
+protocol-bridge function/arities—`capture_turn/1`, `capture_turn/3`,
+`bind_turn/2`, and `handle_turn_authorization/3`—without adding a fifth adapter
+interface. These make eight public facade function/arities under seven operation
+names over the same four adapter interfaces.
 
 The kernel hooks and their no-op differential proofs land only in the later
 MIUs that own those exact registered paths. Orocsy behavior remains absent
@@ -124,12 +125,19 @@ admission and delivery surface is:
 @spec bind_turn(TurnSeed.t(), String.t()) ::
         {:ok, TurnContext.t()} | {:error, ExtensionFailure.t()}
 
+@spec capture_turn(turn_facts(), (-> term()), (-> :ok)) ::
+        {:ok, String.t(), TurnContext.t()} | {:error, term()}
+
 @spec authorize({String.t(), map()}, TurnContext.t()) ::
         :kernel_default |
         :allow |
         {:allow_once, AuthorizationLease.t()} |
         {:deny, AuthorizationDenial.t()} |
         {:error, ExtensionFailure.t()}
+
+@spec handle_turn_authorization(
+        app_server_authorization_facts(), TurnContext.t(), function()
+      ) :: AppServerAuthorization.result()
 
 @spec record(DeliveryEvent.t()) :: :ok
 ```
@@ -139,9 +147,10 @@ registry-revision checks, exception capture,
 observer fan-out, failure normalization, typed context construction, the fresh
 options snapshot, and no-op delegation. Kernel callers learn none of those
 details. The exact `OXE-1.2` context fields and tuple order are fixed in
-`openai_extension_oxe12_admission_delivery_hooks.md`. OXE-1.3's fifth and sixth
-facade functions capture immutable authority and bind the server-returned turn
-id; neither routes an adapter callback. The existing observer input remains the
+`openai_extension_oxe12_admission_delivery_hooks.md`. OXE-1.3's four added
+facade function/arities capture immutable authority, bind the server-returned
+turn id, compose start/bind failure disposition, and map authorization results
+onto the pinned protocol; none adds an adapter callback. The existing observer input remains the
 closed workspace-ready `DeliveryEvent`; the internal OXE-1.3a review
 subcheckpoint must revise that surface to its versioned envelope before adding
 the app-server observer hook.
@@ -151,10 +160,11 @@ selection, exception/failure normalization, and observer isolation into three
 pinned kernel files. The module therefore earns its seam.
 
 Tests use the same public facade functions as kernel callers. OXE-1.1 tests use
-the original four; OXE-1.3 adds `capture_turn/1` and `bind_turn/2`. They do not
-call private routing functions or inspect registry storage. Deleting either
-lifecycle helper forces the pinned client to resolve registry/options authority
-or construct adapter-visible context, so both earn the public facade seam.
+the original four; OXE-1.3 adds the four lifecycle/protocol-bridge arities named
+above. They do not call private routing functions or inspect registry storage.
+Deleting those bridges forces the pinned client to resolve registry/options
+authority, construct adapter-visible context, normalize lifecycle failures, or
+duplicate protocol mapping, so they earn the public facade seam.
 
 ## Registry Authority And Lifetime
 
@@ -330,9 +340,11 @@ before revising its manifest entries.
 2. Delivery: after workspace creation and before repository hook/model work,
    call `Extensions.handle_delivery/2`. `:kernel_default` continues the current
    `before_run` and Codex path.
-3. Authorization: capture one `TurnContext` at turn start and carry that same
-   immutable value through every recursive app-server receive-loop path. Call
-   `Extensions.authorize/2` only for parsed approval/tool intents.
+3. Authorization: call `Extensions.capture_turn/3` around `turn/start`, carry
+   its immutable `TurnContext` through every recursive app-server receive-loop
+   path, and call `Extensions.handle_turn_authorization/3` only for targeted
+   approval/tool methods. The bridge parses and authorizes through
+   `Extensions.authorize/2`; a no-op decision invokes the exact pinned fallback.
 4. Observer (internal `OXE-1.3a` only): after an immutable app-server event is assembled,
    submit its versioned envelope to a bounded asynchronous dispatcher before
    the existing subscriber callback. Full, hung, or failed observer work must
@@ -520,8 +532,8 @@ found three design-document gaps and corrected them before the red checkpoint:
 3. Fixture routing and a BEAM-lifetime latch need an explicit test boundary.
    The OXE-1.1 production facade remains four operations with no injection
    argument; only the test build gets a closed fixture catalog and reset
-   helper. OXE-1.3 later adds the separately documented `capture_turn/1` and
-   `bind_turn/2` kernel lifecycle helpers without changing the four adapter
+   helper. OXE-1.3 later adds the separately documented four kernel lifecycle
+   and protocol-bridge function/arities without changing the four adapter
    interfaces.
 
 That design review did not by itself clear a kernel path, manifest requirement,
@@ -570,3 +582,13 @@ handoff and versioned correlation envelope receive their own RED/GREEN gate.
 Final Spec and Standards review clear the authorization-only OXE-1.3 RED
 checkpoint at 57 tests: 56 expected semantic failures and one passing no-op
 differential. No production module, pinned kernel path, or manifest changed.
+
+The authorization-only GREEN candidate now passes the combined 74-test
+authorization/host suite and exact `make all`: 433 tests, zero failures, six
+skips, 100.00% total coverage, strict Credo clean, and zero Dialyzer errors.
+Its only pinned-kernel edit is the 61-line `codex/app_server.ex` seam with
+fingerprint
+`8a2c7cbe484e7123a136133f3dbec09f88c586191195e61a4a905963369776e`.
+The manifest remains deliberately stale and fail-closed pending atomic OXE-1.4
+promotion. Independent GREEN review is the remaining OXE-1.3 authorization
+gate before OXE-1.3a observer RED design begins.
