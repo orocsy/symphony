@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1 and OXE-1.1a cleared; OXE-1.2 GREEN review rework in progress
+Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 RED design next
 
 Date: 2026-08-13
 
@@ -309,12 +309,12 @@ before revising its manifest entries.
 4. Observer: after an immutable app-server event is assembled and before the
    existing subscriber callback, call `Extensions.record/1`.
 
-`OXE-1.2` changes `required` to `true` only for `orchestrator.ex` and
-`agent_runner.ex`, after its reviewed manifest revision. `OXE-1.3` does the
-same for `codex/app_server.ex`. `OXE-1.4` proves all registered patches present
-together. A fingerprint mismatch stops the MIU and requires a new measured
-prototype plus architecture review; it is not fixed by editing the manifest to
-match unreviewed code.
+`OXE-1.2` and `OXE-1.3` record independently reviewed replacement measurements
+without changing manifest authority piecemeal. `OXE-1.4` atomically revises the
+three registered fingerprints/ceilings, makes all three paths required, and
+proves them present together. A fingerprint mismatch stops the MIU and requires
+a new measured candidate plus architecture review; it is not fixed by editing
+the manifest to match unreviewed code.
 
 ## No-Op Differential Proof
 
@@ -522,6 +522,7 @@ The `OXE-1.2` RED checkpoint is recorded in
 [`openai_extension_oxe12_admission_delivery_hooks.md`](openai_extension_oxe12_admission_delivery_hooks.md).
 Its GREEN candidate now implements facade enrichment and both lifecycle hooks
 without absorbing authorization, observer, Orocsy policy, or
-manifest-finalization scope. Independently review the measured 24-line
-admission and 15-line delivery patches before the later manifest-owning
-checkpoint makes either path required.
+manifest-finalization scope. Final review clears its measured 24-line admission
+and 15-line delivery patches at `943fbdd`. Begin OXE-1.3's immutable turn
+context, authorization, and observer RED design; the later manifest-owning
+checkpoint will activate all reviewed paths together.

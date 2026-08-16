@@ -1,6 +1,6 @@
 # OXE-1.2 Admission And Workspace-Ready Delivery Hooks
 
-Status: GREEN review rework in progress; manifest intentionally stale
+Status: GREEN cleared at `943fbdd`; manifest activation deferred to OXE-1.4
 
 Date: 2026-08-15
 
@@ -322,6 +322,14 @@ token and retry entry. Fresh-dispatch state behavior remains unchanged. The
 generic host test adapters now also declare their narrowed behaviors and
 implementations for compile-time drift checking.
 
+Final Spec re-review found no actionable issue. It independently verified both
+production retry-token cases, fresh-dispatch equivalence, the 11-test lifecycle
+and 32-test combined suites, the baseline audit, and the unchanged 24/15-line
+measurement. Final Standards re-review also found no issue in claim cleanup,
+fixture behavior conformance, deterministic option reload, or scope. The exact
+GREEN candidate is cleared at `943fbdd`; the stale manifest remains a deliberate
+fail-closed handoff rather than an OXE-1.2 defect.
+
 ## Acceptance Conditions
 
 1. RED fails because context enrichment and the two lifecycle hooks are absent,
@@ -338,14 +346,15 @@ implementations for compile-time drift checking.
    revision; malformed closed inputs fail before registry lookup.
 8. No-op observations match the pre-hook baseline, including runtime-info
    ordering.
-9. Focused tests, unchanged upstream tests, both audits, and exact `make all`
-   pass before manifest promotion.
+9. Focused tests, unchanged upstream tests, baseline audit, and exact `make all`
+   pass in OXE-1.2; budget audit rejects the stale manifest until OXE-1.4 applies
+   the independently reviewed replacements atomically.
 10. Independent Spec and Standards review clears the exact GREEN patch before
    either manifest entry becomes required.
 
 ## Next Action
 
-Commit and independently review the exact GREEN candidate. If Spec and
-Standards both clear it, record the reviewed 24/15-line fingerprints and make
-both owned paths required in the later manifest-owning checkpoint; do not edit
-`UPSTREAM_PATCH_BUDGET.yml` during this implementation checkpoint.
+Begin the `OXE-1.3` context/differential RED design from cleared checkpoint
+`943fbdd`. Carry the reviewed 24/15-line measurements forward as evidence for
+the later OXE-1.4 manifest-owning checkpoint; do not activate either path
+piecemeal.

@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a host cleared; OXE-1.2 GREEN review rework in progress
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 RED design next
 
 Date: 2026-07-29
 
@@ -719,4 +719,8 @@ retry-path regressions, and compiler-checks the narrowed test adapters against
 their behaviors. Spec review additionally required explicit contract wording
 and rejected a test below the real retry-pop seam; the replacement test enters
 through the production retry-token handler with a populated retry entry.
-Re-review owns the next gate; manifest promotion remains deferred.
+Final Spec and Standards re-review found no actionable issue at `943fbdd`.
+OXE-1.2 is cleared with exact 24/15-line measurements; manifest promotion
+remains deferred to OXE-1.4 so all three registered kernel patches become
+authority atomically. OXE-1.3 context/differential RED design owns the next
+gate.
