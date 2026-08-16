@@ -694,7 +694,7 @@ test against the pinned OpenAI behavior.
 Purpose: record and summarize events for operators.
 
 ```elixir
-@callback record(DeliveryEvent.t()) :: :ok | {:error, ObserverFailure.t()}
+@callback record(ObserverEnvelope.t()) :: :ok | {:error, ObserverFailure.t()}
 ```
 
 The observer has no decision return value. The facade contains observer errors
@@ -749,6 +749,12 @@ Every event uses a versioned envelope:
   "evidence_refs": []
 }
 ```
+
+Envelope correlation fields are always present. A source writes `null` when it
+cannot prove a correlation identity from its immutable authority; it never
+guesses an attempt, MIU, transition, or decision id. The first AppServer source
+can prove issue, run/thread, and turn identity. Later controller-owned sources
+fill the remaining fields.
 
 Lifecycle stages emit paired `stage.started` and `stage.completed` or
 `stage.failed` events. This makes time spent in admission, workspace setup,
@@ -1340,6 +1346,13 @@ four public interfaces, and neutral no-op adapters. It also makes the neutral
 without duplicating them inside adapters. The top-level OXE-1.3 MIU uses two
 internal reviewed subcheckpoints—authorization, then bounded observation—so
 that split does not change the four-MIU decomposition.
+
+The authorization-only OXE-1.3 GREEN candidate and the subsequent bounded
+observer RED checkpoint are recorded in
+`openai_extension_oxe13_turn_authorization.md` and
+`openai_extension_oxe13a_bounded_observer.md`. The observer design uses a lazy
+transient dispatcher under the existing task supervisor and a bounded ETS
+ledger, avoiding an unregistered application-startup patch.
 
 ## Approval Gate
 

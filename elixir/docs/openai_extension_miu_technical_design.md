@@ -1,6 +1,6 @@
 # OpenAI Extension Migration Technical MIU Design
 
-Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 GREEN gate passed, independent review pending
+Status: OXE-0.1/0.1a cleared; OXE-0.2 audit implementation cleared; OXE-1.1/1.1a/1.2 host cleared; OXE-1.3 GREEN gate passed, independent review pending; OXE-1.3a observer RED recorded
 
 Date: 2026-07-29
 
@@ -742,5 +742,17 @@ The exact `codex/app_server.ex` patch measures 61 changed lines with fingerprint
 `8a2c7cbe484e7123a136133f3dbec09f88c586191195e61a4a905963369776e`;
 the provisional three-file aggregate is 100 lines. The manifest remains
 unchanged and rejects the three replacement measurements as designed.
-Independent GREEN review is the remaining authorization gate before OXE-1.3a
-observer RED design begins.
+Independent GREEN review remains a separate authorization gate. The OXE-1.3a
+observer RED design is now recorded, but observer GREEN cannot begin until both
+that review and the bounded observer RED review are dispositioned.
+
+The internal OXE-1.3a observer trace is recorded in
+[`openai_extension_oxe13a_bounded_observer.md`](openai_extension_oxe13a_bounded_observer.md).
+It fixes the closed versioned envelope, explicit nullable source correlations,
+64-event restart-surviving ingress ledger, isolated 100ms adapter tasks,
+sanitized loss ranges, and bounded drain semantics without adding a startup or
+second pinned-kernel path. Its focused checkpoint records twelve tests with eleven
+expected semantic failures and one passing no-op AppServer differential. The
+unchanged AppServer/host/registry/authorization baseline passes 99 tests;
+formatter, specs, strict Credo, and diff checking are clean. Bounded RED review
+and the separate OXE-1.3 GREEN review are required before observer GREEN.

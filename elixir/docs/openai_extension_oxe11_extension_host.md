@@ -1,6 +1,6 @@
 # OXE-1.1 Slice 1 Extension Host Technical Trace
 
-Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 GREEN gate passed, independent review pending; observer split to internal OXE-1.3a
+Status: OXE-1.1/1.1a/1.2 cleared; OXE-1.3 GREEN gate passed, independent review pending; OXE-1.3a observer RED recorded, review pending
 
 Date: 2026-08-13
 
@@ -139,7 +139,7 @@ admission and delivery surface is:
         app_server_authorization_facts(), TurnContext.t(), function()
       ) :: AppServerAuthorization.result()
 
-@spec record(DeliveryEvent.t()) :: :ok
+@spec record(ObserverEnvelope.t()) :: :ok
 ```
 
 The facade hides protocol-to-`CommandIntent` parsing, adapter lookup,
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.Extensions.CommandAuthorization do
 end
 
 defmodule SymphonyElixir.Extensions.DeliveryObserver do
-  @callback record(DeliveryEvent.t()) :: :ok | {:error, ObserverFailure.t()}
+  @callback record(ObserverEnvelope.t()) :: :ok | {:error, ObserverFailure.t()}
 end
 ```
 
@@ -591,4 +591,12 @@ fingerprint
 `8a2c7cbe484e7123a136133f3dbec09f88c586191195e61a4a905963369776e`.
 The manifest remains deliberately stale and fail-closed pending atomic OXE-1.4
 promotion. Independent GREEN review is the remaining OXE-1.3 authorization
-gate before OXE-1.3a observer RED design begins.
+gate before OXE-1.3a observer GREEN can begin.
+
+The OXE-1.3a design and RED checkpoint are now recorded in
+[`openai_extension_oxe13a_bounded_observer.md`](openai_extension_oxe13a_bounded_observer.md).
+Its twelve focused tests produce eleven expected semantic failures and one passing
+no-op AppServer differential; the 99-test AppServer/host/registry/authorization
+baseline remains green. The design adds no startup patch: active observers use
+a lazy transient dispatcher under the existing task supervisor and a bounded
+restart-surviving ETS ledger. Bounded review is required before GREEN.

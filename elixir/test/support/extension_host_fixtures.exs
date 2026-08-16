@@ -326,3 +326,94 @@ defmodule SymphonyElixir.ExtensionTurnFixtures.CommandAuthorization do
     end
   end
 end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures do
+  @moduledoc false
+
+  @recipient :oxe13a_extension_observer_fixture_recipient
+
+  def notify(message) do
+    if recipient = Process.whereis(@recipient), do: send(recipient, message)
+    :ok
+  end
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.Observer do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  @impl true
+  def record(envelope) do
+    SymphonyElixir.ExtensionObserverFixtures.notify({:oxe13a_observer, envelope})
+  end
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.HangingObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  @impl true
+  def record(envelope) do
+    SymphonyElixir.ExtensionObserverFixtures.notify({:oxe13a_observer_hanging, self(), envelope})
+
+    receive do
+      :oxe13a_continue -> :ok
+    end
+  end
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.ErrorObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  alias SymphonyElixir.Extensions.ObserverFailure
+
+  @impl true
+  def record(_envelope) do
+    {:error,
+     %ObserverFailure{
+       code: :fixture_observer_failed,
+       interface: :delivery_observer,
+       reason: %{secret: "observer-error-reason-do-not-log"}
+     }}
+  end
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.MalformedObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  @impl true
+  def record(_envelope), do: {:unexpected, "observer-malformed-do-not-log"}
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.ThrowingObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  @impl true
+  def record(_envelope), do: throw(:"observer-throw-reason-do-not-log")
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.ExitingObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  @impl true
+  def record(_envelope), do: exit(:"observer-exit-reason-do-not-log")
+end
+
+defmodule SymphonyElixir.ExtensionObserverFixtures.KillingObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  @impl true
+  def record(_envelope), do: exit(:kill)
+end

@@ -38,7 +38,14 @@ if config_env() == :test do
       observers: %{
         "noop" => SymphonyElixir.Extensions.Noop.DeliveryObserver,
         "fixture" => SymphonyElixir.ExtensionHostFixtures.DeliveryObserver,
-        "raising" => SymphonyElixir.ExtensionHostFixtures.RaisingObserver
+        "raising" => SymphonyElixir.ExtensionHostFixtures.RaisingObserver,
+        "observer_fixture" => SymphonyElixir.ExtensionObserverFixtures.Observer,
+        "observer_hanging" => SymphonyElixir.ExtensionObserverFixtures.HangingObserver,
+        "observer_error" => SymphonyElixir.ExtensionObserverFixtures.ErrorObserver,
+        "observer_malformed" => SymphonyElixir.ExtensionObserverFixtures.MalformedObserver,
+        "observer_throwing" => SymphonyElixir.ExtensionObserverFixtures.ThrowingObserver,
+        "observer_exiting" => SymphonyElixir.ExtensionObserverFixtures.ExitingObserver,
+        "observer_killing" => SymphonyElixir.ExtensionObserverFixtures.KillingObserver
       }
     }
 end
