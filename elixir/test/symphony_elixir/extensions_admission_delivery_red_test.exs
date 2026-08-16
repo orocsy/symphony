@@ -194,7 +194,12 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
     test_root = unique_root(id)
     workspace_root = Path.join(test_root, "workspaces")
     initial_issue = issue(id, identifier)
-    refreshed_issue = %{initial_issue | title: "refreshed secret title do-not-log"}
+
+    refreshed_issue = %{
+      initial_issue
+      | title: "refreshed secret title do-not-log",
+        description: "refreshed secret description do-not-log"
+    }
 
     configure_extensions!(
       "lifecycle_fixture",
@@ -240,11 +245,25 @@ defmodule SymphonyElixir.ExtensionsAdmissionDeliveryRedTest do
   end
 
   defp assert_admission_log("error", log, issue) do
-    assert log =~ "extension admission failed"
-    assert log =~ "code=fixture_admission_failed"
-    assert log =~ "interface=dispatch_admission"
+    matching_lines =
+      log
+      |> String.split("\n", trim: true)
+      |> Enum.filter(&String.contains?(&1, "extension admission failed"))
+
+    assert [line] = matching_lines
+
+    assert Regex.match?(
+             ~r/extension admission failed code=fixture_admission_failed interface=dispatch_admission$/,
+             line
+           )
+
     refute log =~ issue.title
+    refute log =~ issue.description
     refute log =~ "options-do-not-log"
+    refute log =~ "adapter-reason-do-not-log"
+    refute log =~ "ExtensionFailure"
+    refute log =~ "ExtensionLifecycleFixtures"
+    refute log =~ "registry_revision"
   end
 
   defp assert_admission_log("reject", _log, _issue), do: :ok

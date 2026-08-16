@@ -100,7 +100,7 @@ defmodule SymphonyElixir.ExtensionLifecycleFixtures.DispatchAdmission do
          %ExtensionFailure{
            code: :fixture_admission_failed,
            interface: :dispatch_admission,
-           reason: :fixture_requested
+           reason: %{secret: "adapter-reason-do-not-log"}
          }}
 
       _other ->
