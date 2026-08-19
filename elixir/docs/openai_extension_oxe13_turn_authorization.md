@@ -526,7 +526,7 @@ require the independent GREEN Spec/Standards pass named by acceptance condition
 
 Obtain independent GREEN Spec/Standards review of the authorization-only
 candidate and its measured 61-line AppServer seam. In parallel, disposition the
-twelve-test OXE-1.3a RED contract recorded in
+thirteen-test OXE-1.3a RED contract recorded in
 `openai_extension_oxe13a_bounded_observer.md`; do not begin observer GREEN until
 both reviews are explicit. Keep the manifest unchanged until OXE-1.4 promotes
 all three reviewed kernel patches atomically.

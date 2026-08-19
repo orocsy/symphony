@@ -84,7 +84,7 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
           "codex.notification"
         )
 
-      assert fixed_log_bodies(log) == [
+      assert delivery_failure_log_bodies(log) == [
                "telemetry.delivery_failed first_event_id=#{dropped_event_id} last_event_id=#{dropped_event_id} class=dispatcher_unavailable"
              ]
 
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
         assert :ok == Extensions.record(malformed)
       end)
 
-    assert fixed_log_bodies(log) == ["telemetry.delivery_failed class=invalid_envelope"]
+    assert delivery_failure_log_bodies(log) == ["telemetry.delivery_failed class=invalid_envelope"]
     refute_receive {:oxe13a_observer, _envelope}
     refute log =~ "malformed-observer-envelope-do-not-log"
     refute Process.whereis(@dispatcher)
@@ -260,7 +260,16 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
       end)
 
     assert_receive {:DOWN, ^hanging_monitor, :process, ^hanging_pid, _reason}
-    assert log =~ "class=timeout"
+
+    assert observer_failure_log_bodies(log) == [
+             observer_failure_line(
+               envelope.event_id,
+               SymphonyElixir.ExtensionObserverFixtures.HangingObserver,
+               context.registry_revision,
+               :timeout
+             )
+           ]
+
     refute log =~ inspect(message)
   end
 
@@ -318,6 +327,7 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
   test "observer return and process failures are classified while fan-out continues" do
     observers = [
       "observer_error",
+      "observer_wrong_interface",
       "observer_malformed",
       "raising",
       "observer_throwing",
@@ -335,29 +345,37 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
     observed = observed_subscriber(context, test_pid)
     message = observer_message(:notification, 1)
 
-    log =
-      capture_log(fn ->
+    {envelope, log} =
+      with_log(fn ->
         assert :ok == observed.(message)
         assert_receive {:oxe13a_subscriber, ^message}
         assert_receive {:oxe13a_observer, envelope}
         assert :ok == drain_dispatcher!(1_000)
         assert String.starts_with?(envelope.event_id, "evt_")
+        envelope
       end)
 
-    for class <- [
-          "adapter_error",
-          "invalid_adapter_return",
-          "raise",
-          "throw",
-          "exit",
-          "killed"
-        ] do
-      assert log =~ "class=#{class}"
-    end
+    expected_failure_lines =
+      [
+        {SymphonyElixir.ExtensionObserverFixtures.ErrorObserver, :adapter_error},
+        {SymphonyElixir.ExtensionObserverFixtures.WrongInterfaceObserver, :invalid_adapter_return},
+        {SymphonyElixir.ExtensionObserverFixtures.MalformedObserver, :invalid_adapter_return},
+        {SymphonyElixir.ExtensionHostFixtures.RaisingObserver, :raise},
+        {SymphonyElixir.ExtensionObserverFixtures.ThrowingObserver, :throw},
+        {SymphonyElixir.ExtensionObserverFixtures.ExitingObserver, :exit},
+        {SymphonyElixir.ExtensionObserverFixtures.KillingObserver, :killed}
+      ]
+      |> Enum.map(fn {adapter, class} ->
+        observer_failure_line(envelope.event_id, adapter, context.registry_revision, class)
+      end)
+      |> Enum.sort()
+
+    assert Enum.sort(observer_failure_log_bodies(log)) == expected_failure_lines
 
     for secret <- [
           "observer-error-reason-do-not-log",
           "observer-malformed-do-not-log",
+          "observer-wrong-interface-do-not-log",
           "observer token=do-not-log",
           "observer-throw-reason-do-not-log",
           "observer-exit-reason-do-not-log",
@@ -463,6 +481,35 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
     assert_receive {:oxe13a_observer, second_envelope}
     refute first_envelope.event_id == second_envelope.event_id
     assert :ok == drain_dispatcher!(1_000)
+  end
+
+  test "runtime supervisor shutdown logs the accepted range before ledger loss" do
+    context =
+      "shutdown"
+      |> observer_issue("OXE-OBSERVER-SHUTDOWN")
+      |> turn_context!(["observer_hanging"])
+
+    observed = observed_subscriber(context, self())
+    assert :ok == observed.(observer_message(:notification, 1))
+    assert_receive {:oxe13a_observer_hanging, _hanging_pid, envelope}
+
+    on_exit(&restart_default_runtime!/0)
+
+    log =
+      capture_log(fn ->
+        assert :ok =
+                 Supervisor.terminate_child(
+                   SymphonyElixir.Supervisor,
+                   SymphonyElixir.AgentRuntimeSupervisor
+                 )
+      end)
+
+    assert delivery_failure_log_bodies(log) == [
+             "telemetry.delivery_failed first_event_id=#{envelope.event_id} last_event_id=#{envelope.event_id} class=shutdown"
+           ]
+
+    refute Process.whereis(@dispatcher)
+    restart_default_runtime!()
   end
 
   defp observed_subscriber(context, test_pid) do
@@ -633,15 +680,34 @@ defmodule SymphonyElixir.ExtensionsObserverDispatchRedTest do
     |> List.last()
   end
 
-  defp fixed_log_bodies(log) do
+  defp delivery_failure_log_bodies(log), do: log_bodies(log, "telemetry.delivery_failed")
+  defp observer_failure_log_bodies(log), do: log_bodies(log, "telemetry.observer_failed")
+
+  defp log_bodies(log, marker) do
     log
     |> String.split("\n", trim: true)
-    |> Enum.filter(&String.contains?(&1, "telemetry.delivery_failed"))
+    |> Enum.filter(&String.contains?(&1, marker))
     |> Enum.map(fn line ->
       line
       |> String.split("[error] ", parts: 2)
       |> List.last()
     end)
+  end
+
+  defp observer_failure_line(event_id, adapter, registry_revision, class) do
+    "telemetry.observer_failed event_id=#{event_id} interface=delivery_observer " <>
+      "adapter=#{inspect(adapter)} registry_revision=#{registry_revision} class=#{class}"
+  end
+
+  defp restart_default_runtime! do
+    case Supervisor.restart_child(
+           SymphonyElixir.Supervisor,
+           SymphonyElixir.AgentRuntimeSupervisor
+         ) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, :running} -> :ok
+    end
   end
 
   defp drain_dispatcher!(timeout_ms), do: call(:drain_observers, [timeout_ms])

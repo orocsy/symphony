@@ -391,6 +391,24 @@ defmodule SymphonyElixir.ExtensionObserverFixtures.MalformedObserver do
   def record(_envelope), do: {:unexpected, "observer-malformed-do-not-log"}
 end
 
+defmodule SymphonyElixir.ExtensionObserverFixtures.WrongInterfaceObserver do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Extensions.DeliveryObserver
+
+  alias SymphonyElixir.Extensions.ObserverFailure
+
+  @impl true
+  def record(_envelope) do
+    {:error,
+     %ObserverFailure{
+       code: :fixture_wrong_interface,
+       interface: :command_authorization,
+       reason: %{secret: "observer-wrong-interface-do-not-log"}
+     }}
+  end
+end
+
 defmodule SymphonyElixir.ExtensionObserverFixtures.ThrowingObserver do
   @moduledoc false
 

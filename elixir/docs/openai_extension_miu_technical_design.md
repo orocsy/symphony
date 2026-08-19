@@ -751,7 +751,7 @@ The internal OXE-1.3a observer trace is recorded in
 It fixes the closed versioned envelope, explicit nullable source correlations,
 64-event restart-surviving ingress ledger, isolated 100ms adapter tasks,
 sanitized loss ranges, and bounded drain semantics without adding a startup or
-second pinned-kernel path. Its focused checkpoint records twelve tests with eleven
+second pinned-kernel path. Its focused checkpoint records thirteen tests with twelve
 expected semantic failures and one passing no-op AppServer differential. The
 unchanged AppServer/host/registry/authorization baseline passes 99 tests;
 formatter, specs, strict Credo, and diff checking are clean. Bounded RED review

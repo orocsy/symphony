@@ -55,16 +55,26 @@ agent-runner file changes.
 
 The first active `observe_turn/2` call initializes the local queue ledger and
 dispatcher before returning the wrapper. Initialization performs no observer
-callback or external I/O. It runs in an unlinked bootstrap process, serializes
-concurrent first calls only inside that process, and has a fixed 10ms caller
-budget. If task-supervisor startup or the initialization lock does not complete
-inside that budget, the wrapper is returned in loss-signaling mode; the caller
-terminates the bootstrap process and never waits on
-`Task.Supervisor.start_child/3`'s internal infinite call. Each later wrapper
-invocation remains subscriber-neutral and logs the sanitized event-id line
-with `class=dispatcher_unavailable`; it does not retry initialization or start
-a delayed dispatcher. Event submission itself never takes the initialization
-lock.
+callback or external I/O. It runs in an unlinked bootstrap process and has a
+fixed 10ms caller budget. Concurrent first calls use one atomic ETS generation
+row: one bootstrap wins initialization, while the others observe that same
+generation and wait only within their own 10ms budgets. There is no global
+process lock and event submission never enters the initialization path.
+
+Each bootstrap generation has `initializing`, `ready`, or `aborted` state. The
+dispatcher child receives that generation token and must verify it before
+registering its name or accepting ingress. If task-supervisor startup does not
+complete inside the caller budget, the caller atomically marks that generation
+`aborted`, terminates the bootstrap, and returns a loss-signaling wrapper. A
+`Task.Supervisor.start_child/3` request already queued behind a suspended
+supervisor can therefore start only a child that observes `aborted` and exits
+normally without registering. This explicit cancellation receipt is required
+because killing the caller does not retract a queued `GenServer.call`.
+
+Each later invocation of that wrapper remains subscriber-neutral and logs the
+sanitized event-id line with `class=dispatcher_unavailable`; the wrapper does
+not retry initialization. A later `observe_turn/2` call may claim a new
+generation after the prior aborted child has been reaped.
 
 ## Closed Public Surface
 
@@ -215,7 +225,8 @@ Each callback has a 100ms monotonic deadline. Return classes are:
 - `:ok` — delivered;
 - `{:error, %ObserverFailure{interface: :delivery_observer}}` —
   `adapter_error`;
-- any other return — `invalid_adapter_return`;
+- any other return, including an `ObserverFailure` for another interface —
+  `invalid_adapter_return`;
 - raise, throw, ordinary exit, kill, or deadline — `raise`, `throw`, `exit`,
   `killed`, or `timeout`.
 
@@ -270,13 +281,18 @@ The executable RED checkpoint must prove:
    killed at the fixed deadline without sleeps;
 7. 64 accepted events bound memory; later events are dropped with exact
    sanitized event-id evidence while every subscriber call still occurs;
-8. error, malformed, raise, throw, exit, kill, and timeout are individually
-   contained and later queue work continues;
+8. typed error, wrong-interface error, malformed return, raise, throw, exit,
+   kill, and timeout are individually contained with the exact event,
+   adapter, registry revision, and class evidence while later queue work
+   continues;
 9. killing the dispatcher mid-event restarts it and replays the same accepted
    event id from the ETS ledger;
 10. successful drain and deadline drain have deterministic queue/task/process
    disposition and reject later ingress without affecting the subscriber;
-11. baseline audit stays green, the stale budget rejects the unpromoted
+11. terminating the owning runtime supervisor logs the exact accepted event-id
+   range as `shutdown` before the ledger disappears and permits a clean runtime
+   restart;
+12. baseline audit stays green, the stale budget rejects the unpromoted
    AppServer fingerprint, and exact `make all` becomes GREEN only after this RED
    contract is implemented.
 
@@ -317,7 +333,7 @@ The exact focused command is:
 mix test test/symphony_elixir/extensions_observer_dispatch_red_test.exs --seed 0
 ```
 
-It records twelve tests: eleven expected semantic failures and one passing no-op
+It records thirteen tests: twelve expected semantic failures and one passing no-op
 AppServer baseline. The failures localize to the absent active subscriber hook,
 closed envelope, bounded ingress/fan-out, dispatcher replay, and drain lifecycle.
 The no-op baseline completes the same turn and emits exactly
@@ -329,8 +345,20 @@ diff checking are clean. The RED checkpoint changes test fixtures, test-only
 catalog entries, and documentation only; no production module, pinned kernel
 file, or manifest authority changes.
 
+## Local Adversarial Rework
+
+A local audit after `2694fdc` found that the first RED matrix checked observer
+failure classes only as substrings and did not prove the documented runtime
+shutdown path. The rework requires exact event/adapter/revision/class lines,
+classifies a wrong-interface `ObserverFailure` as an invalid adapter return,
+and terminates/restarts the real runtime supervisor around one accepted event.
+It also makes the initialization generation cancellation receipt explicit so a
+queued task-supervisor call cannot create a dispatcher after the 10ms caller
+deadline. This local audit is evidence hardening, not the independent bounded
+Spec/Standards clearance required below.
+
 ## Next Action
 
-Obtain bounded Spec/Standards review of the twelve-test RED contract and this
+Obtain bounded Spec/Standards review of the thirteen-test RED contract and this
 design. Do not implement the dispatcher or AppServer hook until that review and
 the separate OXE-1.3 authorization GREEN review are dispositioned explicitly.

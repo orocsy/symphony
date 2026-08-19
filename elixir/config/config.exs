@@ -42,6 +42,7 @@ if config_env() == :test do
         "observer_fixture" => SymphonyElixir.ExtensionObserverFixtures.Observer,
         "observer_hanging" => SymphonyElixir.ExtensionObserverFixtures.HangingObserver,
         "observer_error" => SymphonyElixir.ExtensionObserverFixtures.ErrorObserver,
+        "observer_wrong_interface" => SymphonyElixir.ExtensionObserverFixtures.WrongInterfaceObserver,
         "observer_malformed" => SymphonyElixir.ExtensionObserverFixtures.MalformedObserver,
         "observer_throwing" => SymphonyElixir.ExtensionObserverFixtures.ThrowingObserver,
         "observer_exiting" => SymphonyElixir.ExtensionObserverFixtures.ExitingObserver,

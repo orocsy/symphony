@@ -595,7 +595,7 @@ gate before OXE-1.3a observer GREEN can begin.
 
 The OXE-1.3a design and RED checkpoint are now recorded in
 [`openai_extension_oxe13a_bounded_observer.md`](openai_extension_oxe13a_bounded_observer.md).
-Its twelve focused tests produce eleven expected semantic failures and one passing
+Its thirteen focused tests produce twelve expected semantic failures and one passing
 no-op AppServer differential; the 99-test AppServer/host/registry/authorization
 baseline remains green. The design adds no startup patch: active observers use
 a lazy transient dispatcher under the existing task supervisor and a bounded
