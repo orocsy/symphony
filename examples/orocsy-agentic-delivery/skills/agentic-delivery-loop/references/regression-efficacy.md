@@ -22,6 +22,10 @@ risk; do not add mutation infrastructure to ordinary prose or low-impact edits.
   Targeted injections do not prove exhaustive coverage, and reruns do not add
   distinct test cases.
 
+At database or language boundaries, check the decoded types used by control
+logic as well as equal values. A real SQL expression can return a decimal
+where a fixture supplies an integer; exercise the resulting retry writeback.
+
 ## Exercise partial commits across boundaries
 
 For a multi-write transaction, inject a failure after earlier writes have run,
