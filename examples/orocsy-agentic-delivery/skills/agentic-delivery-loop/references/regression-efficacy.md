@@ -30,6 +30,10 @@ request can succeed after recovery. For a cross-service handoff, first prove
 the remote side committed, then change or revoke local authority before the
 reply is accepted. A network error before the handoff does not test that race.
 
+For authorization refreshes, start from a task whose actions were already
+narrowed. Verify that renewal or a restored connection does not silently grant
+those actions again; only a separate authorized change may widen the task.
+
 ## Exercise execution ownership
 
 When a worker can be retried or delivered more than once, test concurrent
