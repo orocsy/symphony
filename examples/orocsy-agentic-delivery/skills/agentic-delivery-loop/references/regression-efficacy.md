@@ -64,6 +64,11 @@ loading before the call and slow error responses as well as normal response
 timeouts. Reject non-regular credential files without blocking, and verify
 that timeout cleanup reaps only the invocation's own process.
 
+For prompt rejection or avoiding response-body reads, hold the body behind an
+explicit barrier and assert the result before releasing it. A whole-process
+speed threshold also measures cold imports and runner load, so it cannot isolate
+that behavior.
+
 ## Check bounded queues against history
 
 For a queue or paged scanner, include more completed history than one batch,
