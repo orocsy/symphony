@@ -47,6 +47,19 @@ export. Temporary or partial files from a stale attempt must not block or be
 mistaken for a replacement attempt's complete output. Use the actual database
 or lease implementation for its concurrency guarantees.
 
+If queue claims and execution locks have different lifetimes, state which one
+controls execution and which one controls acknowledgments. A prior execution
+can finish while a replacement waits for remote authorization. Recheck the
+validated durable outcome before exhausting the retry budget; test lost
+acknowledgments after both successful and failed commits.
+
+## Check the whole deadline
+
+A provider timeout does not bound setup or hidden SDK reads. Test credential
+loading before the call and slow error responses as well as normal response
+timeouts. Reject non-regular credential files without blocking, and verify
+that timeout cleanup reaps only the invocation's own process.
+
 ## Check bounded queues against history
 
 For a queue or paged scanner, include more completed history than one batch,
