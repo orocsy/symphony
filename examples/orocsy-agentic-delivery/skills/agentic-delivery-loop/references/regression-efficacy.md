@@ -22,6 +22,14 @@ risk; do not add mutation infrastructure to ordinary prose or low-impact edits.
   Targeted injections do not prove exhaustive coverage, and reruns do not add
   distinct test cases.
 
+## Exercise partial commits across boundaries
+
+For a multi-write transaction, inject a failure after earlier writes have run,
+not only at the first write. Check that no partial state remains and the same
+request can succeed after recovery. For a cross-service handoff, first prove
+the remote side committed, then change or revoke local authority before the
+reply is accepted. A network error before the handoff does not test that race.
+
 ## Exercise execution ownership
 
 When a worker can be retried or delivered more than once, test concurrent
