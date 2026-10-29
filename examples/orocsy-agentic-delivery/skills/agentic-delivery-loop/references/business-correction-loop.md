@@ -36,6 +36,7 @@ that are not listed.
 | OTP/magic links | Are attempts atomic? Is TTL preserved? Are responses enumeration-safe in body and timing? |
 | External providers | Could forged headers, IP rotation, or high concurrency exhaust Twilio/email/Redis/DB? |
 | Booking consistency | Does the operation use a distributed lock plus transactional revalidation? |
+| Execution ownership | Do result writes and failure transitions both require the current owner? Can duplicate or stale workers fail a valid execution or publish partial output? |
 | Storage | Are object storage and DB writes compensated if one side fails? |
 | Payments/money | Is the financial outcome computed inside the authoritative transaction? |
 | Browser state | Is any `blob:`, `File`, localStorage, or client-only state being persisted or trusted? |

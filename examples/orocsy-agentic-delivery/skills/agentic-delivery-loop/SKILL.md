@@ -19,7 +19,9 @@ losing business correctness.
 3. Name the business invariants before code.
 4. Write or update the Technical MIU trace.
 5. Implement one MIU at a time with failing tests first when behavior changes.
-6. Run focused validation immediately after each MIU.
+6. Run focused validation immediately after each MIU. For important deterministic
+   guards, prove the test reaches and detects the broken guard; read
+   `references/regression-efficacy.md`.
 7. Run the business correction pass before final validation.
 8. Run browser verification for UI or customer-visible flow changes.
 9. Update handoff state: branch, PR, commit, tests, blockers, next action.
@@ -51,6 +53,18 @@ not a vague milestone and not a status update.
 Every non-trivial MIU must include concrete code context, data shapes, tradeoffs,
 technical constraints, and tests. Read `references/miu-trace.md` before writing
 or reviewing MIUs.
+
+## Learn and publish
+
+When work exposes a reusable failure mode, check the existing guidance and add
+only the smallest rule that would have prevented it. Keep project-specific
+facts and raw evidence in that project. Do not add heavyweight testing for a
+narrow prose-only workflow correction.
+
+When commits and pushes are authorized, commit and push a completed scoped
+increment promptly, recording its commit and remote branch. Do not leave
+accepted changes only in a working tree. Preserve explicit design-only,
+no-commit and no-push instructions; stage only work owned by the task.
 
 ## References
 
