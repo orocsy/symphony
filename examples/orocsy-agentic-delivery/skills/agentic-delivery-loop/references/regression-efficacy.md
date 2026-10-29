@@ -47,6 +47,13 @@ export. Temporary or partial files from a stale attempt must not block or be
 mistaken for a replacement attempt's complete output. Use the actual database
 or lease implementation for its concurrency guarantees.
 
+## Check bounded queues against history
+
+For a queue or paged scanner, include more completed history than one batch,
+a late arrival behind the cursor and a rejected item. Verify that pending work
+still progresses, and that completed history does not consume the active batch.
+A small empty-queue success case cannot establish those properties.
+
 ## Separate setup, behavior and cleanup
 
 A failed environment bootstrap means the behavior tests did not run. A cleanup
