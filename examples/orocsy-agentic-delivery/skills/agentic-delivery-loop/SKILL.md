@@ -50,6 +50,12 @@ An MIU is a **Minimum Implementable Unit**: one behavior change that can be
 understood, implemented, tested, reviewed, and handed off independently. It is
 not a vague milestone and not a status update.
 
+Keep the user's agreed module IDs stable in progress reports. Internal MIUs
+are implementation steps within a module, not new user-facing phases. Report
+what the original module now does and what remains before calling it complete.
+When asked about elapsed time, separate measured runs from untracked or parallel
+work; do not present test counts or added lines as a time breakdown.
+
 Every non-trivial MIU must include concrete code context, data shapes, tradeoffs,
 technical constraints, and tests. Read `references/miu-trace.md` before writing
 or reviewing MIUs.
